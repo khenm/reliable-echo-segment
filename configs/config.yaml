@@ -1,19 +1,24 @@
-experiment_name: "baseline_experiment"
-seed: 42
-device: "cuda"
-
-# avoid hardcoding paths in the code
 data:
-  path: "data/processed"
-  batch_size: 32
-  num_workers: 4
-
-model:
-  name: "ResNet18"
-  input_channels: 3
-  num_classes: 10
+  root_dir: "/Users/khenm/Materials/Datasets/CAMUS_public"
+  nifti_dir: "/Users/khenm/Materials/Datasets/CAMUS_public/database_nifti"
+  split_dir: "/Users/khenm/Materials/Datasets/CAMUS_public/database_split"
+  img_size: [256, 256]
+  num_classes: 4
 
 training:
-  epochs: 50
-  learning_rate: 0.001
-  save_dir: "checkpoints/"
+  epochs: 100
+  batch_size_train: 8
+  batch_size_val: 8
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  patience: 10
+  seed: 2024
+  ckpt_save_path: "best_camus.pt"
+  test_metrics_csv: "camus_test_metrics.csv"
+
+model:
+  spatial_dims: 2
+  in_channels: 1
+  channels: [32, 64, 128, 256, 512]
+  strides: [2, 2, 2, 2]
+  num_res_units: 2

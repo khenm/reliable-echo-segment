@@ -1,0 +1,15 @@
+numpy>=1.26.4
+torch>=2.3.0
+torchvision
+torchaudio
+monai[all]>=1.4.0
+nibabel
+scikit-image
+einops
+tqdm
+tensorboard
+matplotlib
+reportlab
+pandas
+pyyaml
+scikit-learn

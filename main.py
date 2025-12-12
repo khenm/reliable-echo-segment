@@ -1,36 +1,37 @@
-import argparse
 import yaml
-import torch
-from src.utils.util_ import seed_everything
-from src.dataset import get_loaders
-from src.models.base_model import MyModel
+import argparse
+from src.utils.util_ import seed_everything, get_device
+from src.dataset import get_dataloaders
+from src.models.model import get_model
 from src.trainer import Trainer
 
-def load_config(config_path):
-    with open(config_path, 'r') as file:
-        return yaml.safe_load(file)
+def main(config_path):
+    with open(config_path, 'r') as f:
+        cfg = yaml.safe_load(f)
 
-def main(args):
-    # 1. Load Config
-    cfg = load_config(args.config)
-    print(f"Starting experiment: {cfg['experiment_name']}")
+    seed_everything(cfg['training']['seed'])
+    device = get_device()
+    print(f"Using device: {device}")
 
-    # 2. Reproducibility
-    seed_everything(cfg['seed'])
+    # Data
+    print("Initializing DataLoaders...")
+    loaders = get_dataloaders(cfg)
 
-    # 3. Data
-    train_loader, val_loader = get_loaders(cfg['data'])
+    # Model
+    print("Initializing Model...")
+    model = get_model(cfg, device)
+    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    # 4. Model
-    device = torch.device(cfg['device'] if torch.cuda.is_available() else "cpu")
-    model = MyModel(cfg['model']).to(device)
-
-    # 5. Training
-    trainer = Trainer(model, train_loader, val_loader, cfg['training'], device)
+    # Training
+    trainer = Trainer(model, loaders, cfg, device)
     trainer.train()
+
+    # Evaluation
+    print("Starting Evaluation...")
+    trainer.evaluate_test()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='configs/config.yaml', help='Path to config file')
+    parser.add_argument("--config", type=str, default="configs/config.yaml")
     args = parser.parse_args()
-    main(args)
+    main(args.config)

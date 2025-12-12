@@ -1,46 +1,146 @@
+import time
 import torch
-import torch.nn as nn
-import torch.optim as optim
-import os
+import torch.nn.functional as F
+import numpy as np
+import pandas as pd
+from monai.losses import DiceCELoss
+from monai.metrics import DiceMetric, HausdorffDistanceMetric
+from torch.cuda.amp import autocast, GradScaler
+from src.utils.logging import get_logger
+
+logger = get_logger()
 
 class Trainer:
-    def __init__(self, model, train_loader, val_loader, train_config, device):
+    def __init__(self, model, loaders, cfg, device):
         self.model = model
-        self.train_loader = train_loader
-        self.val_loader = val_loader
-        self.cfg = train_config
+        self.ld_tr, self.ld_va, self.ld_ts = loaders
+        self.cfg = cfg
         self.device = device
+        self.num_classes = cfg['data']['num_classes']
+        self.ckpt_path = cfg['training']['ckpt_save_path']
         
-        self.criterion = nn.CrossEntropyLoss()
-        self.optimizer = optim.Adam(model.parameters(), lr=self.cfg['learning_rate'])
-
-    def train_epoch(self):
-        self.model.train()
-        total_loss = 0
-        for x, y in self.train_loader:
-            x, y = x.to(self.device), y.to(self.device)
-            
-            self.optimizer.zero_grad()
-            output = self.model(x)
-            loss = self.criterion(output, y)
-            loss.backward()
-            self.optimizer.step()
-            
-            total_loss += loss.item()
-        return total_loss / len(self.train_loader)
+        self.loss_fn = DiceCELoss(to_onehot_y=True, softmax=True)
+        self.metr_dice_val = DiceMetric(include_background=False, reduction="mean")
+        self.opt = torch.optim.AdamW(model.parameters(), 
+                                     lr=cfg['training']['lr'], 
+                                     weight_decay=cfg['training']['weight_decay'])
+        self.scaler = GradScaler()
 
     def train(self):
-        for epoch in range(self.cfg['epochs']):
-            train_loss = self.train_epoch()
-            # Add validation logic here
-            print(f"Epoch {epoch+1}/{self.cfg['epochs']} | Loss: {train_loss:.4f}")
-            
-            # Save checkpoint
-            if (epoch + 1) % 10 == 0:
-                self.save_checkpoint(epoch)
+        epochs = self.cfg['training']['epochs']
+        patience = self.cfg['training']['patience']
+        best_metric = 0.0
+        wait = 0
+        stop_ep = epochs
 
-    def save_checkpoint(self, epoch):
-        os.makedirs(self.cfg['save_dir'], exist_ok=True)
-        path = os.path.join(self.cfg['save_dir'], f"checkpoint_ep{epoch}.pth")
-        torch.save(self.model.state_dict(), path)
-        print(f"Model saved to {path}")
+        start_tr = time.time()
+        
+        for ep in range(1, epochs + 1):
+            self.model.train()
+            run_loss = 0.0
+            
+            for batch in self.ld_tr:
+                self.opt.zero_grad(set_to_none=True)
+                imgs = batch["image"].to(self.device)
+                labs = batch["label"].to(self.device)
+                
+                with autocast():
+                    logits = self.model(imgs)
+                    loss = self.loss_fn(logits, labs)
+                
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.opt)
+                self.scaler.update()
+                run_loss += loss.item()
+
+            # Validation
+            val_dice = self._validate()
+            logger.info(f"E{ep:03d} trainLoss={run_loss/len(self.ld_tr):.4f} valDice={val_dice:.4f}")
+
+            if val_dice > best_metric:
+                torch.save(self.model.state_dict(), self.ckpt_path)
+                best_metric = val_dice
+                wait = 0
+            else:
+                wait += 1
+            
+            if wait >= patience:
+                logger.info("⏹ Early stop")
+                stop_ep = ep
+                break
+        
+        train_time = time.time() - start_tr
+        logger.info(f"🏁 Finished at epoch {stop_ep} (best={best_metric:.4f}) in {train_time/60:.1f} min")
+
+    def _validate(self):
+        self.model.eval()
+        self.metr_dice_val.reset()
+        with torch.no_grad(), autocast():
+            for vb in self.ld_va:
+                v_img = vb["image"].to(self.device)
+                v_lab = vb["label"].to(self.device)
+
+                v_logits = self.model(v_img)
+                v_pred_labels = torch.argmax(v_logits, dim=1)
+
+                if v_lab.ndim == 4 and v_lab.shape[1] == 1:
+                    v_gt_labels = v_lab[:, 0].long()
+                else:
+                    raise RuntimeError(f"Unexpected val GT shape {v_lab.shape}")
+
+                v_y_pred = F.one_hot(v_pred_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
+                v_y_true = F.one_hot(v_gt_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
+
+                self.metr_dice_val(v_y_pred, v_y_true)
+        
+        return float(self.metr_dice_val.aggregate().cpu())
+
+    def evaluate_test(self):
+        logger.info(f"Loading best checkpoint from: {self.ckpt_path}")
+        self.model.load_state_dict(torch.load(self.ckpt_path, map_location=self.device))
+        self.model.eval()
+
+        dice_metric = DiceMetric(include_background=False, reduction="none")
+        hd95_metric = HausdorffDistanceMetric(include_background=False, percentile=95, reduction="none")
+
+        records = []
+        
+        with torch.no_grad():
+            for batch in self.ld_ts:
+                imgs = batch["image"].to(self.device)
+                gts = batch["label"].to(self.device)
+                cases, views, phases = batch["case"], batch["view"], batch["phase"]
+
+                logits = self.model(imgs)
+                pred_labels = torch.argmax(logits, dim=1)
+
+                if gts.ndim == 4 and gts.shape[1] == 1:
+                    gt_labels = gts[:, 0].long()
+                else:
+                    gt_labels = gts.long()
+
+                y_pred_all = F.one_hot(pred_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
+                y_true_all = F.one_hot(gt_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
+
+                # Process per item
+                for i in range(len(imgs)):
+                    y_p, y_t = y_pred_all[i:i+1], y_true_all[i:i+1]
+                    
+                    dice_metric.reset()
+                    hd95_metric.reset()
+                    dice_metric(y_p, y_t)
+                    hd95_metric(y_p, y_t)
+                    
+                    dice_vals = dice_metric.aggregate().cpu().numpy().flatten()
+                    hd95_vals = hd95_metric.aggregate().cpu().numpy().flatten()
+
+                    records.append({
+                        "case": cases[i], "view": views[i], "phase": phases[i],
+                        "dice_LV": dice_vals[0], "dice_MYO": dice_vals[1], "dice_LA": dice_vals[2],
+                        "hd95_LV": hd95_vals[0], "hd95_MYO": hd95_vals[1], "hd95_LA": hd95_vals[2],
+                    })
+
+        df = pd.DataFrame(records)
+        df.to_csv(self.cfg['training']['test_metrics_csv'], index=False)
+        logger.info(f"Saved metrics to {self.cfg['training']['test_metrics_csv']}")
+        return df

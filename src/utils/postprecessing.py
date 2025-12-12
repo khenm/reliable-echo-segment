@@ -1,0 +1,86 @@
+import torch
+import pandas as pd
+import numpy as np
+import os
+from torch.cuda.amp import autocast
+from .metric import calculate_ef_from_areas
+
+def generate_clinical_pairs(model, loader, device, save_path):
+    """
+    (Corresponds to Cell 4)
+    Runs inference to calculate LV areas, pairs ED/ES frames, 
+    computes EF, and saves 'camus_EF_area_pairs.csv'.
+    """
+    model.eval()
+    area_rows = []
+    LV_LABEL = 1
+
+    print("Generating clinical EF pairs...")
+    with torch.no_grad(), autocast():
+        for batch in loader:
+            imgs = batch["image"].to(device)
+            gts = batch["label"].to(device)
+            cases, views, phases = batch["case"], batch["view"], batch["phase"]
+
+            logits = model(imgs)
+            preds = torch.argmax(logits, dim=1)
+
+            for i in range(len(imgs)):
+                gt_i = gts[i, 0].cpu().numpy()
+                pr_i = preds[i].cpu().numpy()
+
+                area_gt = float((gt_i == LV_LABEL).sum())
+                area_pred = float((pr_i == LV_LABEL).sum())
+
+                area_rows.append({
+                    "case": cases[i],
+                    "view": views[i],
+                    "phase": phases[i],
+                    "area_gt": area_gt,
+                    "area_pred": area_pred
+                })
+
+    df_areas = pd.DataFrame(area_rows)
+    
+    # Pair ED/ES to calculate EF
+    pairs = []
+    for (case, view), grp in df_areas.groupby(["case", "view"]):
+        phs = set(grp["phase"].tolist())
+        if not {"ED", "ES"}.issubset(phs):
+            continue
+
+        ed = grp[grp["phase"] == "ED"].iloc[0]
+        es = grp[grp["phase"] == "ES"].iloc[0]
+
+        # Calculate EF
+        ef_ref = calculate_ef_from_areas(ed["area_gt"], es["area_gt"])
+        ef_pred = calculate_ef_from_areas(ed["area_pred"], es["area_pred"])
+
+        pairs.append({
+            "case": case, "view": view,
+            "ED_ref": ed["area_gt"], "ES_ref": es["area_gt"], "EF_ref": ef_ref,
+            "ED_pred": ed["area_pred"], "ES_pred": es["area_pred"], "EF_pred": ef_pred,
+            "EF_error": ef_pred - ef_ref,
+            "EF_abs_err": abs(ef_pred - ef_ref)
+        })
+
+    df_pairs = pd.DataFrame(pairs)
+    df_pairs.to_csv(save_path, index=False)
+    print(f"Saved clinical pairs to {save_path}")
+    return df_pairs
+
+def get_representative_cases(df_metrics, n=3):
+    """
+    Identifies Best, Median, and Worst cases based on LV Dice.
+    Returns a dictionary of samples metadata.
+    """
+    # Sort by LV Dice
+    sorted_df = df_metrics.sort_values(by="dice_LV")
+    
+    worst = sorted_df.head(n).to_dict('records')
+    best = sorted_df.tail(n).to_dict('records')
+    
+    mid_idx = len(sorted_df) // 2
+    median = sorted_df.iloc[mid_idx:mid_idx+1].to_dict('records')
+    
+    return {"best": best, "median": median, "worst": worst}
