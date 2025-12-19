@@ -24,7 +24,10 @@ class Trainer:
         self.opt = torch.optim.AdamW(model.parameters(), 
                                      lr=cfg['training']['lr'], 
                                      weight_decay=cfg['training']['weight_decay'])
-        self.scaler = torch.amp.GradScaler(device=device.type, enabled=(device.type == 'cuda'))
+        
+        # Handle device being str or torch.device
+        dev_type = device.type if hasattr(device, 'type') else str(device)
+        self.scaler = torch.amp.GradScaler(device=dev_type, enabled=(dev_type == 'cuda'))
 
     def train(self):
         epochs = self.cfg['training']['epochs']
