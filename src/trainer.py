@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric, HausdorffDistanceMetric
-from torch.cuda.amp import autocast, GradScaler
+from monai.metrics import DiceMetric, HausdorffDistanceMetric
 from src.utils.logging import get_logger
 
 logger = get_logger()
@@ -24,7 +24,7 @@ class Trainer:
         self.opt = torch.optim.AdamW(model.parameters(), 
                                      lr=cfg['training']['lr'], 
                                      weight_decay=cfg['training']['weight_decay'])
-        self.scaler = GradScaler()
+        self.scaler = torch.amp.GradScaler(device=device.type, enabled=(device.type == 'cuda'))
 
     def train(self):
         epochs = self.cfg['training']['epochs']
