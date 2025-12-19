@@ -3,6 +3,7 @@ import argparse
 import os
 import torch
 import pandas as pd
+from datetime import datetime
 from src.utils.util_ import seed_everything, get_device
 from src.dataset import get_dataloaders
 from src.models.model import get_model
@@ -16,7 +17,11 @@ from src.utils.plot import (
     plot_ef_category_roc
 )
 
-logger = get_logger()
+# Setup logging with timestamp
+os.makedirs("logs", exist_ok=True)
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+log_file = os.path.join("logs", f"run_{timestamp}.log")
+logger = get_logger(log_file=log_file)
 
 def run_init(cfg):
     logger.info("Step 1: Initialization")
@@ -27,6 +32,14 @@ def run_init(cfg):
     
     os.makedirs("checkpoints", exist_ok=True)
     os.makedirs("runs", exist_ok=True)
+    
+    # Ensure paths are correct
+    if os.path.basename(cfg['training']['ckpt_save_path']) == cfg['training']['ckpt_save_path']:
+        cfg['training']['ckpt_save_path'] = os.path.join("checkpoints", cfg['training']['ckpt_save_path'])
+        
+    if os.path.basename(cfg['training']['test_metrics_csv']) == cfg['training']['test_metrics_csv']:
+        cfg['training']['test_metrics_csv'] = os.path.join("runs", cfg['training']['test_metrics_csv'])
+
     return device
 
 def run_preprocess(cfg):

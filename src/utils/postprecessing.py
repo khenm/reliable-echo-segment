@@ -2,7 +2,6 @@ import torch
 import pandas as pd
 import numpy as np
 import os
-from torch.cuda.amp import autocast
 from .metric import calculate_ef_from_areas
 
 def generate_clinical_pairs(model, loader, device, save_path):
@@ -16,7 +15,7 @@ def generate_clinical_pairs(model, loader, device, save_path):
     LV_LABEL = 1
 
     print("Generating clinical EF pairs...")
-    with torch.no_grad(), autocast():
+    with torch.no_grad(), torch.amp.autocast(device_type=device.type):
         for batch in loader:
             imgs = batch["image"].to(device)
             gts = batch["label"].to(device)
