@@ -47,7 +47,9 @@ class Trainer:
                 imgs = batch["image"].to(self.device)
                 labs = batch["label"].to(self.device)
                 
-                with autocast():
+                dev_type = self.device.type if hasattr(self.device, 'type') else str(self.device)
+                
+                with torch.amp.autocast(device_type=dev_type):
                     logits = self.model(imgs)
                     loss = self.loss_fn(logits, labs)
                 
