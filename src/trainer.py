@@ -80,7 +80,9 @@ class Trainer:
     def _validate(self):
         self.model.eval()
         self.metr_dice_val.reset()
-        with torch.no_grad(), autocast():
+        
+        dev_type = self.device.type if hasattr(self.device, 'type') else str(self.device)
+        with torch.no_grad(), torch.amp.autocast(device_type=dev_type):
             for vb in self.ld_va:
                 v_img = vb["image"].to(self.device)
                 v_lab = vb["label"].to(self.device)
