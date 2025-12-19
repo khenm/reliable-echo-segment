@@ -4,7 +4,6 @@ __pycache__/
 *$py.class
 *.pyc
 *.pyo 
-.ipynb_checkpoints/
 
 # C extensions
 *.so
@@ -215,3 +214,8 @@ __marimo__/
 
 # Mac file
 .DS_Store
+
+# checkpointing
+.ipynb_checkpoints/
+checkpoints
+runs
