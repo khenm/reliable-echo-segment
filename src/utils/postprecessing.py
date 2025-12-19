@@ -15,7 +15,9 @@ def generate_clinical_pairs(model, loader, device, save_path):
     LV_LABEL = 1
 
     print("Generating clinical EF pairs...")
-    with torch.no_grad(), torch.amp.autocast(device_type=device.type):
+    
+    dev_type = device.type if hasattr(device, 'type') else str(device)
+    with torch.no_grad(), torch.amp.autocast(device_type=dev_type):
         for batch in loader:
             imgs = batch["image"].to(device)
             gts = batch["label"].to(device)
