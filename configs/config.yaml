@@ -7,12 +7,12 @@ data:
 
 training:
   epochs: 100
-  batch_size_train: 8
-  batch_size_val: 8
+  batch_size_train: 32
+  batch_size_val: 32
   lr: 3.0e-4
   weight_decay: 1.0e-4
   patience: 10
-  seed: 2024
+  seed: 42
   ckpt_save_path: "best_camus.pt"
   test_metrics_csv: "camus_test_metrics.csv"
 
