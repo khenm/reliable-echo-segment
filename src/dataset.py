@@ -5,6 +5,7 @@ from monai.transforms import (
     ResizeWithPadOrCropd, RandFlipd, RandRotate90d, RandAffined
 )
 from monai.data import CacheDataset, DataLoader, list_data_collate
+from src.utils.logging import get_logger
 
 def _read_ids(txt_path):
     with open(txt_path) as f:
@@ -29,19 +30,24 @@ def _get_files(ids, data_nii_dir):
     return items
 
 def get_dataloaders(cfg):
+    logger = get_logger()
+    
     # Reads IDs
     split_dir = cfg['data']['split_dir']
     nii_dir = cfg['data']['nifti_dir']
     
+    logger.info(f"Reading splits from {split_dir}...")
     ids_tr = _read_ids(os.path.join(split_dir, "subgroup_training.txt"))
     ids_val = _read_ids(os.path.join(split_dir, "subgroup_validation.txt"))
     ids_ts = _read_ids(os.path.join(split_dir, "subgroup_testing.txt"))
+    
+    logger.info(f"IDs found -> train {len(ids_tr)} · val {len(ids_val)} · test {len(ids_ts)}")
 
     train_files = _get_files(ids_tr, nii_dir)
     val_files = _get_files(ids_val, nii_dir)
     test_files = _get_files(ids_ts, nii_dir)
 
-    print(f"Files -> train {len(train_files)} · val {len(val_files)} · test {len(test_files)}")
+    logger.info(f"Files found -> train {len(train_files)} · val {len(val_files)} · test {len(test_files)}")
 
     # Transforms
     img_size = tuple(cfg['data']['img_size'])

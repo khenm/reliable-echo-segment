@@ -1,37 +1,128 @@
 import yaml
 import argparse
+import os
+import torch
+import pandas as pd
 from src.utils.util_ import seed_everything, get_device
 from src.dataset import get_dataloaders
 from src.models.model import get_model
 from src.trainer import Trainer
+from src.utils.logging import get_logger
+from src.utils.postprecessing import generate_clinical_pairs
+from src.utils.plot import (
+    plot_metrics_summary, 
+    plot_clinical_bland_altman, 
+    plot_reliability_curves, 
+    plot_ef_category_roc
+)
 
-def main(config_path):
-    with open(config_path, 'r') as f:
-        cfg = yaml.safe_load(f)
+logger = get_logger()
 
+def run_init(cfg):
+    logger.info("Step 1: Initialization")
+    logger.info("Settings: " + str(cfg['training']))
     seed_everything(cfg['training']['seed'])
     device = get_device()
-    print(f"Using device: {device}")
+    logger.info(f"Using device: {device}")
+    
+    os.makedirs("checkpoints", exist_ok=True)
+    os.makedirs("runs", exist_ok=True)
+    return device
 
-    # Data
-    print("Initializing DataLoaders...")
+def run_preprocess(cfg):
+    logger.info("Step 2: Preprocess / Data Check")
+    get_dataloaders(cfg)
+    logger.info("Data verification complete.")
+
+def run_train(cfg, device):
+    logger.info("Step 3: Training")
     loaders = get_dataloaders(cfg)
-
-    # Model
-    print("Initializing Model...")
     model = get_model(cfg, device)
-    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
-
-    # Training
+    
     trainer = Trainer(model, loaders, cfg, device)
     trainer.train()
 
-    # Evaluation
-    print("Starting Evaluation...")
-    trainer.evaluate_test()
+def run_eval(cfg, device):
+    logger.info("Step 4: Evaluation")
+    loaders = get_dataloaders(cfg)
+    _, _, ld_ts = loaders
+    
+    model = get_model(cfg, device)
+    ckpt_path = cfg['training']['ckpt_save_path']
+    if not os.path.exists(ckpt_path):
+        logger.error(f"Checkpoint not found at {ckpt_path}. Skipping evaluation.")
+        return
+
+    model.load_state_dict(torch.load(ckpt_path, map_location=device))
+    
+    # 1. Standard Dice/HD statistics
+    trainer = Trainer(model, loaders, cfg, device)
+    df_metrics = trainer.evaluate_test()
+    
+    # 2. Clinical Metrics (EF, Volumes)
+    ef_save_path = os.path.join("runs", "camus_clinical_pairs.csv")
+    generate_clinical_pairs(model, ld_ts, device, ef_save_path)
+
+def run_plot(cfg):
+    logger.info("Step 5: Plotting")
+    metrics_path = cfg['training']['test_metrics_csv'] # camus_test_metrics.csv
+    ef_path = os.path.join("runs", "camus_clinical_pairs.csv")
+    
+    if not os.path.exists(metrics_path):
+        logger.warning(f"Metrics file {metrics_path} not found. Skipping metrics plots.")
+    else:
+        df_metrics = pd.read_csv(metrics_path)
+        plot_metrics_summary(df_metrics, save_path=os.path.join("runs", "plot_metrics_summary.png"))
+        logger.info("Generated plot_metrics_summary.png")
+
+    if not os.path.exists(ef_path):
+         logger.warning(f"Clinical file {ef_path} not found. Skipping clinical plots.")
+    else:
+        df_ef = pd.read_csv(ef_path)
+        if os.path.exists(metrics_path):
+            df_metrics = pd.read_csv(metrics_path) 
+            plot_reliability_curves(df_metrics, df_ef, save_path=os.path.join("runs", "plot_reliability.png"))
+        
+        plot_clinical_bland_altman(df_ef, save_path=os.path.join("runs", "plot_bland_altman.png"))
+        plot_ef_category_roc(df_ef, save_path=os.path.join("runs", "plot_ef_roc.png"))
+        logger.info("Generated clinical plots.")
+
+def main():
+    parser = argparse.ArgumentParser(description="Reliable Echo Segmentation Pipeline")
+    parser.add_argument("--config", type=str, default="configs/config.yaml")
+    parser.add_argument("--init", action="store_true", help="Run initialization check")
+    parser.add_argument("--preprocess", action="store_true", help="Run data loading verification")
+    parser.add_argument("--train", action="store_true", help="Run training loop")
+    parser.add_argument("--eval", action="store_true", help="Run evaluation (metrics + EF)")
+    parser.add_argument("--plot", action="store_true", help="Generate all plots")
+    parser.add_argument("--all", action="store_true", help="Run full pipeline")
+    
+    args = parser.parse_args()
+
+    # Load Config
+    with open(args.config, 'r') as f:
+        cfg = yaml.safe_load(f)
+
+    # If no specific step is requested, run all (or if --all is set)
+    run_all = args.all or not (args.init or args.preprocess or args.train or args.eval or args.plot)
+
+    device = run_init(cfg)
+
+    # 1. Preprocess
+    if run_all or args.preprocess:
+        run_preprocess(cfg)
+    
+    # 2. Train
+    if run_all or args.train:
+        run_train(cfg, device)
+        
+    # 3. Eval
+    if run_all or args.eval:
+        run_eval(cfg, device)
+        
+    # 4. Plot
+    if run_all or args.plot:
+        run_plot(cfg)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="configs/config.yaml")
-    args = parser.parse_args()
-    main(args.config)
+    main()
