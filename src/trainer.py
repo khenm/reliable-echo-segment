@@ -11,7 +11,19 @@ from src.utils.logging import get_logger
 logger = get_logger()
 
 class Trainer:
+    """
+    Handles the training, validation, and testing of the segmentation model.
+    """
     def __init__(self, model, loaders, cfg, device):
+        """
+        Initializes the Trainer.
+        
+        Args:
+            model (torch.nn.Module): The model to train.
+            loaders (tuple): (train_loader, val_loader, test_loader).
+            cfg (dict): Configuration dictionary.
+            device (torch.device): Device to run on.
+        """
         self.model = model
         self.ld_tr, self.ld_va, self.ld_ts = loaders
         self.cfg = cfg
@@ -25,11 +37,13 @@ class Trainer:
                                      lr=cfg['training']['lr'], 
                                      weight_decay=cfg['training']['weight_decay'])
         
-        # Handle device being str or torch.device
         dev_type = device.type if hasattr(device, 'type') else str(device)
         self.scaler = torch.amp.GradScaler(device=dev_type, enabled=(dev_type == 'cuda'))
 
     def train(self):
+        """
+        Executes the training loop with early stopping.
+        """
         epochs = self.cfg['training']['epochs']
         patience = self.cfg['training']['patience']
         best_metric = 0.0
@@ -58,7 +72,6 @@ class Trainer:
                 self.scaler.update()
                 run_loss += loss.item()
 
-            # Validation
             val_dice = self._validate()
             logger.info(f"E{ep:03d} trainLoss={run_loss/len(self.ld_tr):.4f} valDice={val_dice:.4f}")
 
@@ -78,6 +91,9 @@ class Trainer:
         logger.info(f"🏁 Finished at epoch {stop_ep} (best={best_metric:.4f}) in {train_time/60:.1f} min")
 
     def _validate(self):
+        """
+        Runs validation pass and returns the mean Dice score.
+        """
         self.model.eval()
         self.metr_dice_val.reset()
         
@@ -103,6 +119,12 @@ class Trainer:
         return float(self.metr_dice_val.aggregate().cpu())
 
     def evaluate_test(self):
+        """
+        Evaluates the best model on the test set, computing Dice and HD95 metrics.
+        
+        Returns:
+            pd.DataFrame: DataFrame containing per-sample metrics.
+        """
         logger.info(f"Loading best checkpoint from: {self.ckpt_path}")
         self.model.load_state_dict(torch.load(self.ckpt_path, map_location=self.device))
         self.model.eval()
@@ -129,7 +151,6 @@ class Trainer:
                 y_pred_all = F.one_hot(pred_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
                 y_true_all = F.one_hot(gt_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
 
-                # Process per item
                 for i in range(len(imgs)):
                     y_p, y_t = y_pred_all[i:i+1], y_true_all[i:i+1]
                     

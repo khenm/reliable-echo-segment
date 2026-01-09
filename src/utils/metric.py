@@ -4,6 +4,14 @@ from sklearn.metrics import roc_curve, roc_auc_score
 def compute_dice_coefficient(gt, pr, label_idx=1):
     """
     Computes Dice coefficient for a specific class index.
+    
+    Args:
+        gt (np.ndarray): Ground truth mask.
+        pr (np.ndarray): Predicted mask.
+        label_idx (int): Class label to evaluate.
+        
+    Returns:
+        float: Dice coefficient.
     """
     gt_bin = (gt == label_idx)
     pr_bin = (pr == label_idx)
@@ -15,8 +23,14 @@ def compute_dice_coefficient(gt, pr, label_idx=1):
 
 def calculate_ef_from_areas(ed_area, es_area):
     """
-    Calculates Ejection Fraction (EF) assuming area acts as a proxy for volume 
-    (Simpson's rule would be better, but this matches the original code logic).
+    Calculates Ejection Fraction (EF) using area-based approximation.
+    
+    Args:
+        ed_area (float): End-diastolic area.
+        es_area (float): End-systolic area.
+        
+    Returns:
+        float: Calculated Ejection Fraction.
     """
     if ed_area <= 0:
         return 0.0
@@ -24,7 +38,14 @@ def calculate_ef_from_areas(ed_area, es_area):
 
 def get_bland_altman_stats(ref, pred):
     """
-    Returns Pearson r, Bias (mean diff), and Limits of Agreement (1.96 * SD).
+    Computes Bland-Altman statistics: Pearson correlation, Bias, and Limits of Agreement.
+    
+    Args:
+        ref (list or np.ndarray): Reference values.
+        pred (list or np.ndarray): Predicted values.
+        
+    Returns:
+        tuple: (Pearson r, Bias, Limits of Agreement)
     """
     ref = np.asarray(ref, dtype=float)
     pred = np.asarray(pred, dtype=float)
@@ -43,10 +64,16 @@ def get_bland_altman_stats(ref, pred):
 
 def get_classification_metrics(y_true, y_pred, labels):
     """
-    Computes confusion matrix, recall, and precision for EF categorization.
+    Computes classification metrics including confusion matrix, recall, and precision.
+    
+    Args:
+        y_true (list): Ground truth labels.
+        y_pred (list): Predicted labels.
+        labels (list): List of class labels.
+        
+    Returns:
+        tuple: (Conflict Matrix, Recall, Precision)
     """
-    # Simple confusion matrix using pandas is usually easiest, 
-    # but here is a numpy implementation to match requirements
     n_labels = len(labels)
     cm = np.zeros((n_labels, n_labels), dtype=int)
     
@@ -68,13 +95,20 @@ def get_classification_metrics(y_true, y_pred, labels):
 
 def get_roc_auc_low_ef(y_ref, y_pred_val, threshold=45.0):
     """
-    Calculates ROC and AUC for detecting low EF (< threshold).
-    y_ref: Ground truth EF values
-    y_pred_val: Predicted EF values
+    Calculates ROC and AUC for detecting low EF.
+    
+    The predicted EF is inverted (threshold - pred) to use as a score, 
+    since lower EF implies higher probability of the 'low EF' condition.
+    
+    Args:
+        y_ref (list): Ground truth EF values.
+        y_pred_val (list): Predicted EF values.
+        threshold (float): Threshold to define 'low EF' class.
+        
+    Returns:
+        tuple: (FPR, TPR, AUC)
     """
     y_true_bin = (np.array(y_ref) < threshold).astype(int)
-    # Score: The lower the EF, the higher the likelihood of 'low EF'
-    # We invert score so that lower EF = higher probability score for ROC
     scores = (threshold - np.array(y_pred_val))
     
     if len(np.unique(y_true_bin)) < 2:

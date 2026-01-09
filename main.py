@@ -16,6 +16,7 @@ from src.utils.plot import (
     plot_reliability_curves, 
     plot_ef_category_roc
 )
+from src.eval_rcps import run_rcps_pipeline
 
 # Setup logging with timestamp
 os.makedirs("logs", exist_ok=True)
@@ -24,7 +25,10 @@ log_file = os.path.join("logs", f"run_{timestamp}.log")
 logger = get_logger(log_file=log_file)
 
 def run_init(cfg):
-    logger.info("Step 1: Initialization")
+    """
+    Initializes the environment, logging, and output directories.
+    """
+    logger.info("Initializing...")
     logger.info("Settings: " + str(cfg['training']))
     seed_everything(cfg['training']['seed'])
     device = get_device()
@@ -43,12 +47,18 @@ def run_init(cfg):
     return device
 
 def run_preprocess(cfg):
-    logger.info("Step 2: Preprocess / Data Check")
+    """
+    Verifies data availability and loading by realizing the DataLoaders.
+    """
+    logger.info("Checking data loading...")
     get_dataloaders(cfg)
     logger.info("Data verification complete.")
 
 def run_train(cfg, device):
-    logger.info("Step 3: Training")
+    """
+    Instantiates the model and trainer, then starts the training loop.
+    """
+    logger.info("Starting Training...")
     loaders = get_dataloaders(cfg)
     model = get_model(cfg, device)
     
@@ -56,7 +66,11 @@ def run_train(cfg, device):
     trainer.train()
 
 def run_eval(cfg, device):
-    logger.info("Step 4: Evaluation")
+    """
+    Runs evaluation on the test set involving both technical (Dice/HD95) 
+    and clinical (EF/Area) metrics.
+    """
+    logger.info("Starting Evaluation...")
     loaders = get_dataloaders(cfg)
     _, _, ld_ts = loaders
     
@@ -68,16 +82,19 @@ def run_eval(cfg, device):
 
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
     
-    # 1. Standard Dice/HD statistics
+    # Standard Dice/HD statistics
     trainer = Trainer(model, loaders, cfg, device)
-    df_metrics = trainer.evaluate_test()
+    trainer.evaluate_test()
     
-    # 2. Clinical Metrics (EF, Volumes)
+    # Clinical Metrics (EF, Volumes)
     ef_save_path = os.path.join("runs", "camus_clinical_pairs.csv")
     generate_clinical_pairs(model, ld_ts, device, ef_save_path)
 
 def run_plot(cfg):
-    logger.info("Step 5: Plotting")
+    """
+    Generates summary plots from validation and testing results.
+    """
+    logger.info("Generating plots...")
     metrics_path = cfg['training']['test_metrics_csv'] # camus_test_metrics.csv
     ef_path = os.path.join("runs", "camus_clinical_pairs.csv")
     
@@ -107,6 +124,7 @@ def main():
     parser.add_argument("--preprocess", action="store_true", help="Run data loading verification")
     parser.add_argument("--train", action="store_true", help="Run training loop")
     parser.add_argument("--eval", action="store_true", help="Run evaluation (metrics + EF)")
+    parser.add_argument("--rcps", action="store_true", help="Run RCPS calibration and evaluation")
     parser.add_argument("--plot", action="store_true", help="Generate all plots")
     parser.add_argument("--all", action="store_true", help="Run full pipeline")
     
@@ -117,25 +135,29 @@ def main():
         cfg = yaml.safe_load(f)
 
     # If no specific step is requested, run all (or if --all is set)
-    run_all = args.all or not (args.init or args.preprocess or args.train or args.eval or args.plot)
+    run_all = args.all or not (args.init or args.preprocess or args.train or args.eval or args.plot or args.rcps)
 
     device = run_init(cfg)
 
-    # 1. Preprocess
+    # Preprocess
     if run_all or args.preprocess:
         run_preprocess(cfg)
     
-    # 2. Train
+    # Train
     if run_all or args.train:
         run_train(cfg, device)
         
-    # 3. Eval
+    # Eval
     if run_all or args.eval:
         run_eval(cfg, device)
         
-    # 4. Plot
+    # Plot
     if run_all or args.plot:
         run_plot(cfg)
+        
+    # RCPS
+    if run_all or args.rcps:
+        run_rcps_pipeline(cfg)
 
 if __name__ == "__main__":
     main()

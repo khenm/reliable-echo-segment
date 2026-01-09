@@ -2,6 +2,16 @@ import logging
 import sys
 
 def get_logger(name="CAMUS", log_file=None):
+    """
+    Retrieves a logger instance configured with stream and optional file handlers.
+    
+    Args:
+        name (str): Name of the logger.
+        log_file (str): Optional path to a log file.
+        
+    Returns:
+        logging.Logger: Configured logger instance.
+    """
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
     

@@ -8,10 +8,29 @@ from monai.data import CacheDataset, DataLoader, list_data_collate
 from src.utils.logging import get_logger
 
 def _read_ids(txt_path):
+    """
+    Reads patient IDs from a text file.
+    
+    Args:
+        txt_path (str): Path to the text file.
+        
+    Returns:
+        list: List of patient IDs.
+    """
     with open(txt_path) as f:
         return [l.strip() for l in f if l.strip()]
 
 def _get_files(ids, data_nii_dir):
+    """
+    Scans the directory for image and label files for given patient IDs.
+    
+    Args:
+        ids (list): List of patient IDs.
+        data_nii_dir (str): Root directory of NIfTI data.
+        
+    Returns:
+        list: List of dictionaries containing paths and metadata.
+    """
     items = []
     for pid in ids:
         pdir = os.path.join(data_nii_dir, pid)
@@ -30,9 +49,17 @@ def _get_files(ids, data_nii_dir):
     return items
 
 def get_dataloaders(cfg):
+    """
+    Creates DataLoaders for training, validation, and testing.
+    
+    Args:
+        cfg (dict): Configuration dictionary containing data paths and training params.
+        
+    Returns:
+        tuple: (train_loader, val_loader, test_loader)
+    """
     logger = get_logger()
     
-    # Reads IDs
     split_dir = cfg['data']['split_dir']
     nii_dir = cfg['data']['nifti_dir']
     
@@ -49,7 +76,6 @@ def get_dataloaders(cfg):
 
     logger.info(f"Files found -> train {len(train_files)} · val {len(val_files)} · test {len(test_files)}")
 
-    # Transforms
     img_size = tuple(cfg['data']['img_size'])
     _common = [
         LoadImaged(("image", "label")),
@@ -71,12 +97,10 @@ def get_dataloaders(cfg):
     tf_tr = Compose(_common + _aug)
     tf_val = Compose(_common)
 
-    # Datasets
     ds_tr = CacheDataset(train_files, tf_tr, 1.0, num_workers=4)
     ds_va = CacheDataset(val_files, tf_val, 1.0, num_workers=4)
     ds_ts = CacheDataset(test_files, tf_val, 1.0, num_workers=4)
 
-    # Loaders
     ld_tr = DataLoader(ds_tr, batch_size=cfg['training']['batch_size_train'], shuffle=True, 
                        num_workers=4, pin_memory=True, collate_fn=list_data_collate)
     ld_va = DataLoader(ds_va, batch_size=cfg['training']['batch_size_val'], shuffle=False, 
