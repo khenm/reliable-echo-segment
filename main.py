@@ -18,31 +18,51 @@ from src.utils.plot import (
 )
 from src.eval_rcps import run_rcps_pipeline
 
-# Setup logging with timestamp
-os.makedirs("logs", exist_ok=True)
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-log_file = os.path.join("logs", f"run_{timestamp}.log")
-logger = get_logger(log_file=log_file)
+# Setup logging (stdout only initially)
+logger = get_logger()
 
 def run_init(cfg):
     """
     Initializes the environment, logging, and output directories.
     """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_root = cfg['training'].get('save_dir', 'runs')
+    run_dir = os.path.join(save_root, timestamp)
+    os.makedirs(run_dir, exist_ok=True)
+    os.makedirs("checkpoints", exist_ok=True)
+    
+    # Update config with run-specific paths
+    cfg['training']['run_dir'] = run_dir
+    
+    # Helper to setup file logging for this run
+    log_file = os.path.join(run_dir, "run.log")
+    # Re-fetch logger to add file handler
+    _ = get_logger(log_file=log_file)
+    
     logger.info("Initializing...")
+    logger.info(f"Run Directory: {run_dir}")
     logger.info("Settings: " + str(cfg['training']))
     seed_everything(cfg['training']['seed'])
     device = get_device()
     logger.info(f"Using device: {device}")
     
-    os.makedirs("checkpoints", exist_ok=True)
-    os.makedirs("runs", exist_ok=True)
+    # Standardize checkpoint path: checkpoints/run_<timestamp>_<name>
+    ckpt_name = cfg['training']['ckpt_save_path']
+    # If the user provided a full path or just a filename, handle it
+    if "/" in ckpt_name:
+        ckpt_name = os.path.basename(ckpt_name)
     
-    # Ensure paths are correct
-    if os.path.basename(cfg['training']['ckpt_save_path']) == cfg['training']['ckpt_save_path']:
-        cfg['training']['ckpt_save_path'] = os.path.join("checkpoints", cfg['training']['ckpt_save_path'])
-        
-    if os.path.basename(cfg['training']['test_metrics_csv']) == cfg['training']['test_metrics_csv']:
-        cfg['training']['test_metrics_csv'] = os.path.join("runs", cfg['training']['test_metrics_csv'])
+    # Store checkpoint in global checkpoints folder, but unique to run
+    cfg['training']['ckpt_save_path'] = os.path.join("checkpoints", f"run_{timestamp}_{ckpt_name}")
+    
+    # Store metrics in the run directory
+    metrics_csv = cfg['training']['test_metrics_csv']
+    if "/" in metrics_csv:
+        metrics_csv = os.path.basename(metrics_csv)
+    cfg['training']['test_metrics_csv'] = os.path.join(run_dir, metrics_csv)
+    
+    # Store clinical pairs in run dir as well (was hardcoded to runs/camus_clinical_pairs.csv)
+    cfg['training']['clinical_pairs_csv'] = os.path.join(run_dir, "camus_clinical_pairs.csv")
 
     return device
 
@@ -87,7 +107,7 @@ def run_eval(cfg, device):
     trainer.evaluate_test()
     
     # Clinical Metrics (EF, Volumes)
-    ef_save_path = os.path.join("runs", "camus_clinical_pairs.csv")
+    ef_save_path = cfg['training']['clinical_pairs_csv']
     generate_clinical_pairs(model, ld_ts, device, ef_save_path)
 
 def run_plot(cfg):
@@ -95,14 +115,15 @@ def run_plot(cfg):
     Generates summary plots from validation and testing results.
     """
     logger.info("Generating plots...")
-    metrics_path = cfg['training']['test_metrics_csv'] # camus_test_metrics.csv
-    ef_path = os.path.join("runs", "camus_clinical_pairs.csv")
+    metrics_path = cfg['training']['test_metrics_csv']
+    ef_path = cfg['training']['clinical_pairs_csv']
     
     if not os.path.exists(metrics_path):
         logger.warning(f"Metrics file {metrics_path} not found. Skipping metrics plots.")
     else:
         df_metrics = pd.read_csv(metrics_path)
-        plot_metrics_summary(df_metrics, save_path=os.path.join("runs", "plot_metrics_summary.png"))
+        df_metrics = pd.read_csv(metrics_path)
+        plot_metrics_summary(df_metrics, save_path=os.path.join(cfg['training']['run_dir'], "plot_metrics_summary.png"))
         logger.info("Generated plot_metrics_summary.png")
 
     if not os.path.exists(ef_path):
@@ -111,10 +132,10 @@ def run_plot(cfg):
         df_ef = pd.read_csv(ef_path)
         if os.path.exists(metrics_path):
             df_metrics = pd.read_csv(metrics_path) 
-            plot_reliability_curves(df_metrics, df_ef, save_path=os.path.join("runs", "plot_reliability.png"))
+            plot_reliability_curves(df_metrics, df_ef, save_path=os.path.join(cfg['training']['run_dir'], "plot_reliability.png"))
         
-        plot_clinical_bland_altman(df_ef, save_path=os.path.join("runs", "plot_bland_altman.png"))
-        plot_ef_category_roc(df_ef, save_path=os.path.join("runs", "plot_ef_roc.png"))
+        plot_clinical_bland_altman(df_ef, save_path=os.path.join(cfg['training']['run_dir'], "plot_bland_altman.png"))
+        plot_ef_category_roc(df_ef, save_path=os.path.join(cfg['training']['run_dir'], "plot_ef_roc.png"))
         logger.info("Generated clinical plots.")
 
 def main():
