@@ -4,6 +4,7 @@ data:
   split_dir: "/content/drive/MyDrive/Dataset/CAMUS_public/database_split"
   img_size: [256, 256]
   num_classes: 4
+  stratify_bins: [0, 45, 100]
 
 training:
   epochs: 100

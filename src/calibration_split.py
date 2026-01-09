@@ -60,7 +60,7 @@ def calculate_patient_ef(pid, data_nii_dir):
         
     return np.mean(efs)
 
-def split_validation_set(config_path):
+def split_validation_set(cfg, bins=None):
     """
     Splits the validation set into calibration and test subsets.
 
@@ -68,10 +68,12 @@ def split_validation_set(config_path):
     of clinical severity in both subsets.
 
     Args:
-        config_path (str): Path to the configuration YAML file.
+        cfg (dict): Configuration dictionary.
+        bins (list, optional): List of EF bin edges. Defaults to [0, 35, 45, 55, 100].
     """
-    cfg = load_config(config_path)
-    
+    if bins is None:
+        bins = [0, 35, 45, 55, 100]
+        
     split_dir = cfg['data']['split_dir']
     nii_dir = cfg['data']['nifti_dir']
     
@@ -92,8 +94,8 @@ def split_validation_set(config_path):
         ef = calculate_patient_ef(pid, nii_dir)
         ef_values.append(ef)
         
-    # Bin EF values for stratification: [0, 35, 45, 55, 100]
-    bins = [0, 35, 45, 55, 100]
+    # Bin EF values for stratification
+    print(f"Using stratification bins: {bins}")
     ef_bins = np.digitize(ef_values, bins)
     
     print("Splitting into Calibration (50%) and Test (50%)...")
@@ -132,6 +134,9 @@ def split_validation_set(config_path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/config.yaml")
+    parser.add_argument("--bins", type=float, nargs="+", default=[0, 35, 45, 55, 100], 
+                        help="List of EF bins boundaries for stratification (e.g. 0 45 100)")
     args = parser.parse_args()
     
-    split_validation_set(args.config)
+    cfg = load_config(args.config)
+    split_validation_set(cfg, bins=args.bins)
