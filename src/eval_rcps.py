@@ -11,6 +11,7 @@ from src.utils.logging import get_logger
 from src.dataset import _read_ids, _get_files
 from src.models.model import get_model
 from src.core.conformal import ConformalCalibrator
+from src.calibration_split import split_validation_set
 from src.inference.wrapper import predict_with_guarantee
 
 def get_rcps_dataloaders(cfg):
@@ -78,6 +79,16 @@ def run_rcps_pipeline(cfg):
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
+    
+    # Check for split files, generate if missing
+    split_dir = cfg['data']['split_dir']
+    cal_txt = os.path.join(split_dir, "subgroup_val_calibration.txt")
+    test_txt = os.path.join(split_dir, "subgroup_val_test.txt")
+    
+    if not os.path.exists(cal_txt) or not os.path.exists(test_txt):
+        logger.info("RCPS split files not found. Generating now...")
+        bins = cfg['data'].get('stratify_bins', None)
+        split_validation_set(cfg, bins=bins)
     
     # Load Data
     try:
