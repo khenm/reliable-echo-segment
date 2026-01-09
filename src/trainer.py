@@ -76,7 +76,9 @@ class Trainer:
             logger.info(f"E{ep:03d} trainLoss={run_loss/len(self.ld_tr):.4f} valDice={val_dice:.4f}")
 
             if val_dice > best_metric:
+                logger.info(f"Saving checkpoint to {self.ckpt_path}...")
                 torch.save(self.model.state_dict(), self.ckpt_path)
+                logger.info("Checkpoint saved.")
                 best_metric = val_dice
                 wait = 0
             else:

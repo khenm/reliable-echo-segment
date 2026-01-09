@@ -10,6 +10,8 @@ training:
   epochs: 100
   batch_size_train: 32
   batch_size_val: 32
+  num_workers: 4
+  persistent_workers: True
   lr: 3.0e-4
   weight_decay: 1.0e-4
   patience: 10
