@@ -97,15 +97,21 @@ def get_dataloaders(cfg):
     tf_tr = Compose(_common + _aug)
     tf_val = Compose(_common)
 
-    ds_tr = CacheDataset(train_files, tf_tr, 1.0, num_workers=4)
-    ds_va = CacheDataset(val_files, tf_val, 1.0, num_workers=4)
-    ds_ts = CacheDataset(test_files, tf_val, 1.0, num_workers=4)
+    num_workers = cfg['training'].get('num_workers', 4)
+    persistent_workers = cfg['training'].get('persistent_workers', True)
+
+    ds_tr = CacheDataset(train_files, tf_tr, 1.0, num_workers=num_workers)
+    ds_va = CacheDataset(val_files, tf_val, 1.0, num_workers=num_workers)
+    ds_ts = CacheDataset(test_files, tf_val, 1.0, num_workers=num_workers)
 
     ld_tr = DataLoader(ds_tr, batch_size=cfg['training']['batch_size_train'], shuffle=True, 
-                       num_workers=4, pin_memory=True, collate_fn=list_data_collate)
+                       num_workers=num_workers, pin_memory=True, collate_fn=list_data_collate,
+                       persistent_workers=persistent_workers)
     ld_va = DataLoader(ds_va, batch_size=cfg['training']['batch_size_val'], shuffle=False, 
-                       num_workers=4, pin_memory=True, collate_fn=list_data_collate)
+                       num_workers=num_workers, pin_memory=True, collate_fn=list_data_collate,
+                       persistent_workers=persistent_workers)
     ld_ts = DataLoader(ds_ts, batch_size=cfg['training']['batch_size_val'], shuffle=False, 
-                       num_workers=4, pin_memory=True, collate_fn=list_data_collate)
+                       num_workers=num_workers, pin_memory=True, collate_fn=list_data_collate,
+                       persistent_workers=persistent_workers)
 
     return ld_tr, ld_va, ld_ts
