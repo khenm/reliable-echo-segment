@@ -96,7 +96,7 @@ class Trainer:
         """
         self.model.eval()
         self.metr_dice_val.reset()
-        # Note: autocast is generally inferred from context or can be explicit
+        
         dev_type = self.device.type if hasattr(self.device, 'type') else str(self.device)
         with torch.no_grad(), torch.amp.autocast(device_type=dev_type):
             for vb in self.ld_va:
