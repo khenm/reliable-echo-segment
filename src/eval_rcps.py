@@ -30,11 +30,11 @@ def get_rcps_dataloaders(cfg):
     split_dir = cfg['data']['split_dir']
     nii_dir = cfg['data']['nifti_dir']
     
-    cal_txt = os.path.join(split_dir, "subgroup_val_calibration.txt")
-    test_txt = os.path.join(split_dir, "subgroup_val_test.txt")
+    cal_txt = os.path.join(split_dir, "subgroup_validation.txt")
+    test_txt = os.path.join(split_dir, "subgroup_testing.txt")
     
     if not os.path.exists(cal_txt) or not os.path.exists(test_txt):
-        raise FileNotFoundError(f"RCPS split files not found at {split_dir}. Run calibration_split.py first.")
+        raise FileNotFoundError(f"Split files not found at {split_dir}.")
         
     ids_cal = _read_ids(cal_txt)
     ids_test = _read_ids(test_txt)
@@ -81,14 +81,11 @@ def run_rcps_pipeline(cfg):
     logger.info(f"Using device: {device}")
     
     # Check for split files, generate if missing
+    # Run RCPS
     split_dir = cfg['data']['split_dir']
-    cal_txt = os.path.join(split_dir, "subgroup_val_calibration.txt")
-    test_txt = os.path.join(split_dir, "subgroup_val_test.txt")
     
-    if not os.path.exists(cal_txt) or not os.path.exists(test_txt):
-        logger.info("RCPS split files not found. Generating now...")
-        bins = cfg['data'].get('stratify_bins', None)
-        split_validation_set(cfg, bins=bins)
+    # We now use the main validation set for calibration and main test set for testing
+    # No need to generate sub-splits anymore.
     
     # Load Data
     try:
@@ -170,9 +167,13 @@ def run_rcps_pipeline(cfg):
     plt.title('RCPS Calibration: Risk vs Threshold')
     plt.legend()
     plt.grid(True)
-    os.makedirs("runs", exist_ok=True)
-    plt.savefig("runs/rcps_risk.png")
-    logger.info("Saved risk plot to runs/rcps_risk.png")
+    
+    run_dir = cfg['training'].get('run_dir', 'runs')
+    os.makedirs(run_dir, exist_ok=True)
+    
+    plot_path = os.path.join(run_dir, "rcps_risk.png")
+    plt.savefig(plot_path)
+    logger.info(f"Saved risk plot to {plot_path}")
     
     if best_lambda is None:
         logger.warning("Calibration failed to find a valid lambda satisfying the bound.")
@@ -216,7 +217,8 @@ def run_rcps_pipeline(cfg):
     logger.info(f"Pass Rate (Dice >= {1-alpha:.2f}): {pass_rate*100:.2f}%")
     
     # Save results
-    with open(os.path.join("runs", "rcps_results.txt"), "w") as f:
+    results_path = os.path.join(run_dir, "rcps_results.txt")
+    with open(results_path, "w") as f:
         f.write(f"Optimal Lambda: {best_lambda}\n")
         f.write(f"Alpha: {alpha}\n")
         f.write(f"Mean Test Dice: {mean_dice:.4f}\n")
