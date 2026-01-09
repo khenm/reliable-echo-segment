@@ -1,21 +1,26 @@
 import torch
 import pandas as pd
 import numpy as np
-import os
 from .metric import calculate_ef_from_areas
 
 def generate_clinical_pairs(model, loader, device, save_path):
     """
-    (Corresponds to Cell 4)
     Runs inference to calculate LV areas, pairs ED/ES frames, 
-    computes EF, and saves 'camus_EF_area_pairs.csv'.
+    computes EF, and saves the results to a CSV file.
+    
+    Args:
+        model (torch.nn.Module): Trained segmentation model.
+        loader (DataLoader): DataLoader for the dataset.
+        device (torch.device): Device to run inference on.
+        save_path (str): Path to save the output CSV.
+        
+    Returns:
+        pd.DataFrame: DataFrame containing paired clinical metrics.
     """
     model.eval()
     area_rows = []
     LV_LABEL = 1
 
-    print("Generating clinical EF pairs...")
-    
     dev_type = device.type if hasattr(device, 'type') else str(device)
     with torch.no_grad(), torch.amp.autocast(device_type=dev_type):
         for batch in loader:
@@ -53,7 +58,6 @@ def generate_clinical_pairs(model, loader, device, save_path):
         ed = grp[grp["phase"] == "ED"].iloc[0]
         es = grp[grp["phase"] == "ES"].iloc[0]
 
-        # Calculate EF
         ef_ref = calculate_ef_from_areas(ed["area_gt"], es["area_gt"])
         ef_pred = calculate_ef_from_areas(ed["area_pred"], es["area_pred"])
 
@@ -67,15 +71,19 @@ def generate_clinical_pairs(model, loader, device, save_path):
 
     df_pairs = pd.DataFrame(pairs)
     df_pairs.to_csv(save_path, index=False)
-    print(f"Saved clinical pairs to {save_path}")
     return df_pairs
 
 def get_representative_cases(df_metrics, n=3):
     """
-    Identifies Best, Median, and Worst cases based on LV Dice.
-    Returns a dictionary of samples metadata.
+    Identifies Best, Median, and Worst cases based on LV Dice score.
+    
+    Args:
+        df_metrics (pd.DataFrame): DataFrame containing metrics per case.
+        n (int): Number of cases to retrieve for each category.
+        
+    Returns:
+        dict: Dictionary containing list of metadata for 'best', 'median', and 'worst' cases.
     """
-    # Sort by LV Dice
     sorted_df = df_metrics.sort_values(by="dice_LV")
     
     worst = sorted_df.head(n).to_dict('records')
