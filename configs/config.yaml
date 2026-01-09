@@ -14,6 +14,7 @@ training:
   persistent_workers: True
   lr: 3.0e-4
   weight_decay: 1.0e-4
+  kl_weight: 1.0e-4
   patience: 10
   seed: 42
   ckpt_save_path: "best_camus.pt"
@@ -26,3 +27,4 @@ model:
   channels: [32, 64, 128, 256, 512]
   strides: [2, 2, 2, 2]
   num_res_units: 2
+  latent_dim: 256
