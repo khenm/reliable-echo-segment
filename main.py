@@ -18,6 +18,7 @@ from src.utils.plot import (
 )
 from src.eval_rcps import run_rcps_pipeline
 from src.analysis.latent_profile import LatentProfiler
+from src.eval_adaptive import run_adaptive_pipeline
 
 # Setup logging (stdout only initially)
 logger = get_logger()
@@ -184,6 +185,7 @@ def main():
     parser.add_argument("--train", action="store_true", help="Run training loop")
     parser.add_argument("--eval", action="store_true", help="Run evaluation (metrics + EF)")
     parser.add_argument("--rcps", action="store_true", help="Run RCPS calibration and evaluation")
+    parser.add_argument("--adaptive", action="store_true", help="Run Adaptive Calibration")
     parser.add_argument("--profile", action="store_true", help="Run Latent Profiling")
     parser.add_argument("--plot", action="store_true", help="Generate all plots")
     parser.add_argument("--all", action="store_true", help="Run full pipeline")
@@ -195,7 +197,7 @@ def main():
         cfg = yaml.safe_load(f)
 
     # If no specific step is requested, run all (or if --all is set)
-    run_all = args.all or not (args.init or args.preprocess or args.train or args.eval or args.plot or args.rcps or args.profile)
+    run_all = args.all or not (args.init or args.preprocess or args.train or args.eval or args.plot or args.rcps or args.profile or args.adaptive)
 
     device = run_init(cfg)
 
@@ -222,6 +224,10 @@ def main():
     # Latent Profile
     if run_all or args.profile:
         run_profile(cfg, device)
+        
+    # Adaptive Calibration
+    if run_all or args.adaptive:
+        run_adaptive_pipeline(cfg)
 
 if __name__ == "__main__":
     main()

@@ -60,6 +60,12 @@ def get_dataloaders(cfg):
     """
     logger = get_logger()
     
+    data_name = cfg['data'].get('name', 'CAMUS').upper()
+    if data_name == 'ECHONET':
+        from src.dataset_echonet import get_echonet_dataloaders
+        logger.info("Using EchoNet-Dynamic dataset.")
+        return get_echonet_dataloaders(cfg)
+    
     split_dir = cfg['data']['split_dir']
     nii_dir = cfg['data']['nifti_dir']
     
