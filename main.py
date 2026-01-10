@@ -53,9 +53,15 @@ def run_init(cfg):
     
     ckpt_name = cfg['training']['ckpt_save_path']
     if "/" in ckpt_name:
+        configured_ckpt_dir = os.path.dirname(ckpt_name)
+        if configured_ckpt_dir:
+            ckpt_dir = configured_ckpt_dir
+        else:
+            ckpt_dir = cfg['training'].get('checkpoint_dir', 'checkpoints')
         ckpt_name = os.path.basename(ckpt_name)
+    else:
+        ckpt_dir = cfg['training'].get('checkpoint_dir', 'checkpoints')
     
-    ckpt_dir = cfg['training'].get('checkpoint_dir', 'checkpoints')
     os.makedirs(ckpt_dir, exist_ok=True)
     
     cfg['training']['ckpt_save_path'] = os.path.join(ckpt_dir, f"run_{timestamp}_{ckpt_name}")
@@ -65,7 +71,10 @@ def run_init(cfg):
         metrics_csv = os.path.basename(metrics_csv)
     cfg['training']['test_metrics_csv'] = os.path.join(run_dir, metrics_csv)
     
-    cfg['training']['clinical_pairs_csv'] = os.path.join(run_dir, "camus_clinical_pairs.csv")
+    clinical_csv = cfg['training'].get('clinical_pairs_csv', 'clinical_pairs.csv')
+    if "/" in clinical_csv:
+        clinical_csv = os.path.basename(clinical_csv)
+    cfg['training']['clinical_pairs_csv'] = os.path.join(run_dir, clinical_csv)
 
     return device
 
