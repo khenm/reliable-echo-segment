@@ -41,6 +41,40 @@ class Trainer:
         self.scaler = torch.amp.GradScaler(device=dev_type, enabled=(dev_type == 'cuda'))
         self.kl_weight = cfg['training'].get('kl_weight', 1e-4) # Beta parameter
 
+    def _load_checkpoint(self, path, load_optimizer=False):
+        """
+        Loads a checkpoint, handling both legacy (weights only) and new (full dict) formats.
+        
+        Args:
+            path (str): Path to the checkpoint file.
+            load_optimizer (bool): Whether to load optimizer state.
+            
+        Returns:
+            tuple: (start_epoch, best_metric)
+        """
+        logger.info(f"Loading checkpoint from {path}")
+        checkpoint = torch.load(path, map_location=self.device)
+        
+        start_epoch = 1
+        best_metric = 0.0
+        
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            # New format
+            self.model.load_state_dict(checkpoint["model_state_dict"])
+            if load_optimizer and "optimizer_state_dict" in checkpoint:
+                self.opt.load_state_dict(checkpoint["optimizer_state_dict"])
+            if "epoch" in checkpoint:
+                start_epoch = checkpoint["epoch"] + 1
+            if "best_metric" in checkpoint:
+                best_metric = checkpoint["best_metric"]
+            logger.info(f"Loaded checkpoint (epoch {checkpoint.get('epoch')}, best_metric {best_metric:.4f})")
+        else:
+            # Legacy format (assuming it's just state_dict)
+            self.model.load_state_dict(checkpoint)
+            logger.info("Loaded legacy checkpoint (model weights only). Resetting optimizer/epoch.")
+            
+        return start_epoch, best_metric
+
     def train(self):
         """
         Executes the training loop with early stopping.
@@ -53,7 +87,11 @@ class Trainer:
 
         start_tr = time.time()
         
-        for ep in range(1, epochs + 1):
+        start_epoch = 1
+        if 'resume_path' in self.cfg['training']:
+            start_epoch, best_metric = self._load_checkpoint(self.cfg['training']['resume_path'], load_optimizer=True)
+
+        for ep in range(start_epoch, epochs + 1):
             self.model.train()
             run_loss = 0.0
             
@@ -85,13 +123,27 @@ class Trainer:
             logger.info(f"E{ep:03d} trainLoss={run_loss/len(self.ld_tr):.4f} (KL={kl_loss.item():.6f}) valDice={val_dice:.4f}")
 
             if val_dice > best_metric:
-                logger.info(f"Saving checkpoint to {self.ckpt_path}...")
-                torch.save(self.model.state_dict(), self.ckpt_path)
+                logger.info(f"Saving BEST checkpoint to {self.ckpt_path}...")
+                torch.save({
+                    'epoch': ep,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.opt.state_dict(),
+                    'best_metric': val_dice
+                }, self.ckpt_path)
                 logger.info("Checkpoint saved.")
                 best_metric = val_dice
                 wait = 0
             else:
                 wait += 1
+            
+            # Save Latest Checkpoint
+            last_ckpt_path = self.ckpt_path.replace(".pt", "_last.pt")
+            torch.save({
+                'epoch': ep,
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': self.opt.state_dict(),
+                'best_metric': best_metric
+            }, last_ckpt_path)
             
             if wait >= patience:
                 logger.info("⏹ Early stop")
@@ -137,7 +189,7 @@ class Trainer:
             pd.DataFrame: DataFrame containing per-sample metrics.
         """
         logger.info(f"Loading best checkpoint from: {self.ckpt_path}")
-        self.model.load_state_dict(torch.load(self.ckpt_path, map_location=self.device))
+        self._load_checkpoint(self.ckpt_path, load_optimizer=False)
         self.model.eval()
 
         dice_metric = DiceMetric(include_background=False, reduction="none")

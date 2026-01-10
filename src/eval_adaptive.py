@@ -49,7 +49,11 @@ def run_adaptive_pipeline(cfg):
 
     # Load Model
     model = get_model(cfg, device)
-    model.load_state_dict(torch.load(ckpt_path, map_location=device))
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["model_state_dict"])
+    else:
+        model.load_state_dict(checkpoint)
     model.eval()
     
     # Load Profiler

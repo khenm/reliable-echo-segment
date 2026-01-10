@@ -176,7 +176,11 @@ def run_profile(cfg, device):
         return
 
     logger.info(f"Loading checkpoint: {ckpt_path}")
-    model.load_state_dict(torch.load(ckpt_path, map_location=device))
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["model_state_dict"])
+    else:
+        model.load_state_dict(checkpoint)
     
     loaders = get_dataloaders(cfg)
     ld_tr, _, _ = loaders
@@ -206,7 +210,7 @@ def main():
     parser.add_argument("--adaptive", action="store_true", help="Run Adaptive Calibration")
     parser.add_argument("--profile", action="store_true", help="Run Latent Profiling")
     parser.add_argument("--plot", action="store_true", help="Generate all plots")
-    parser.add_argument("--all", action="store_true", help="Run full pipeline")
+    parser.add_argument("--resume", action="store_true", help="Resume training from the latest checkpoint")
     
     args = parser.parse_args()
 
@@ -217,21 +221,33 @@ def main():
 
     device = run_init(cfg)
 
-    needs_checkpoint = args.eval or args.rcps or args.profile or args.adaptive or args.plot
+    # Logic to handle resuming or loading checkpoint for evaluation
+    needs_checkpoint = args.eval or args.rcps or args.profile or args.adaptive or args.plot or args.resume
     is_training = args.train or args.all
     
-    if needs_checkpoint and not is_training:
+    if needs_checkpoint:
         current_ckpt = cfg['training']['ckpt_save_path']
-        if not os.path.exists(current_ckpt):
-            ckpt_dir = os.path.dirname(current_ckpt)
-            logger.info(f"Checkpoint {current_ckpt} not found. Searching for latest in {ckpt_dir}...")
+        ckpt_dir = os.path.dirname(current_ckpt)
+        
+        # If resuming or if the specific checkpoint doesn't exist, try to find the latest one
+        if args.resume or not os.path.exists(current_ckpt):
+            if args.resume:
+                logger.info(f"Resume requested. Searching for latest checkpoint in {ckpt_dir}...")
+            else:
+                 logger.info(f"Checkpoint {current_ckpt} not found. Searching for latest in {ckpt_dir}...")
             
             latest_ckpt = find_latest_checkpoint(ckpt_dir)
             if latest_ckpt:
                 logger.info(f"Using latest checkpoint: {latest_ckpt}")
                 cfg['training']['ckpt_save_path'] = latest_ckpt
+                if args.resume and is_training:
+                    # Explicitly mark that we are resuming for the Trainer
+                    cfg['training']['resume_path'] = latest_ckpt
             else:
-                logger.warning(f"No checkpoint found in {ckpt_dir}. Subsequent steps may fail.")
+                if args.resume:
+                    logger.warning(f"No checkpoint found in {ckpt_dir} to resume from. Starting from scratch.")
+                else:
+                    logger.warning(f"No checkpoint found in {ckpt_dir}. Subsequent steps may fail.")
 
     if run_all or args.preprocess:
         run_preprocess(cfg)
