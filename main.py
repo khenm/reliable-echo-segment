@@ -211,6 +211,7 @@ def main():
     parser.add_argument("--profile", action="store_true", help="Run Latent Profiling")
     parser.add_argument("--plot", action="store_true", help="Generate all plots")
     parser.add_argument("--resume", action="store_true", help="Resume training from the latest checkpoint")
+    parser.add_argument("--all", action="store_true", help="Run all steps")
     
     args = parser.parse_args()
 
