@@ -18,8 +18,8 @@ model:
 
 training:
   epochs: 50
-  batch_size_train: 32
-  batch_size_val: 32
+  batch_size_train: 64
+  batch_size_val: 64
   num_workers: 4
   persistent_workers: True
   lr: 3.0e-4
