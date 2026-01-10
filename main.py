@@ -17,6 +17,7 @@ from src.utils.plot import (
     plot_ef_category_roc
 )
 from src.eval_rcps import run_rcps_pipeline
+from src.analysis.latent_profile import LatentProfiler
 
 # Setup logging (stdout only initially)
 logger = get_logger()
@@ -138,6 +139,43 @@ def run_plot(cfg):
         plot_ef_category_roc(df_ef, save_path=os.path.join(cfg['training']['run_dir'], "plot_ef_roc.png"))
         logger.info("Generated clinical plots.")
 
+def run_profile(cfg, device):
+    """
+    Runs the latent space profiling on the training set.
+    """
+    logger.info("Starting Latent Profiling...")
+    
+    # Load model
+    model = get_model(cfg, device)
+    ckpt_path = cfg['training']['ckpt_save_path']
+    if not os.path.exists(ckpt_path):
+        if os.path.exists(os.path.join("checkpoints", ckpt_path)):
+             ckpt_path = os.path.join("checkpoints", ckpt_path)
+             
+    if not os.path.exists(ckpt_path):
+        logger.error(f"Checkpoint not found at {ckpt_path}. Skipping profiling.")
+        return
+
+    logger.info(f"Loading checkpoint: {ckpt_path}")
+    model.load_state_dict(torch.load(ckpt_path, map_location=device))
+    
+    # Get training loader
+    loaders = get_dataloaders(cfg)
+    ld_tr, _, _ = loaders
+    
+    # Init Profiler
+    latent_dim = cfg['model']['latent_dim']
+    profiler = LatentProfiler(latent_dim=latent_dim)
+    
+    # Fit
+    profiler.fit(model, ld_tr, device)
+    
+    # Save
+    run_dir = cfg['training']['run_dir']
+    save_path = os.path.join(run_dir, "latent_profile.joblib")
+    profiler.save(save_path)
+    logger.info(f"Latent profile saved to {save_path}")
+
 def main():
     parser = argparse.ArgumentParser(description="Reliable Echo Segmentation Pipeline")
     parser.add_argument("--config", type=str, default="configs/config.yaml")
@@ -146,6 +184,7 @@ def main():
     parser.add_argument("--train", action="store_true", help="Run training loop")
     parser.add_argument("--eval", action="store_true", help="Run evaluation (metrics + EF)")
     parser.add_argument("--rcps", action="store_true", help="Run RCPS calibration and evaluation")
+    parser.add_argument("--profile", action="store_true", help="Run Latent Profiling")
     parser.add_argument("--plot", action="store_true", help="Generate all plots")
     parser.add_argument("--all", action="store_true", help="Run full pipeline")
     
@@ -156,7 +195,7 @@ def main():
         cfg = yaml.safe_load(f)
 
     # If no specific step is requested, run all (or if --all is set)
-    run_all = args.all or not (args.init or args.preprocess or args.train or args.eval or args.plot or args.rcps)
+    run_all = args.all or not (args.init or args.preprocess or args.train or args.eval or args.plot or args.rcps or args.profile)
 
     device = run_init(cfg)
 
@@ -179,6 +218,10 @@ def main():
     # RCPS
     if run_all or args.rcps:
         run_rcps_pipeline(cfg)
+        
+    # Latent Profile
+    if run_all or args.profile:
+        run_profile(cfg, device)
 
 if __name__ == "__main__":
     main()
