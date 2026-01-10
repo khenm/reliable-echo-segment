@@ -1,4 +1,3 @@
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -542,4 +541,68 @@ def plot_results_table(df_data, title, save_path=None):
     
     plt.tight_layout()
     if save_path: plt.savefig(save_path, bbox_inches='tight')
+    return fig
+
+
+def plot_coverage_by_difficulty(df_bins, save_path=None):
+    """
+    Plots coverage comparison between Baseline and MACS across difficulty bins.
+    
+    Args:
+        df_bins (pd.DataFrame): DataFrame with index ["Easy", "Medium", "Hard"] 
+                                and columns ["Baseline", "MACS"].
+        save_path (str): Optional path to save the figure.
+        
+    Returns:
+        matplotlib.figure.Figure: The generated figure.
+    """
+    setup_style()
+    
+    # Re-order if needed
+    desired_order = ["Easy", "Medium", "Hard"]
+    df = df_bins.reindex(desired_order)
+    
+    fig, ax = plt.subplots(figsize=(6, 4), dpi=300)
+    
+    # Bar settings
+    x = np.arange(len(df.index))
+    width = 0.35
+    
+    # Colors: Baseline (Grey/Blue), MACS (Green/Highlight)
+    # Using a professional palette
+    color_base = "#7f7f7f"  # Grey
+    color_macs = "#2ca02c"  # Green
+    
+    rects1 = ax.bar(x - width/2, df["Baseline"], width, label='Baseline', color=color_base, alpha=0.8, edgecolor='k')
+    rects2 = ax.bar(x + width/2, df["MACS"], width, label='MACS (Yours)', color=color_macs, alpha=0.9, edgecolor='k')
+    
+    # Target Line
+    ax.axhline(y=0.90, color='r', linestyle='--', linewidth=1.2, label='Target (90%)')
+    
+    # Labels
+    ax.set_ylabel('Coverage (Pass Rate)')
+    ax.set_title('Coverage by Difficulty')
+    ax.set_xticks(x)
+    ax.set_xticklabels(df.index)
+    ax.legend(loc='lower left')
+    
+    ax.set_ylim(0.0, 1.05)
+    
+    # Add value labels
+    def autolabel(rects):
+        for rect in rects:
+            height = rect.get_height()
+            ax.annotate(f'{height:.2f}',
+                        xy=(rect.get_x() + rect.get_width() / 2, height),
+                        xytext=(0, 3),  # 3 points vertical offset
+                        textcoords="offset points",
+                        ha='center', va='bottom', fontsize=9)
+
+    autolabel(rects1)
+    autolabel(rects2)
+    
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, bbox_inches='tight', dpi=300)
+        print(f"Figure saved to {save_path}")
     return fig
