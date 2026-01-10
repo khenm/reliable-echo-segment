@@ -5,7 +5,7 @@ data:
   split_dir: "" 
   nifti_dir: ""
   img_size: [112, 112]
-  num_classes: 2 # Background, LV
+  num_classes: 2
   stratify_bins: [0, 45, 100]
 
 model:
