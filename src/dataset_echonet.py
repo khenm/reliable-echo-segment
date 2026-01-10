@@ -46,13 +46,28 @@ class EchoNetDataset(Dataset):
         else:
             logger.warning("No 'Split' column in FileList.csv. Using all data.")
             
+        # Normalize FileName: remove .avi extension if present to ensure consistency
+        df["FileName"] = df["FileName"].astype(str).apply(lambda x: x[:-4] if x.lower().endswith('.avi') else x)
         self.file_list = df
         
         # Load Tracings
         if os.path.exists(self.tracings_path):
             self.tracings = pd.read_csv(self.tracings_path)
+            
+            # Normalize Tracings FileName as well
+            self.tracings["FileName"] = self.tracings["FileName"].astype(str).apply(lambda x: x[:-4] if x.lower().endswith('.avi') else x)
+            
             # Filter tracings for relevant files
-            self.tracings = self.tracings[self.tracings["FileName"].isin(self.file_list["FileName"])]
+            # Check intersection
+            valid_files = set(self.file_list["FileName"])
+            original_tracing_count = len(self.tracings)
+            self.tracings = self.tracings[self.tracings["FileName"].isin(valid_files)]
+            
+            if len(self.tracings) == 0 and original_tracing_count > 0:
+                logger.warning(f"No tracings matched file list for split {self.split}. "
+                               f"Sample FileList: {list(valid_files)[:5]}. "
+                               f"Sample Tracings: {list(pd.read_csv(self.tracings_path)['FileName'].unique())[:5]}")
+
         else:
             logger.warning(f"VolumeTracings.csv not found at {self.tracings_path}. No masks will be generated.")
             self.tracings = None
@@ -66,7 +81,10 @@ class EchoNetDataset(Dataset):
             for (fname, frame), _ in grouped:
                 self.samples.append((fname, frame))
         else:
-            # Skip frames without tracings
+            # If no tracings file, maybe we just load videos without masks? 
+            # But the user error says "Found 0 valid labeled frames", implying we expect labels.
+            # If the user wants unlabeled data, they'd likely need a different loader or logic.
+            # For now, let's assume we need labels.
              pass
              
         logger.info(f"EchoNet ({self.split}): Found {len(self.samples)} valid labeled frames from {len(df)} videos.")
