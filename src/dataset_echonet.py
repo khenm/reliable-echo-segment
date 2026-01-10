@@ -176,7 +176,23 @@ class EchoNetDataset(Dataset):
         # Wrapper expects "case", "view", "phase"
         data["case"] = fname
         data["view"] = "A4C" # EchoNet is A4C usually
-        data["phase"] = f"F{frame_idx}"
+        
+        # Identify Phase (ED/ES) for EF calculation
+        # We need to look up EDFrame/ESFrame in file_list
+        row = self.file_list[self.file_list["FileName"] == fname]
+        phase = f"F{frame_idx}"
+        
+        if not row.empty:
+            ed_frame = row.iloc[0].get("EDFrame", -1)
+            es_frame = row.iloc[0].get("ESFrame", -1)
+            
+            # EchoNet Frame indices are integers
+            if frame_idx == ed_frame:
+                phase = "ED"
+            elif frame_idx == es_frame:
+                phase = "ES"
+                
+        data["phase"] = phase
         
         return data
 
