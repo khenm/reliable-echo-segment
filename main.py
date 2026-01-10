@@ -26,6 +26,12 @@ logger = get_logger()
 def run_init(cfg):
     """
     Initializes the environment, logging, and output directories.
+
+    Args:
+        cfg (dict): Configuration dictionary.
+
+    Returns:
+        torch.device: The device (CPU or CUDA) to be used.
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     save_root = cfg['training'].get('save_dir', 'runs')
@@ -33,12 +39,9 @@ def run_init(cfg):
     os.makedirs(run_dir, exist_ok=True)
     os.makedirs("checkpoints", exist_ok=True)
     
-    # Update config with run-specific paths
     cfg['training']['run_dir'] = run_dir
     
-    # Helper to setup file logging for this run
     log_file = os.path.join(run_dir, "run.log")
-    # Re-fetch logger to add file handler
     _ = get_logger(log_file=log_file)
     
     logger.info("Initializing...")
@@ -48,25 +51,19 @@ def run_init(cfg):
     device = get_device()
     logger.info(f"Using device: {device}")
     
-    # Standardize checkpoint path: checkpoints/run_<timestamp>_<name>
-    ckpt_name = cfg['training']['ckpt_save_path']
-    # If the user provided a full path or just a filename, handle it
     if "/" in ckpt_name:
         ckpt_name = os.path.basename(ckpt_name)
     
-    # Store checkpoint in configured checkpoint_dir or local checkpoints folder
     ckpt_dir = cfg['training'].get('checkpoint_dir', 'checkpoints')
     os.makedirs(ckpt_dir, exist_ok=True)
     
     cfg['training']['ckpt_save_path'] = os.path.join(ckpt_dir, f"run_{timestamp}_{ckpt_name}")
     
-    # Store metrics in the run directory
     metrics_csv = cfg['training']['test_metrics_csv']
     if "/" in metrics_csv:
         metrics_csv = os.path.basename(metrics_csv)
     cfg['training']['test_metrics_csv'] = os.path.join(run_dir, metrics_csv)
     
-    # Store clinical pairs in run dir as well (was hardcoded to runs/camus_clinical_pairs.csv)
     cfg['training']['clinical_pairs_csv'] = os.path.join(run_dir, "camus_clinical_pairs.csv")
 
     return device
@@ -74,6 +71,9 @@ def run_init(cfg):
 def run_preprocess(cfg):
     """
     Verifies data availability and loading by realizing the DataLoaders.
+
+    Args:
+        cfg (dict): Configuration dictionary.
     """
     logger.info("Checking data loading...")
     get_dataloaders(cfg)
@@ -82,6 +82,10 @@ def run_preprocess(cfg):
 def run_train(cfg, device):
     """
     Instantiates the model and trainer, then starts the training loop.
+
+    Args:
+        cfg (dict): Configuration dictionary.
+        device (torch.device): The computation device.
     """
     logger.info("Starting Training...")
     loaders = get_dataloaders(cfg)
@@ -94,6 +98,10 @@ def run_eval(cfg, device):
     """
     Runs evaluation on the test set involving both technical (Dice/HD95) 
     and clinical (EF/Area) metrics.
+
+    Args:
+        cfg (dict): Configuration dictionary.
+        device (torch.device): The computation device.
     """
     logger.info("Starting Evaluation...")
     loaders = get_dataloaders(cfg)
@@ -118,6 +126,9 @@ def run_eval(cfg, device):
 def run_plot(cfg):
     """
     Generates summary plots from validation and testing results.
+
+    Args:
+        cfg (dict): Configuration dictionary.
     """
     logger.info("Generating plots...")
     metrics_path = cfg['training']['test_metrics_csv']
@@ -146,10 +157,13 @@ def run_plot(cfg):
 def run_profile(cfg, device):
     """
     Runs the latent space profiling on the training set.
+
+    Args:
+        cfg (dict): Configuration dictionary.
+        device (torch.device): The computation device.
     """
     logger.info("Starting Latent Profiling...")
     
-    # Load model
     model = get_model(cfg, device)
     ckpt_path = cfg['training']['ckpt_save_path']
     if not os.path.exists(ckpt_path):
@@ -163,24 +177,24 @@ def run_profile(cfg, device):
     logger.info(f"Loading checkpoint: {ckpt_path}")
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
     
-    # Get training loader
     loaders = get_dataloaders(cfg)
     ld_tr, _, _ = loaders
     
-    # Init Profiler
     latent_dim = cfg['model']['latent_dim']
     profiler = LatentProfiler(latent_dim=latent_dim)
     
-    # Fit
     profiler.fit(model, ld_tr, device)
     
-    # Save
     run_dir = cfg['training']['run_dir']
     save_path = os.path.join(run_dir, "latent_profile.joblib")
     profiler.save(save_path)
     logger.info(f"Latent profile saved to {save_path}")
 
 def main():
+    """
+    Main entry point for the Reliable Echo Segmentation Pipeline.
+    Parses arguments and orchestrates the execution of pipeline steps.
+    """
     parser = argparse.ArgumentParser(description="Reliable Echo Segmentation Pipeline")
     parser.add_argument("--config", type=str, default="configs/config.yaml")
     parser.add_argument("--init", action="store_true", help="Run initialization check")
@@ -195,42 +209,66 @@ def main():
     
     args = parser.parse_args()
 
-    # Load Config
     with open(args.config, 'r') as f:
         cfg = yaml.safe_load(f)
 
-    # If no specific step is requested, run all (or if --all is set)
     run_all = args.all or not (args.init or args.preprocess or args.train or args.eval or args.plot or args.rcps or args.profile or args.adaptive)
 
     device = run_init(cfg)
 
-    # Preprocess
+    needs_checkpoint = args.eval or args.rcps or args.profile or args.adaptive or args.plot
+    is_training = args.train or args.all
+    
+    if needs_checkpoint and not is_training:
+        current_ckpt = cfg['training']['ckpt_save_path']
+        if not os.path.exists(current_ckpt):
+            ckpt_dir = os.path.dirname(current_ckpt)
+            logger.info(f"Checkpoint {current_ckpt} not found. Searching for latest in {ckpt_dir}...")
+            
+            latest_ckpt = find_latest_checkpoint(ckpt_dir)
+            if latest_ckpt:
+                logger.info(f"Using latest checkpoint: {latest_ckpt}")
+                cfg['training']['ckpt_save_path'] = latest_ckpt
+            else:
+                logger.warning(f"No checkpoint found in {ckpt_dir}. Subsequent steps may fail.")
+
     if run_all or args.preprocess:
         run_preprocess(cfg)
     
-    # Train
     if run_all or args.train:
         run_train(cfg, device)
         
-    # Eval
     if run_all or args.eval:
         run_eval(cfg, device)
         
-    # Plot
     if run_all or args.plot:
         run_plot(cfg)
         
-    # RCPS
     if run_all or args.rcps:
         run_rcps_pipeline(cfg)
         
-    # Latent Profile
     if run_all or args.profile:
         run_profile(cfg, device)
         
-    # Adaptive Calibration
     if run_all or args.adaptive:
         run_adaptive_pipeline(cfg)
+
+def find_latest_checkpoint(ckpt_dir):
+    """
+    Finds the most recently modified checkpoint file in the directory.
+
+    Args:
+        ckpt_dir (str): Directory path content checkpoint files.
+
+    Returns:
+        str | None: Path to the latest checkpoint file, or None if not found.
+    """
+    if not os.path.exists(ckpt_dir):
+        return None
+    files = [os.path.join(ckpt_dir, f) for f in os.listdir(ckpt_dir) if f.endswith(".pt")]
+    if not files:
+        return None
+    return max(files, key=os.path.getmtime)
 
 if __name__ == "__main__":
     main()
