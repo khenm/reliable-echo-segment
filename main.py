@@ -54,8 +54,11 @@ def run_init(cfg):
     if "/" in ckpt_name:
         ckpt_name = os.path.basename(ckpt_name)
     
-    # Store checkpoint in global checkpoints folder, but unique to run
-    cfg['training']['ckpt_save_path'] = os.path.join("checkpoints", f"run_{timestamp}_{ckpt_name}")
+    # Store checkpoint in configured checkpoint_dir or local checkpoints folder
+    ckpt_dir = cfg['training'].get('checkpoint_dir', 'checkpoints')
+    os.makedirs(ckpt_dir, exist_ok=True)
+    
+    cfg['training']['ckpt_save_path'] = os.path.join(ckpt_dir, f"run_{timestamp}_{ckpt_name}")
     
     # Store metrics in the run directory
     metrics_csv = cfg['training']['test_metrics_csv']

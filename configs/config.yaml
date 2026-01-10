@@ -18,6 +18,7 @@ training:
   patience: 10
   seed: 42
   ckpt_save_path: "best_camus.pt"
+  checkpoint_dir: "/content/drive/MyDrive/Dataset/CAMUS/checkpoints/vaeunet/"
   save_dir: "/content/drive/MyDrive/Dataset/CAMUS/runs"
   test_metrics_csv: "camus_test_metrics.csv"
 
