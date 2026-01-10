@@ -39,6 +39,7 @@ class Trainer:
         
         dev_type = device.type if hasattr(device, 'type') else str(device)
         self.scaler = torch.amp.GradScaler(device=dev_type, enabled=(dev_type == 'cuda'))
+        self.kl_weight = cfg['training'].get('kl_weight', 1e-4) # Beta parameter
 
     def train(self):
         """
@@ -64,8 +65,15 @@ class Trainer:
                 dev_type = self.device.type if hasattr(self.device, 'type') else str(self.device)
                 
                 with torch.amp.autocast(device_type=dev_type):
-                    logits = self.model(imgs)
-                    loss = self.loss_fn(logits, labs)
+                    logits, mu, log_var = self.model(imgs)
+                    dice_ce_loss = self.loss_fn(logits, labs)
+                    
+                    # KL Divergence: -0.5 * sum(1 + log_var - mu^2 - exp(log_var))
+                    # Sum over latent dim, mean over batch usually
+                    kl_div = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1)
+                    kl_loss = torch.mean(kl_div)
+                    
+                    loss = dice_ce_loss + self.kl_weight * kl_loss
                 
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.opt)
@@ -73,7 +81,8 @@ class Trainer:
                 run_loss += loss.item()
 
             val_dice = self._validate()
-            logger.info(f"E{ep:03d} trainLoss={run_loss/len(self.ld_tr):.4f} valDice={val_dice:.4f}")
+            val_dice = self._validate()
+            logger.info(f"E{ep:03d} trainLoss={run_loss/len(self.ld_tr):.4f} (KL={kl_loss.item():.6f}) valDice={val_dice:.4f}")
 
             if val_dice > best_metric:
                 logger.info(f"Saving checkpoint to {self.ckpt_path}...")
@@ -105,7 +114,7 @@ class Trainer:
                 v_img = vb["image"].to(self.device)
                 v_lab = vb["label"].to(self.device)
 
-                v_logits = self.model(v_img)
+                v_logits, _, _ = self.model(v_img)
                 v_pred_labels = torch.argmax(v_logits, dim=1)
 
                 if v_lab.ndim == 4 and v_lab.shape[1] == 1:
@@ -142,7 +151,7 @@ class Trainer:
                 gts = batch["label"].to(self.device)
                 cases, views, phases = batch["case"], batch["view"], batch["phase"]
 
-                logits = self.model(imgs)
+                logits, _, _ = self.model(imgs)
                 pred_labels = torch.argmax(logits, dim=1)
 
                 if gts.ndim == 4 and gts.shape[1] == 1:

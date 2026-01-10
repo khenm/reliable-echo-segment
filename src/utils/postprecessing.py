@@ -28,7 +28,7 @@ def generate_clinical_pairs(model, loader, device, save_path):
             gts = batch["label"].to(device)
             cases, views, phases = batch["case"], batch["view"], batch["phase"]
 
-            logits = model(imgs)
+            logits, _, _ = model(imgs)
             preds = torch.argmax(logits, dim=1)
 
             for i in range(len(imgs)):

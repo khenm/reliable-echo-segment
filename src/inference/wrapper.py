@@ -22,7 +22,7 @@ def predict_with_guarantee(model, image, calibrator):
         raise ValueError("Calibrator has not been calibrated yet.")
         
     with torch.no_grad():
-        logits = model(image)
+        logits, _, _ = model(image)
         probs = torch.softmax(logits, dim=1)
         
         max_probs, preds = torch.max(probs, dim=1)

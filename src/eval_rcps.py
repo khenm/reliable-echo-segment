@@ -124,7 +124,7 @@ def run_rcps_pipeline(cfg):
             imgs = batch["image"].to(device)
             labels = batch["label"].to(device)
             
-            logits = model(imgs)
+            logits, _, _ = model(imgs)
             probs = torch.softmax(logits, dim=1)
             
             # Scores for target class (LV)
