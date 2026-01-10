@@ -41,7 +41,6 @@ class EchoNetDataset(Dataset):
         df = pd.read_csv(self.file_list_path)
         
         # Filter by split
-        # EchoNet splits are usually TRAIN, VAL, TEST in 'Split' column
         if "Split" in df.columns:
             df = df[df["Split"].str.upper() == self.split]
         else:
@@ -67,8 +66,7 @@ class EchoNetDataset(Dataset):
             for (fname, frame), _ in grouped:
                 self.samples.append((fname, frame))
         else:
-             # If no tracings (unsupervised?), maybe just load frames 0 for now?
-             # For now, require tracings.
+            # Skip frames without tracings
              pass
              
         logger.info(f"EchoNet ({self.split}): Found {len(self.samples)} valid labeled frames from {len(df)} videos.")
@@ -77,11 +75,20 @@ class EchoNetDataset(Dataset):
         return len(self.samples)
 
     def _load_video_frame(self, video_path, frame_idx):
+        """
+        Loads a specific frame from a video file.
+
+        Args:
+            video_path (str): Path to the video file.
+            frame_idx (int): Index of the frame to load.
+
+        Returns:
+            np.ndarray: The loaded frame as a grayscale numpy array, or None if loading fails.
+        """
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             return None
             
-        # EchoNet is usually 112x112 or similar. 
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ret, frame = cap.read()
         cap.release()
@@ -89,37 +96,27 @@ class EchoNetDataset(Dataset):
         if not ret:
             return None
             
-        # BGR to Gray
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         return frame
 
     def _generate_mask(self, points, height, width):
-        # points: list of (x1, y1, x2, y2)
-        # We need to construct a polygon.
-        # EchoNet tracings are pairs of points along the myocardium.
-        # Usually organized roughly sorted? 
-        # Standard approach: Sort by angle or simple order.
-        # Assuming points are (x1, y1) and (x2, y2) outlining the LV.
-        # We collect all x1,y1 and reverse x2,y2 to form a loop?
-        # Let's inspect typical structure logic from public EchoNet utils:
-        # data = tracing_df; x1, y1, x2, y2
-        # mask = np.zeros((H, W))
-        # r, c = skimage.draw.polygon(x, y)
-        
+        """
+        Generates a binary mask from coordinate points.
+
+        Args:
+            points (pd.DataFrame): DataFrame containing 'X1', 'Y1', 'X2', 'Y2' coordinates.
+            height (int): Height of the mask.
+            width (int): Width of the mask.
+
+        Returns:
+            np.ndarray: Binary mask with the polygon filled.
+        """
         mask = np.zeros((height, width), dtype=np.uint8)
-        
-        # Extract coordinates
-        # Each row is a spline point? No, usually it's pairs line segments orthogonal to long axis?
-        # Let's simple-concat: (x1,y1) then (x2,y2) reversed.
         
         x1 = points["X1"].values
         y1 = points["Y1"].values
         x2 = points["X2"].values
         y2 = points["Y2"].values
-        
-        # Combine to polygon
-        # Ideally they are sorted from apex to base or similar.
-        # Assuming CSV order is spatial.
         
         xs = np.concatenate([x1, x2[::-1]])
         ys = np.concatenate([y1, y2[::-1]])
@@ -130,19 +127,25 @@ class EchoNetDataset(Dataset):
         return mask
 
     def __getitem__(self, idx):
+        """
+        Retrieves a sample from the dataset.
+
+        Args:
+            idx (int): Index of the sample.
+
+        Returns:
+            dict: Dictionary containing 'image', 'label', 'case', 'view', and 'phase'.
+        """
         fname, frame_idx = self.samples[idx]
         
         video_path = os.path.join(self.videos_dir, fname)
-        # Usually FileName includes extension ".avi"
         if not fname.lower().endswith(".avi"):
              video_path += ".avi"
              
         # Load Image
         img_arr = self._load_video_frame(video_path, frame_idx)
         if img_arr is None:
-            # Fallback or error
-            # Return a dummy to avoid crash, but log error
-            print(f"Error loading {fname} frame {frame_idx}")
+            logger.error(f"Error loading {fname} frame {frame_idx}")
             return self.__getitem__((idx+1)%len(self))
             
         H, W = img_arr.shape
@@ -156,29 +159,20 @@ class EchoNetDataset(Dataset):
             mask_arr = np.zeros_like(img_arr)
 
         # Prepare for Transforms
-        # Monai transforms usually expect channel first (C, H, W)
-        # Current: (H, W)
         img_arr = img_arr[None, ...].astype(np.float32) # (1, H, W)
         mask_arr = mask_arr[None, ...].astype(np.float32) # (1, H, W)
         
         data = {"image": img_arr, "label": mask_arr}
         
         # Apply Transforms
-        # Note: We must handle numpy->tensor conversion if transforms don't.
-        # Our main config uses monai 'LoadImaged' which returns MetaTensor.
-        # Here we have numpy. 
-        # So we should use transforms that accept dicts of numpy arrays.
-        
         if self.transform:
             data = self.transform(data)
             
         # Metadata
-        # Wrapper expects "case", "view", "phase"
         data["case"] = fname
-        data["view"] = "A4C" # EchoNet is A4C usually
+        data["view"] = "A4C"
         
         # Identify Phase (ED/ES) for EF calculation
-        # We need to look up EDFrame/ESFrame in file_list
         row = self.file_list[self.file_list["FileName"] == fname]
         phase = f"F{frame_idx}"
         
@@ -205,15 +199,7 @@ def get_echonet_dataloaders(cfg):
     batch_size = cfg['training']['batch_size_train']
     num_workers = cfg['training'].get('num_workers', 4)
     
-    # Define Transforms (Simpler than NIfTI pipeline since we have numpy)
-    # We re-define them here to work with numpy inputs
-    
-    _common = [
-        # EnsureChannelFirst is already handled in __getitem__ manually
-        ScaleIntensityRangePercentiles(minv=0.0, maxv=1.0, lower=1, upper=99, clip=True), # applied to image only? 
-        # Monai Dict transforms are safer
-    ]
-    
+    # Define Transforms
     from monai.transforms import ScaleIntensityRangePercentilesd, ResizeWithPadOrCropd, RandFlipd, RandRotate90d, RandAffined, ToTensord
     
     tf_tr = Compose([
