@@ -51,6 +51,7 @@ def run_init(cfg):
     device = get_device()
     logger.info(f"Using device: {device}")
     
+    ckpt_name = cfg['training']['ckpt_save_path']
     if "/" in ckpt_name:
         ckpt_name = os.path.basename(ckpt_name)
     
