@@ -1,0 +1,34 @@
+
+data:
+  name: "ECHONET"
+  root_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic"
+  # split_dir and nifti_dir are not used by generic EchoNet loader but kept for schema compatibility or ignored
+  split_dir: "" 
+  nifti_dir: ""
+  img_size: [112, 112] # EchoNet resolution is typically 112x112
+  num_classes: 2 # Background, LV
+  stratify_bins: [0, 45, 100]
+
+model:
+  spatial_dims: 2
+  in_channels: 1
+  channels: [32, 64, 128, 256, 512]
+  strides: [2, 2, 2, 2]
+  num_res_units: 2
+  latent_dim: 256
+
+training:
+  epochs: 50
+  batch_size_train: 32
+  batch_size_val: 32
+  num_workers: 4
+  persistent_workers: True
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  kl_weight: 1.0e-4
+  patience: 10
+  seed: 42
+  ckpt_save_path: "best_echonet.pt"
+  save_dir: "runs/echonet"
+  test_metrics_csv: "echonet_metrics.csv"
+  clinical_pairs_csv: "echonet_clinical_pairs.csv"
