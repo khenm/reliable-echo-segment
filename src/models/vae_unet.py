@@ -39,9 +39,8 @@ class VAEUNet(nn.Module):
         self.spatial_dims = spatial_dims
         
         # Encoder
-        self.encoder_blocks = nn.ModuleList()
         self.blocks = nn.ModuleList()
-        self.up_samples = nn.ModuleList()
+        self.ups = nn.ModuleList()
         self.downs = nn.ModuleList()
         current_c = in_channels
         
