@@ -36,6 +36,45 @@ def calculate_ef_from_areas(ed_area, es_area):
         return 0.0
     return (ed_area - es_area) / ed_area * 100.0
 
+def calculate_ef_interval(ed_vol, es_vol, delta_ed, delta_es, epsilon=1e-6):
+    """
+    Calculates the uncertainty interval for Ejection Fraction (EF) using Taylor Expansion.
+    
+    Formula:
+        Delta EF approx sqrt( (dEF/dVs * Delta Vs)^2 + (dEF/dVd * Delta Vd)^2 )
+        dEF/dVs = -1 / Vd
+        dEF/dVd = Vs / Vd^2
+        
+    Args:
+        ed_vol (float): End-diastolic volume (or area).
+        es_vol (float): End-systolic volume (or area).
+        delta_ed (float): Uncertainty in ED volume.
+        delta_es (float): Uncertainty in ES volume.
+        epsilon (float): Small value to prevent division by zero.
+        
+    Returns:
+        float: The calculated uncertainty radius for EF (Delta EF) in percentage points.
+    """
+    if ed_vol < epsilon:
+        # If Vd is effectively zero, EF is undefined or 0. 
+        # Return a large uncertainty or 0 depending on philosophy. 
+        # Returning 0 to avoid NaNs, assuming EF is just 0.
+        return 0.0
+        
+    # Partial derivatives
+    # f = 1 - Vs/Vd
+    # df/dVs = -1/Vd
+    # df/dVd = Vs / Vd^2
+    
+    term_vs = (-1.0 / ed_vol) * delta_es
+    term_vd = (es_vol / (ed_vol ** 2)) * delta_ed
+    
+    # Combined uncertainty (radius)
+    delta_ef = np.sqrt(term_vs**2 + term_vd**2)
+    
+    # Scale to percentage
+    return delta_ef * 100.0
+
 def get_bland_altman_stats(ref, pred):
     """
     Computes Bland-Altman statistics: Pearson correlation, Bias, and Limits of Agreement.

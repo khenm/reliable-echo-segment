@@ -10,6 +10,7 @@ from src.models.model import get_model
 from src.eval_rcps import get_rcps_dataloaders
 from src.analysis.latent_profile import LatentProfiler
 from src.analysis.adaptive_calibration import AdaptiveScaler
+import joblib
 
 def run_adaptive_pipeline(cfg):
     """
@@ -181,3 +182,13 @@ def run_adaptive_pipeline(cfg):
         f.write(f"Quantile Q: {Q}\n")
         f.write(f"Coverage: {coverage:.4f}\n")
         f.write(f"Avg Bound Width: {avg_width:.4f}\n")
+        
+    # Save Calibration State for Inference
+    state_path = os.path.join(run_dir, "calibration_state.joblib")
+    state = {
+        'scaler': scaler,
+        'Q': Q,
+        'alpha': alpha
+    }
+    joblib.dump(state, state_path)
+    logger.info(f"Saved calibration state to {state_path}")

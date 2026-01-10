@@ -1,7 +1,9 @@
+import os
 import torch
 import pandas as pd
 import numpy as np
-from .metric import calculate_ef_from_areas
+from .metric import calculate_ef_from_areas, calculate_ef_interval
+from src.inference.uncertainty import UncertaintyEstimator
 
 def generate_clinical_pairs(model, loader, device, save_path):
     """
@@ -21,6 +23,20 @@ def generate_clinical_pairs(model, loader, device, save_path):
     area_rows = []
     LV_LABEL = 1
 
+    # Try to load Uncertainty Estimator
+    run_dir = os.path.dirname(save_path)
+    cal_state_path = os.path.join(run_dir, "calibration_state.joblib")
+    estimator = None
+    
+    if os.path.exists(cal_state_path):
+        try:
+            estimator = UncertaintyEstimator.load(cal_state_path)
+            print(f"Loaded Uncertainty Estimator from {cal_state_path}")
+        except Exception as e:
+            print(f"Failed to load Uncertainty Estimator: {e}")
+    else:
+        print(f"No calibration state found at {cal_state_path}. EF Uncertainty will be 0.")
+
     dev_type = device.type if hasattr(device, 'type') else str(device)
     with torch.no_grad(), torch.amp.autocast(device_type=dev_type):
         for batch in loader:
@@ -28,7 +44,8 @@ def generate_clinical_pairs(model, loader, device, save_path):
             gts = batch["label"].to(device)
             cases, views, phases = batch["case"], batch["view"], batch["phase"]
 
-            logits, _, _ = model(imgs)
+            # Capture mu for uncertainty
+            logits, mu, _ = model(imgs)
             preds = torch.argmax(logits, dim=1)
 
             for i in range(len(imgs)):
@@ -37,13 +54,20 @@ def generate_clinical_pairs(model, loader, device, save_path):
 
                 area_gt = float((gt_i == LV_LABEL).sum())
                 area_pred = float((pr_i == LV_LABEL).sum())
+                
+                # Calculate Uncertainty
+                delta_v = 0.0
+                if estimator is not None:
+                    vec = mu[i].cpu().numpy()
+                    delta_v = estimator.estimate_uncertainty(vec, area_pred)
 
                 area_rows.append({
                     "case": cases[i],
                     "view": views[i],
                     "phase": phases[i],
                     "area_gt": area_gt,
-                    "area_pred": area_pred
+                    "area_pred": area_pred,
+                    "delta_v": delta_v
                 })
 
     df_areas = pd.DataFrame(area_rows)
@@ -60,13 +84,19 @@ def generate_clinical_pairs(model, loader, device, save_path):
 
         ef_ref = calculate_ef_from_areas(ed["area_gt"], es["area_gt"])
         ef_pred = calculate_ef_from_areas(ed["area_pred"], es["area_pred"])
+        
+        # Calculate EF Uncertainty
+        delta_ed = ed.get("delta_v", 0.0)
+        delta_es = es.get("delta_v", 0.0)
+        ef_uncertainty = calculate_ef_interval(ed["area_pred"], es["area_pred"], delta_ed, delta_es)
 
         pairs.append({
             "case": case, "view": view,
             "ED_ref": ed["area_gt"], "ES_ref": es["area_gt"], "EF_ref": ef_ref,
             "ED_pred": ed["area_pred"], "ES_pred": es["area_pred"], "EF_pred": ef_pred,
             "EF_error": ef_pred - ef_ref,
-            "EF_abs_err": abs(ef_pred - ef_ref)
+            "EF_abs_err": abs(ef_pred - ef_ref),
+            "EF_uncertainty": ef_uncertainty
         })
 
     df_pairs = pd.DataFrame(pairs)
