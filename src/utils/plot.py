@@ -482,6 +482,7 @@ def plot_ef_category_roc(df_ef, save_path=None):
     
     # Confusion Matrix
     cm = pd.crosstab(df_ef["cat_ref"], df_ef["cat_pred"])
+    cm = cm.reindex(index=labels, columns=labels, fill_value=0)
     
     # ROC for Low EF (<45%)
     y_true = (df_ef["EF_ref"] < 45.0).astype(int)
