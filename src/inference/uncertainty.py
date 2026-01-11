@@ -44,8 +44,13 @@ class UncertaintyEstimator:
                 profiler_path = candidate_path
             else:
                  from src.utils.util_ import find_latest_latent_profile
-                 print(f"Latent profile not found at {candidate_path}. Searching for latest in runs/...")
-                 profiler_path = find_latest_latent_profile("runs")
+                 print(f"Latent profile not found at {candidate_path}. Searching for latest in parent runs...")
+                 
+                 save_root = os.path.dirname(run_dir)
+                 if not os.path.exists(save_root):
+                     save_root = "runs"
+                     
+                 profiler_path = find_latest_latent_profile(save_root)
                  if profiler_path:
                       print(f"Found latest latent profile: {profiler_path}")
                  else:
