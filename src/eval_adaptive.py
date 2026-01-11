@@ -48,13 +48,21 @@ def run_adaptive_pipeline(cfg):
         
     if not os.path.exists(profiler_path):
         from src.utils.util_ import find_latest_latent_profile
-        logger.info(f"Latent profile not found at {profiler_path}. Searching for latest in runs/...")
-        found_path = find_latest_latent_profile(run_dir if os.path.exists(run_dir) else "runs")
+        logger.info(f"Latent profile not found at {profiler_path}. Searching for latest in parent runs...")
+        
+        # run_dir is typically runs/timestamp or similar. We want to search 'runs/' (the parent)
+        # to find profiles from OTHER timestamped runs.
+        save_root = os.path.dirname(run_dir) if os.path.exists(run_dir) else "runs"
+        if not os.path.exists(save_root):
+             # Fallback if run_dir itself doesn't exist yet or is top level
+             save_root = "runs"
+             
+        found_path = find_latest_latent_profile(save_root)
         if found_path:
              profiler_path = found_path
              logger.info(f"Found latest latent profile: {profiler_path}")
         else:
-             logger.warning(f"Latent profile not found at {profiler_path} and no available profile in runs/. Please run --profile first.")
+             logger.warning(f"Latent profile not found at {profiler_path} and no available profile in {save_root}. Please run --profile first.")
              return 
 
     # Load Model
