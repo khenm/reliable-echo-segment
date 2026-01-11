@@ -14,53 +14,6 @@ from src.core.conformal import ConformalCalibrator
 from src.calibration_split import split_validation_set
 from src.inference.wrapper import predict_with_guarantee
 
-def get_rcps_dataloaders(cfg):
-    """
-    Creates dataloaders for the RCPS calibration and test sets.
-    
-    Args:
-        cfg (dict): Configuration dictionary containing data paths.
-        
-    Returns:
-        tuple: (DataLoader, DataLoader) for calibration and test sets.
-        
-    Raises:
-        FileNotFoundError: If the split files do not exist.
-    """
-    split_dir = cfg['data']['split_dir']
-    nii_dir = cfg['data']['nifti_dir']
-    
-    cal_txt = os.path.join(split_dir, "subgroup_validation.txt")
-    test_txt = os.path.join(split_dir, "subgroup_testing.txt")
-    
-    if not os.path.exists(cal_txt) or not os.path.exists(test_txt):
-        raise FileNotFoundError(f"Split files not found at {split_dir}.")
-        
-    ids_cal = _read_ids(cal_txt)
-    ids_test = _read_ids(test_txt)
-    
-    cal_files = _get_files(ids_cal, nii_dir)
-    test_files = _get_files(ids_test, nii_dir)
-    
-    # Transforms
-    img_size = tuple(cfg['data']['img_size'])
-    tf_val = Compose([
-        LoadImaged(("image", "label")),
-        EnsureChannelFirstd(("image", "label")),
-        ScaleIntensityRangePercentilesd("image", 1, 99, 0, 1, clip=True),
-        ResizeWithPadOrCropd(("image", "label"), img_size),
-    ])
-    
-    ds_cal = CacheDataset(cal_files, tf_val, 1.0, num_workers=4)
-    ds_test = CacheDataset(test_files, tf_val, 1.0, num_workers=4)
-    
-    ld_cal = DataLoader(ds_cal, batch_size=cfg['training']['batch_size_val'], shuffle=False, 
-                       num_workers=4, pin_memory=True, collate_fn=list_data_collate)
-    ld_test = DataLoader(ds_test, batch_size=cfg['training']['batch_size_val'], shuffle=False, 
-                        num_workers=4, pin_memory=True, collate_fn=list_data_collate)
-                        
-    return ld_cal, ld_test
-
 def run_rcps_pipeline(cfg):
     """
     Executes the RCPS pipeline: Calibration and Evaluation.
@@ -80,19 +33,9 @@ def run_rcps_pipeline(cfg):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
     
-    # Check for split files, generate if missing
-    # Run RCPS
-    split_dir = cfg['data']['split_dir']
-    
-    # We now use the main validation set for calibration and main test set for testing
-    # No need to generate sub-splits anymore.
-    
     # Load Data
-    try:
-        ld_cal, ld_test = get_rcps_dataloaders(cfg)
-    except FileNotFoundError as e:
-        logger.error(str(e))
-        return
+    from src.dataset import get_dataloaders
+    _, ld_cal, ld_test = get_dataloaders(cfg)
 
     logger.info(f"Calibration batches: {len(ld_cal)} | Test batches: {len(ld_test)}")
     

@@ -7,7 +7,7 @@ from monai.metrics import DiceMetric
 from src.utils.logging import get_logger
 from src.dataset import get_dataloaders
 from src.models.model import get_model
-from src.eval_rcps import get_rcps_dataloaders
+
 from src.analysis.latent_profile import LatentProfiler
 from src.analysis.adaptive_calibration import AdaptiveScaler
 import joblib
@@ -79,11 +79,8 @@ def run_adaptive_pipeline(cfg):
     profiler.load(profiler_path)
     
     # Load Data (Use RCPS splits for consistency)
-    try:
-        ld_cal, ld_test = get_rcps_dataloaders(cfg)
-    except FileNotFoundError:
-        logger.error("Split files not found. Run RCPS first to generate splits or ensure paths correct.")
-        return
+    from src.dataset import get_dataloaders
+    _, ld_cal, ld_test = get_dataloaders(cfg)
 
     # --- Phase 1: Calibration ---
     logger.info("Phase 1: Calibration - Fitting Adaptive Scaler")
