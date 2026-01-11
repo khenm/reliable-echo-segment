@@ -225,7 +225,7 @@ class Trainer:
                     dice_vals = dice_metric.aggregate().cpu().numpy().flatten()
                     hd95_vals = hd95_metric.aggregate().cpu().numpy().flatten()
 
-                    records.append({
+                    row = {
                         "case": cases[i], "view": views[i], "phase": phases[i],
                         "dice_LV": dice_vals[0] if len(dice_vals) > 0 else 0.0,
                         "hd95_LV": hd95_vals[0] if len(hd95_vals) > 0 else 0.0,
