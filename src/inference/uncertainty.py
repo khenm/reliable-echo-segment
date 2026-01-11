@@ -39,7 +39,18 @@ class UncertaintyEstimator:
         if profiler_path is None:
             # Assume profiler is in same dir as calibration state
             run_dir = os.path.dirname(calibration_state_path)
-            profiler_path = os.path.join(run_dir, "latent_profile.joblib")
+            candidate_path = os.path.join(run_dir, "latent_profile.joblib")
+            if os.path.exists(candidate_path):
+                profiler_path = candidate_path
+            else:
+                 from src.utils.util_ import find_latest_latent_profile
+                 print(f"Latent profile not found at {candidate_path}. Searching for latest in runs/...")
+                 profiler_path = find_latest_latent_profile("runs")
+                 if profiler_path:
+                      print(f"Found latest latent profile: {profiler_path}")
+                 else:
+                      # Let it fail in LatentProfiler.load if still None/invalid, or raise here
+                      pass
             
         from src.analysis.latent_profile import LatentProfiler
         profiler = LatentProfiler()

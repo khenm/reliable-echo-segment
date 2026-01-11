@@ -42,10 +42,20 @@ def run_adaptive_pipeline(cfg):
         logger.error("Checkpoint not found.")
         return
         
+    if not os.path.exists(ckpt_path):
+        logger.error("Checkpoint not found.")
+        return
+        
     if not os.path.exists(profiler_path):
-        logger.warning(f"Latent profile not found at {profiler_path}. Please run --profile first.")
-        # Optional: could auto-run profiling, but let's error for clarity
-        return 
+        from src.utils.util_ import find_latest_latent_profile
+        logger.info(f"Latent profile not found at {profiler_path}. Searching for latest in runs/...")
+        found_path = find_latest_latent_profile(run_dir if os.path.exists(run_dir) else "runs")
+        if found_path:
+             profiler_path = found_path
+             logger.info(f"Found latest latent profile: {profiler_path}")
+        else:
+             logger.warning(f"Latent profile not found at {profiler_path} and no available profile in runs/. Please run --profile first.")
+             return 
 
     # Load Model
     model = get_model(cfg, device)
