@@ -268,21 +268,21 @@ def main():
     
     if run_all or args.train:
         run_train(cfg, device)
+
+    if run_all or args.profile:
+        run_profile(cfg, device)
+
+    if run_all or args.rcps:
+        run_rcps_pipeline(cfg)
+
+    if run_all or args.adaptive:
+        run_adaptive_pipeline(cfg)
         
     if run_all or args.eval:
         run_eval(cfg, device)
         
     if run_all or args.plot:
         run_plot(cfg)
-        
-    if run_all or args.rcps:
-        run_rcps_pipeline(cfg)
-        
-    if run_all or args.profile:
-        run_profile(cfg, device)
-        
-    if run_all or args.adaptive:
-        run_adaptive_pipeline(cfg)
 
 def find_latest_checkpoint(ckpt_dir):
     """
