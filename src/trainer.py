@@ -227,9 +227,22 @@ class Trainer:
 
                     records.append({
                         "case": cases[i], "view": views[i], "phase": phases[i],
-                        "dice_LV": dice_vals[0], "dice_MYO": dice_vals[1], "dice_LA": dice_vals[2],
-                        "hd95_LV": hd95_vals[0], "hd95_MYO": hd95_vals[1], "hd95_LA": hd95_vals[2],
-                    })
+                        "dice_LV": dice_vals[0] if len(dice_vals) > 0 else 0.0,
+                        "hd95_LV": hd95_vals[0] if len(hd95_vals) > 0 else 0.0,
+                    }
+                    
+                    if len(dice_vals) >= 3:
+                        row.update({
+                            "dice_MYO": dice_vals[1], "dice_LA": dice_vals[2],
+                            "hd95_MYO": hd95_vals[1], "hd95_LA": hd95_vals[2],
+                        })
+                    else:
+                         row.update({
+                            "dice_MYO": 0.0, "dice_LA": 0.0,
+                            "hd95_MYO": 0.0, "hd95_LA": 0.0,
+                        })
+
+                    records.append(row)
 
         df = pd.DataFrame(records)
         df.to_csv(self.cfg['training']['test_metrics_csv'], index=False)
