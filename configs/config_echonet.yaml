@@ -8,13 +8,18 @@ data:
   num_classes: 2
   stratify_bins: [0, 45, 100]
 
-model:
+  # name: "VAEUNet" # Default
+  # VAEUNet params
   spatial_dims: 2
   in_channels: 1
   channels: [32, 64, 128, 256, 512]
   strides: [2, 2, 2, 2]
   num_res_units: 2
   latent_dim: 256
+  
+  # R2Plus1D params
+  # name: "R2Plus1D"
+  clip_length: 32
 
 training:
   epochs: 50
