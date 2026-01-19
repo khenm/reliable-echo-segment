@@ -4,9 +4,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric, HausdorffDistanceMetric, MAEMetric
-from monai.metrics import DiceMetric, HausdorffDistanceMetric
 from src.utils.logging import get_logger
 
 logger = get_logger()
@@ -104,7 +104,8 @@ class Trainer:
             self.model.train()
             run_loss = 0.0
             
-            for batch in self.ld_tr:
+            pbar = tqdm(self.ld_tr, desc=f"Epoch {ep}/{epochs}", mininterval=2.0)
+            for batch in pbar:
                 self.opt.zero_grad(set_to_none=True)
                 
                 dev_type = self.device.type if hasattr(self.device, 'type') else str(self.device)
@@ -136,8 +137,9 @@ class Trainer:
                 self.scaler.step(self.opt)
                 self.scaler.update()
                 run_loss += loss.item()
+                
+                pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
-            val_dice = self._validate()
             val_dice = self._validate()
             logger.info(f"E{ep:03d} trainLoss={run_loss/len(self.ld_tr):.4f} (KL={kl_loss.item():.6f}) valDice={val_dice:.4f}")
 
@@ -170,7 +172,7 @@ class Trainer:
                 break
         
         train_time = time.time() - start_tr
-        logger.info(f"🏁 Finished at epoch {stop_ep} (best={best_metric:.4f}) in {train_time/60:.1f} min")
+        logger.info(f"Finished at epoch {stop_ep} (best={best_metric:.4f}) in {train_time/60:.1f} min")
 
     def _validate(self):
         """
@@ -185,7 +187,7 @@ class Trainer:
         
         dev_type = self.device.type if hasattr(self.device, 'type') else str(self.device)
         with torch.no_grad(), torch.amp.autocast(device_type=dev_type):
-            for vb in self.ld_va:
+            for vb in tqdm(self.ld_va, desc="Validating", mininterval=2.0, leave=False):
                 if self.is_regression:
                     v_img = vb.get("video", vb.get("image")).to(self.device)
                     v_target = vb["target"].to(self.device)
@@ -210,9 +212,6 @@ class Trainer:
                     self.metr_dice_val(v_y_pred, v_y_true)
         
         if self.is_regression:
-            # For MAE, lower is better. Trainer logic assumes higher is better (saving best checkpoint).
-            # We can return negative MAE or invert the logic in train loop.
-            # Let's return negative MAE so higher is better (closer to 0).
             return -float(self.metr_mae_val.aggregate().cpu())
         else:
             return float(self.metr_dice_val.aggregate().cpu())
@@ -236,7 +235,7 @@ class Trainer:
              MAE_metric = MAEMetric(reduction="none")
              
              with torch.no_grad():
-                for batch in self.ld_ts:
+                for batch in tqdm(self.ld_ts, desc="Testing (MAE)", mininterval=2.0):
                     imgs = batch.get("video", batch.get("image")).to(self.device)
                     targets = batch["target"].to(self.device)
                     cases = batch["case"]
@@ -267,7 +266,7 @@ class Trainer:
             hd95_metric = HausdorffDistanceMetric(include_background=False, percentile=95, reduction="none")
 
             with torch.no_grad():
-                for batch in self.ld_ts:
+                for batch in tqdm(self.ld_ts, desc="Testing (Dice/HD)", mininterval=2.0):
                     imgs = batch["image"].to(self.device)
                     gts = batch["label"].to(self.device)
                     cases, views, phases = batch["case"], batch["view"], batch["phase"]

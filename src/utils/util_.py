@@ -57,3 +57,18 @@ def find_latest_latent_profile(root_dir="runs"):
     if latest_file:
         return os.path.abspath(latest_file)
     return None
+
+def load_checkpoint(model, ckpt_path, device):
+    """
+    Loads model state from a checkpoint file.
+    
+    Args:
+        model (torch.nn.Module): The model to load weights into.
+        ckpt_path (str): Path to the checkpoint file.
+        device (torch.device): Device to load the checkpoint onto.
+    """
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["model_state_dict"])
+    else:
+        model.load_state_dict(checkpoint)
