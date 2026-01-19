@@ -193,7 +193,10 @@ class Trainer:
                     v_target = vb["target"].to(self.device)
                     
                     v_preds = self.model(v_img)
-                    self.metr_mae_val(v_preds.squeeze(), v_target)
+                    # MAEMetric requires (B, C) shape
+                    if v_target.ndim == 1:
+                        v_target = v_target.view(-1, 1)
+                    self.metr_mae_val(v_preds, v_target)
                 else:
                     v_img = vb["image"].to(self.device)
                     v_lab = vb["label"].to(self.device)
@@ -232,17 +235,21 @@ class Trainer:
         records = []
         
         if self.is_regression:
-             MAE_metric = MAEMetric(reduction="none")
-             
              with torch.no_grad():
                 for batch in tqdm(self.ld_ts, desc="Testing (MAE)", mininterval=2.0):
                     imgs = batch.get("video", batch.get("image")).to(self.device)
                     targets = batch["target"].to(self.device)
                     cases = batch["case"]
                     
-                    preds = self.model(imgs).squeeze()
+                    preds = self.model(imgs)
                     
-                    MAE_metric(preds, targets)
+                    # Ensure (B,) shape for simple subtraction/logging
+                    # Model output is (B, 1), targets might be (B,) or (B, 1)
+                    if preds.ndim == 2:
+                        preds = preds.view(-1)
+                    if targets.ndim == 2:
+                        targets = targets.view(-1)
+                    
                     mae_vals = torch.abs(preds - targets).cpu().numpy()
                     
                     preds_np = preds.cpu().numpy()
