@@ -1,13 +1,22 @@
-import os
-import cv2
 import math
+import os
+
+import cv2
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset
 from monai.transforms import (
-    Compose, ScaleIntensityRangePercentiles, Resize, EnsureChannelFirst, RandFlip, RandRotate90, ToTensor, Lambda
+    Compose,
+    EnsureChannelFirst,
+    Lambda,
+    RandFlip,
+    RandRotate90,
+    Resize,
+    ScaleIntensityRangePercentiles,
+    ToTensor,
 )
+from torch.utils.data import Dataset
+
 from src.utils.logging import get_logger
 
 logger = get_logger()
@@ -76,16 +85,9 @@ class EchoNetDataset(Dataset):
         self.samples = []
         if self.tracings is not None:
             # Group by FileName and Frame
-            # Only keep frames that have tracings
             grouped = self.tracings.groupby(["FileName", "Frame"])
             for (fname, frame), _ in grouped:
                 self.samples.append((fname, frame))
-        else:
-            # If no tracings file, maybe we just load videos without masks? 
-            # But the user error says "Found 0 valid labeled frames", implying we expect labels.
-            # If the user wants unlabeled data, they'd likely need a different loader or logic.
-            # For now, let's assume we need labels.
-             pass
              
         logger.info(f"EchoNet ({self.split}): Found {len(self.samples)} valid labeled frames from {len(df)} videos.")
 
@@ -247,8 +249,38 @@ class EchoNetVideoDataset(Dataset):
         self.samples = df["FileName"].values
         self.targets = df["EF"].values if "EF" in df.columns else None
 
+        self.tracings_path = os.path.join(root_dir, "VolumeTracings.csv")
+        self.tracings = None
+        if os.path.exists(self.tracings_path):
+            self.tracings = pd.read_csv(self.tracings_path)
+            self.tracings["FileName"] = self.tracings["FileName"].astype(str).apply(lambda x: x[:-4] if x.lower().endswith('.avi') else x)
+            # Filter tracings for relevant files
+            valid_files = set(self.samples)
+            self.tracings = self.tracings[self.tracings["FileName"].isin(valid_files)]
+        else:
+            logger.warning(f"VolumeTracings.csv not found at {self.tracings_path}. No masks will be generated.")
+
     def __len__(self):
         return len(self.samples)
+
+    def _generate_mask(self, points, height, width):
+        """
+        Generates a binary mask from coordinate points.
+        """
+        mask = np.zeros((height, width), dtype=np.uint8)
+        
+        x1 = points["X1"].values
+        y1 = points["Y1"].values
+        x2 = points["X2"].values
+        y2 = points["Y2"].values
+        
+        xs = np.concatenate([x1, x2[::-1]])
+        ys = np.concatenate([y1, y2[::-1]])
+        
+        pts = np.stack([xs, ys], axis=1).astype(np.int32)
+        cv2.fillPoly(mask, [pts], 1)
+        
+        return mask
 
     def _load_video_clip(self, video_path):
         cap = cv2.VideoCapture(video_path)
@@ -257,10 +289,6 @@ class EchoNetVideoDataset(Dataset):
             
         frames = []
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
-        # Simple uniform sampling or consecutive
-        # Here we try to get a sequence of clip_len
-        # If video is shorter, loop it. If longer, random start (train) or center (val/test)
         
         start_frame = 0
         if total_frames > self.clip_len * self.sampling_rate:
@@ -276,7 +304,6 @@ class EchoNetVideoDataset(Dataset):
             if not ret:
                 break
             # Resize during load to save memory if needed, but transform handles it usually
-            # Convert to grayscale? R2+1D expects 3 channels usually, but we can replicate
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) 
             frames.append(frame)
             
@@ -295,7 +322,7 @@ class EchoNetVideoDataset(Dataset):
             
         # Stack -> (T, H, W, C)
         video = np.stack(frames, axis=0)
-        return video
+        return video, start_frame
 
     def __getitem__(self, idx):
         fname = self.samples[idx]
@@ -305,23 +332,47 @@ class EchoNetVideoDataset(Dataset):
         if not fname.lower().endswith(".avi"):
              video_path += ".avi"
              
-        video = self._load_video_clip(video_path)
+        video, start_frame = self._load_video_clip(video_path)
         if video is None:
             # Fallback
             return self.__getitem__((idx+1)%len(self))
             
+        T_clip, H, W, C = video.shape
+
+        # Generate Masks for the clip
+        # Output shape: (T, H, W) -> will become (1, T, H, W) after transform usually or we handle it manually
+        mask_clip = np.zeros((T_clip, H, W), dtype=np.uint8)
+
+        if self.tracings is not None:
+             # Find tracings for this file
+             file_tracings = self.tracings[self.tracings["FileName"] == fname]
+             if not file_tracings.empty:
+                 # Reconstruction of frame indices to match clip
+                 current_frame_idx = start_frame
+                 for t in range(T_clip):
+                     # Tracing frame is integer
+                     t_subset = file_tracings[file_tracings["Frame"] == current_frame_idx]
+                     if not t_subset.empty:
+                         mask_clip[t] = self._generate_mask(t_subset, H, W)
+                     
+                     current_frame_idx += self.sampling_rate
+
         # (T, H, W, C) -> (C, T, H, W) for PyTorch/Monai
-        # But Monai transforms usually expect channel first
         video = video.transpose(3, 0, 1, 2) # (C, T, H, W)
         video = video.astype(np.float32) / 255.0
         
+        # Mask: (T, H, W) -> (1, T, H, W)
+        mask_clip = mask_clip[None, ...].astype(np.float32)
+
         if self.transform:
             # Monai expects dictionary
-            data = {"video": video} 
+            # For 3D transforms, 'video' is (C, T, H, W), 'label' should be (C, T, H, W)
+            data = {"video": video, "label": mask_clip} 
             data = self.transform(data)
             video = data["video"]
+            mask_clip = data.get("label", mask_clip)
             
-        return {"video": video, "target": torch.tensor(target, dtype=torch.float32), "case": fname}
+        return {"video": video, "target": torch.tensor(target, dtype=torch.float32), "label": mask_clip, "case": fname}
 
 def get_echonet_dataloaders(cfg):
     """
@@ -337,13 +388,28 @@ def get_echonet_dataloaders(cfg):
         # Video Configuration
         clip_len = cfg['model'].get('clip_length', 32)
         
+        # Helper for resizing video (trilinear) and label (nearest)
+        def resize_video_label(data):
+            # data is dict
+            vid = torch.as_tensor(data["video"]).unsqueeze(0) # (1, C, T, H, W)
+            tgt_size = (clip_len, img_size[0], img_size[1])
+            
+            vid = torch.nn.functional.interpolate(vid, size=tgt_size, mode='trilinear', align_corners=False).squeeze(0)
+            data["video"] = vid
+            
+            if "label" in data:
+                lab = torch.as_tensor(data["label"]).unsqueeze(0) # (1, C, T, H, W)
+                lab = torch.nn.functional.interpolate(lab, size=tgt_size, mode='nearest').squeeze(0)
+                data["label"] = lab
+            return data
+
         train_transforms = Compose([
-            Lambda(func=lambda x: {"video": torch.nn.functional.interpolate(torch.as_tensor(x["video"]).unsqueeze(0), size=(clip_len, img_size[0], img_size[1]), mode='trilinear', align_corners=False).squeeze(0)}),
+            Lambda(func=resize_video_label),
             # Add augmentations here later
         ])
         
         val_transforms = Compose([
-            Lambda(func=lambda x: {"video": torch.nn.functional.interpolate(torch.as_tensor(x["video"]).unsqueeze(0), size=(clip_len, img_size[0], img_size[1]), mode='trilinear', align_corners=False).squeeze(0)}),
+            Lambda(func=resize_video_label),
         ])
 
         ds_tr = EchoNetVideoDataset(root_dir, split="TRAIN", clip_len=clip_len, transform=train_transforms)

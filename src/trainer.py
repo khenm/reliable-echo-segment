@@ -1,29 +1,28 @@
 import time
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-import pandas as pd
-from tqdm import tqdm
 from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric, HausdorffDistanceMetric, MAEMetric
+from tqdm import tqdm
 from src.utils.logging import get_logger
 
 logger = get_logger()
 
 class Trainer:
     """
-    Handles the training, validation, and testing of the segmentation model.
+    Handles training, validation, and testing for both segmentation (VAE-U-Net) and 
+    dual-task regression/segmentation (R2+1D) models.
     """
     def __init__(self, model, loaders, cfg, device):
         """
-        Initializes the Trainer.
-        
         Args:
             model (torch.nn.Module): The model to train.
-            loaders (tuple): (train_loader, val_loader, test_loader).
-            cfg (dict): Configuration dictionary.
-            device (torch.device): Device to run on.
+            loaders (tuple): Tuple containing (train_loader, val_loader, test_loader).
+            cfg (dict): Configuration dictionary defining hyperparameters and paths.
+            device (torch.device): Device to execute computation on.
         """
         self.model = model
         self.ld_tr, self.ld_va, self.ld_ts = loaders
@@ -38,6 +37,9 @@ class Trainer:
         if self.is_regression:
             self.loss_fn = nn.MSELoss()
             self.metr_mae_val = MAEMetric(reduction="mean")
+            # Aux segmentation loss/metric
+            self.loss_seg = DiceCELoss(to_onehot_y=True, softmax=True)
+            self.metr_dice_val = DiceMetric(include_background=False, reduction="mean")
         else:
             self.loss_fn = DiceCELoss(to_onehot_y=True, softmax=True)
             self.metr_dice_val = DiceMetric(include_background=False, reduction="mean")
@@ -111,13 +113,24 @@ class Trainer:
                 dev_type = self.device.type if hasattr(self.device, 'type') else str(self.device)
                 
                 if self.is_regression:
-                    # Generic handling for Video Dataset (returns 'video', 'target')
+                    # Generic handling for Video Dataset (returns 'video', 'target', 'label')
                     imgs = batch.get("video", batch.get("image")).to(self.device)
                     targets = batch["target"].to(self.device)
+                    mask_targets = batch.get("label")
+                    
+                    if mask_targets is not None:
+                        mask_targets = mask_targets.to(self.device)
                     
                     with torch.amp.autocast(device_type=dev_type):
-                        preds = self.model(imgs)
-                        loss = self.loss_fn(preds.squeeze(), targets)
+                        preds, seg_logits = self.model(imgs)
+                        loss_ef = self.loss_fn(preds.squeeze(), targets)
+                        
+                        loss_seg = 0.0
+                        if mask_targets is not None:
+                            # Combined loss: MSE (EF) + Dice (Segmentation)
+                            loss_seg = self.loss_seg(seg_logits, mask_targets.long())
+                        
+                        loss = loss_ef + loss_seg
                 else:
                     imgs = batch["image"].to(self.device)
                     labs = batch["label"].to(self.device)
@@ -142,6 +155,7 @@ class Trainer:
 
             val_dice = self._validate()
             if self.is_regression:
+                # Log both components
                 logger.info(f"E{ep:03d} trainLoss={run_loss/len(self.ld_tr):.4f} valMAE={-val_dice:.4f}")
             else:
                 logger.info(f"E{ep:03d} trainLoss={run_loss/len(self.ld_tr):.4f} (KL={kl_loss.item():.6f}) valDice={val_dice:.4f}")
@@ -185,6 +199,7 @@ class Trainer:
         
         if self.is_regression:
              self.metr_mae_val.reset()
+             self.metr_dice_val.reset()
         else:
              self.metr_dice_val.reset()
         
@@ -195,11 +210,21 @@ class Trainer:
                     v_img = vb.get("video", vb.get("image")).to(self.device)
                     v_target = vb["target"].to(self.device)
                     
-                    v_preds = self.model(v_img)
-                    # MAEMetric requires (B, C) shape
+                    v_preds, v_seg = self.model(v_img)
+                    
                     if v_target.ndim == 1:
                         v_target = v_target.view(-1, 1)
                     self.metr_mae_val(v_preds, v_target)
+                    
+                    # Dice Metric
+                    v_mask_target = vb.get("label")
+                    if v_mask_target is not None:
+                        v_mask_target = v_mask_target.to(self.device).long()
+                        # Convert logits to one-hot for DiceMetric
+                        v_pred_labels = torch.argmax(v_seg, dim=1)
+                        v_y_pred = F.one_hot(v_pred_labels, num_classes=self.num_classes).permute(0, 4, 1, 2, 3).float()
+                        v_y_true = F.one_hot(v_mask_target.squeeze(1), num_classes=self.num_classes).permute(0, 4, 1, 2, 3).float()
+                        self.metr_dice_val(v_y_pred, v_y_true)
                 else:
                     v_img = vb["image"].to(self.device)
                     v_lab = vb["label"].to(self.device)
@@ -218,7 +243,10 @@ class Trainer:
                     self.metr_dice_val(v_y_pred, v_y_true)
         
         if self.is_regression:
-            return -float(self.metr_mae_val.aggregate().cpu())
+            mae = float(self.metr_mae_val.aggregate().cpu())
+            dice = float(self.metr_dice_val.aggregate().cpu()) if self.metr_dice_val.get_buffer() is not None else 0.0
+            logger.info(f"Validation Stats: MAE={mae:.4f} Dice={dice:.4f}")
+            return -mae
         else:
             return float(self.metr_dice_val.aggregate().cpu())
 
@@ -244,7 +272,7 @@ class Trainer:
                     targets = batch["target"].to(self.device)
                     cases = batch["case"]
                     
-                    preds = self.model(imgs)
+                    preds, _ = self.model(imgs)
                     
                     # Ensure (B,) shape for simple subtraction/logging
                     # Model output is (B, 1), targets might be (B,) or (B, 1)
