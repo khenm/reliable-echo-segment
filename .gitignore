@@ -221,3 +221,4 @@ checkpoints
 runs
 # Agent files
 .agent/
+tests

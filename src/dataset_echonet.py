@@ -6,7 +6,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from monai.transforms import (
-    Compose, ScaleIntensityRangePercentiles, Resize, EnsureChannelFirst
+    Compose, ScaleIntensityRangePercentiles, Resize, EnsureChannelFirst, RandFlip, RandRotate90, ToTensor, Lambda
 )
 from src.utils.logging import get_logger
 
@@ -208,6 +208,121 @@ class EchoNetDataset(Dataset):
         
         return data
 
+class EchoNetVideoDataset(Dataset):
+    """
+    Dataset class for EchoNet-Dynamic Video Classification/Regression.
+    Loads video clips for R(2+1)D model.
+    """
+    def __init__(self, root_dir, split="TRAIN", clip_len=32, sampling_rate=1, transform=None):
+        """
+        Args:
+            root_dir (str): Path to EchoNet-Dynamic dataset root.
+            split (str): One of "TRAIN", "VAL", "TEST".
+            clip_len (int): Number of frames to sample.
+            sampling_rate (int): Step size between frames.
+            transform (callable): Spatial transforms.
+        """
+        self.root_dir = root_dir
+        self.split = split.upper()
+        self.clip_len = clip_len
+        self.sampling_rate = sampling_rate
+        self.transform = transform
+        
+        self.file_list_path = os.path.join(root_dir, "FileList.csv")
+        self.videos_dir = os.path.join(root_dir, "Videos")
+        
+        if not os.path.exists(self.file_list_path):
+            raise FileNotFoundError(f"FileList.csv not found at {self.file_list_path}")
+        
+        # Load File List
+        df = pd.read_csv(self.file_list_path)
+        
+        # Filter by split
+        if "Split" in df.columns:
+            df = df[df["Split"].str.upper() == self.split]
+            
+        # Normalize FileName
+        df["FileName"] = df["FileName"].astype(str).apply(lambda x: x[:-4] if x.lower().endswith('.avi') else x)
+        self.file_list = df
+        self.samples = df["FileName"].values
+        self.targets = df["EF"].values if "EF" in df.columns else None
+
+    def __len__(self):
+        return len(self.samples)
+
+    def _load_video_clip(self, video_path):
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return None
+            
+        frames = []
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # Simple uniform sampling or consecutive
+        # Here we try to get a sequence of clip_len
+        # If video is shorter, loop it. If longer, random start (train) or center (val/test)
+        
+        start_frame = 0
+        if total_frames > self.clip_len * self.sampling_rate:
+            if self.split == "TRAIN":
+                start_frame = np.random.randint(0, total_frames - self.clip_len * self.sampling_rate)
+            else:
+                start_frame = (total_frames - self.clip_len * self.sampling_rate) // 2
+        
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        
+        for i in range(self.clip_len):
+            ret, frame = cap.read()
+            if not ret:
+                break
+            # Resize during load to save memory if needed, but transform handles it usually
+            # Convert to grayscale? R2+1D expects 3 channels usually, but we can replicate
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) 
+            frames.append(frame)
+            
+            # Skip frames for sampling rate
+            for _ in range(self.sampling_rate - 1):
+                cap.read()
+                
+        cap.release()
+        
+        if len(frames) == 0:
+            return None
+            
+        # Pad if not enough frames
+        while len(frames) < self.clip_len:
+            frames.append(frames[-1])
+            
+        # Stack -> (T, H, W, C)
+        video = np.stack(frames, axis=0)
+        return video
+
+    def __getitem__(self, idx):
+        fname = self.samples[idx]
+        target = self.targets[idx] if self.targets is not None else 0.0
+        
+        video_path = os.path.join(self.videos_dir, fname)
+        if not fname.lower().endswith(".avi"):
+             video_path += ".avi"
+             
+        video = self._load_video_clip(video_path)
+        if video is None:
+            # Fallback
+            return self.__getitem__((idx+1)%len(self))
+            
+        # (T, H, W, C) -> (C, T, H, W) for PyTorch/Monai
+        # But Monai transforms usually expect channel first
+        video = video.transpose(3, 0, 1, 2) # (C, T, H, W)
+        video = video.astype(np.float32) / 255.0
+        
+        if self.transform:
+            # Monai expects dictionary
+            data = {"video": video} 
+            data = self.transform(data)
+            video = data["video"]
+            
+        return {"video": video, "target": torch.tensor(target, dtype=torch.float32), "case": fname}
+
 def get_echonet_dataloaders(cfg):
     """
     Returns (train, val, test) dataloaders for EchoNet.
@@ -216,34 +331,29 @@ def get_echonet_dataloaders(cfg):
     img_size = tuple(cfg['data']['img_size'])
     batch_size = cfg['training']['batch_size_train']
     num_workers = cfg['training'].get('num_workers', 4)
+    model_name = cfg['model'].get('name', 'VAEUNet') # Default to VAEUNet
     
-    # Define Transforms
-    from monai.transforms import ScaleIntensityRangePercentilesd, ResizeWithPadOrCropd, RandFlipd, RandRotate90d, RandAffined, ToTensord
-    
-    tf_tr = Compose([
-        ScaleIntensityRangePercentilesd("image", 1, 99, 0, 1, clip=True),
-        ResizeWithPadOrCropd(("image", "label"), img_size),
-        RandFlipd(("image", "label"), prob=0.5, spatial_axis=1),
-        RandRotate90d(("image", "label"), prob=0.5, max_k=3),
-        RandAffined(("image", "label"), prob=0.3, rotate_range=math.pi/18, mode=("bilinear", "nearest")),
-        ToTensord(("image", "label"))
-    ])
-    
-    tf_val = Compose([
-        ScaleIntensityRangePercentilesd("image", 1, 99, 0, 1, clip=True),
-        ResizeWithPadOrCropd(("image", "label"), img_size),
-        ToTensord(("image", "label"))
-    ])
-    
-    ds_tr = EchoNetDataset(root_dir, split="TRAIN", img_size=img_size, transform=tf_tr)
-    ds_va = EchoNetDataset(root_dir, split="VAL", img_size=img_size, transform=tf_val)
-    ds_ts = EchoNetDataset(root_dir, split="TEST", img_size=img_size, transform=tf_val)
-    
-    # Collate: default list_data_collate from Monai works well for dicts
-    from monai.data import list_data_collate, DataLoader
-    
-    ld_tr = DataLoader(ds_tr, batch_size=batch_size, shuffle=True, num_workers=num_workers, collate_fn=list_data_collate)
-    ld_va = DataLoader(ds_va, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=list_data_collate)
-    ld_ts = DataLoader(ds_ts, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=list_data_collate)
-    
-    return ld_tr, ld_va, ld_ts
+    if model_name == "R2Plus1D":
+        # Video Configuration
+        clip_len = cfg['model'].get('clip_length', 32)
+        
+        train_transforms = Compose([
+            Lambda(func=lambda x: {"video": torch.nn.functional.interpolate(torch.as_tensor(x["video"]).unsqueeze(0), size=(clip_len, img_size[0], img_size[1]), mode='trilinear', align_corners=False).squeeze(0)}),
+            # Add augmentations here later
+        ])
+        
+        val_transforms = Compose([
+            Lambda(func=lambda x: {"video": torch.nn.functional.interpolate(torch.as_tensor(x["video"]).unsqueeze(0), size=(clip_len, img_size[0], img_size[1]), mode='trilinear', align_corners=False).squeeze(0)}),
+        ])
+
+        ds_tr = EchoNetVideoDataset(root_dir, split="TRAIN", clip_len=clip_len, transform=train_transforms)
+        ds_va = EchoNetVideoDataset(root_dir, split="VAL", clip_len=clip_len, transform=val_transforms)
+        ds_ts = EchoNetVideoDataset(root_dir, split="TEST", clip_len=clip_len, transform=val_transforms)
+
+        from torch.utils.data import DataLoader
+        ld_tr = DataLoader(ds_tr, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+        ld_va = DataLoader(ds_va, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        ld_ts = DataLoader(ds_ts, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        
+        return ld_tr, ld_va, ld_ts
+
