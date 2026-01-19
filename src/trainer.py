@@ -141,7 +141,10 @@ class Trainer:
                 pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
             val_dice = self._validate()
-            logger.info(f"E{ep:03d} trainLoss={run_loss/len(self.ld_tr):.4f} (KL={kl_loss.item():.6f}) valDice={val_dice:.4f}")
+            if self.is_regression:
+                logger.info(f"E{ep:03d} trainLoss={run_loss/len(self.ld_tr):.4f} valMAE={-val_dice:.4f}")
+            else:
+                logger.info(f"E{ep:03d} trainLoss={run_loss/len(self.ld_tr):.4f} (KL={kl_loss.item():.6f}) valDice={val_dice:.4f}")
 
             if val_dice > best_metric:
                 logger.info(f"Saving BEST checkpoint to {self.ckpt_path}...")
