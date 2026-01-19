@@ -24,8 +24,8 @@ model:
 
 training:
   epochs: 50
-  batch_size_train: 16 # Reduced batch size for video
-  batch_size_val: 16
+  batch_size_train: 32
+  batch_size_val: 32
   num_workers: 4
   persistent_workers: True
   lr: 3.0e-4
@@ -37,3 +37,10 @@ training:
   save_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_r2plus1d"
   test_metrics_csv: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_r2plus1d/echonet_metrics.csv"
   clinical_pairs_csv: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_r2plus1d/echonet_clinical_pairs.csv"
+
+tta:
+  enabled: true
+  lr: 0.0001
+  n_augments: 4
+  steps: 1
+  optimizer: "SGD"
