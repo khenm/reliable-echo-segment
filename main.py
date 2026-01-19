@@ -20,6 +20,7 @@ from src.utils.plot import (
 from src.eval_rcps import run_rcps_pipeline
 from src.analysis.latent_profile import LatentProfiler
 from src.eval_adaptive import run_adaptive_pipeline
+from src.tta.engine import TTA_Engine
 
 # Setup logging (stdout only initially)
 logger = get_logger()
@@ -142,6 +143,74 @@ def run_eval(cfg, device):
     ef_save_path = cfg['training']['clinical_pairs_csv']
     generate_clinical_pairs(model, ld_ts, device, ef_save_path)
 
+def run_tta(cfg, device):
+    """
+    Runs Test-Time Adaptation on the test set.
+    """
+    logger.info("Starting Test-Time Adaptation (TTA)...")
+    loaders = get_dataloaders(cfg)
+    _, _, ld_ts = loaders
+    
+    # Force batch_size=1 for TTA usually (online adaptation)
+    # But get_dataloaders might have set it to config value.
+    # TTA Engine handles batch if needed, but online usually implies 1 video at a time.
+    # The dataloader returns (C, T, H, W).
+    
+    model = get_model(cfg, device)
+    ckpt_path = cfg['training']['ckpt_save_path']
+    if not os.path.exists(ckpt_path):
+        logger.error(f"Checkpoint not found at {ckpt_path}. Skipping TTA.")
+        return
+
+    logger.info(f"Loading checkpoint: {ckpt_path}")
+    load_checkpoint(model, ckpt_path, device)
+    
+    # Configure TTA Engine
+    tta_cfg = cfg.get('tta', {})
+    engine = TTA_Engine(
+        model, 
+        lr=float(tta_cfg.get('lr', 1e-4)), 
+        n_augments=int(tta_cfg.get('n_augments', 4)),
+        steps=int(tta_cfg.get('steps', 1)),
+        optimizer_name=tta_cfg.get('optimizer', 'SGD')
+    )
+    
+    engine.model.to(device)
+    
+    # Run TTA Loop
+    results = []
+    
+    logger.info(f"Running TTA on {len(ld_ts)} videos...")
+    
+    for batch in tqdm(ld_ts, desc="TTA Inference"):
+        # Reset model state before each video
+        engine.reset()
+        
+        # batch is dict: "video", "target", "case"
+        # video: (B, C, T, H, W) -> B=1 usually
+        video = batch["video"].to(device)
+        target = batch["target"].to(device)
+        case = batch["case"][0] # Assume batch size 1
+        
+        # Adapt and Predict
+        pred = engine.forward_and_adapt(video)
+        
+        results.append({
+            "FileName": case,
+            "Actual_EF": target.item(),
+            "Predicted_EF": pred.item()
+        })
+        
+    # Save Results
+    df_results = pd.DataFrame(results)
+    save_path = cfg['training']['clinical_pairs_csv'].replace(".csv", "_tta.csv")
+    df_results.to_csv(save_path, index=False)
+    logger.info(f"TTA Results saved to {save_path}")
+    
+    # Simple Metrics
+    mae = (df_results["Actual_EF"] - df_results["Predicted_EF"]).abs().mean()
+    logger.info(f"TTA MAE: {mae:.2f}")
+
 def run_plot(cfg):
     """
     Generates summary plots from validation and testing results.
@@ -220,6 +289,7 @@ def main():
     parser.add_argument("--train", action="store_true", help="Run training loop")
     parser.add_argument("--eval", action="store_true", help="Run evaluation (metrics + EF)")
     parser.add_argument("--rcps", action="store_true", help="Run RCPS calibration and evaluation")
+    parser.add_argument("--tta", action="store_true", help="Run Test-Time Adaptation")
     parser.add_argument("--adaptive", action="store_true", help="Run Adaptive Calibration")
     parser.add_argument("--profile", action="store_true", help="Run Latent Profiling")
     parser.add_argument("--plot", action="store_true", help="Generate all plots")
@@ -231,12 +301,12 @@ def main():
     with open(args.config, 'r') as f:
         cfg = yaml.safe_load(f)
 
-    run_all = args.all or not (args.init or args.preprocess or args.train or args.eval or args.plot or args.rcps or args.profile or args.adaptive)
+    run_all = args.all or not (args.init or args.preprocess or args.train or args.eval or args.plot or args.rcps or args.profile or args.adaptive or args.tta)
 
     device = run_init(cfg)
 
     # Logic to handle resuming or loading checkpoint for evaluation
-    needs_checkpoint = args.eval or args.rcps or args.profile or args.adaptive or args.plot or args.resume
+    needs_checkpoint = args.eval or args.rcps or args.profile or args.adaptive or args.plot or args.resume or args.tta
     is_training = args.train or args.all
     
     if needs_checkpoint:
@@ -277,6 +347,9 @@ def main():
 
     if run_all or args.adaptive:
         run_adaptive_pipeline(cfg)
+        
+    if run_all or args.tta:
+        run_tta(cfg, device)
         
     if run_all or args.eval:
         run_eval(cfg, device)
