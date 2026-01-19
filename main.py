@@ -3,8 +3,9 @@ import argparse
 import os
 import torch
 import pandas as pd
+from tqdm import tqdm
 from datetime import datetime
-from src.utils.util_ import seed_everything, get_device
+from src.utils.util_ import seed_everything, get_device, load_checkpoint
 from src.dataset import get_dataloaders
 from src.models.model import get_model
 from src.trainer import Trainer
@@ -86,7 +87,15 @@ def run_preprocess(cfg):
         cfg (dict): Configuration dictionary.
     """
     logger.info("Checking data loading...")
-    get_dataloaders(cfg)
+    loaders = get_dataloaders(cfg)
+    
+    # Iterate through all loaders to ensure data is readable
+    for i, loader in enumerate(loaders):
+        if loader is None: continue
+        name = ["Train", "Val", "Test"][i]
+        for _ in tqdm(loader, desc=f"Verifying {name}", mininterval=1.0):
+            pass
+            
     logger.info("Data verification complete.")
 
 def run_train(cfg, device):
@@ -123,11 +132,7 @@ def run_eval(cfg, device):
         logger.error(f"Checkpoint not found at {ckpt_path}. Skipping evaluation.")
         return
 
-    checkpoint = torch.load(ckpt_path, map_location=device)
-    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-        model.load_state_dict(checkpoint["model_state_dict"])
-    else:
-        model.load_state_dict(checkpoint)
+    load_checkpoint(model, ckpt_path, device)
     
     # Standard Dice/HD statistics
     trainer = Trainer(model, loaders, cfg, device)
@@ -151,7 +156,6 @@ def run_plot(cfg):
     if not os.path.exists(metrics_path):
         logger.warning(f"Metrics file {metrics_path} not found. Skipping metrics plots.")
     else:
-        df_metrics = pd.read_csv(metrics_path)
         df_metrics = pd.read_csv(metrics_path)
         plot_metrics_summary(df_metrics, save_path=os.path.join(cfg['training']['run_dir'], "plot_metrics_summary.png"))
         logger.info("Generated plot_metrics_summary.png")
@@ -189,11 +193,7 @@ def run_profile(cfg, device):
         return
 
     logger.info(f"Loading checkpoint: {ckpt_path}")
-    checkpoint = torch.load(ckpt_path, map_location=device)
-    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-        model.load_state_dict(checkpoint["model_state_dict"])
-    else:
-        model.load_state_dict(checkpoint)
+    load_checkpoint(model, ckpt_path, device)
     
     loaders = get_dataloaders(cfg)
     ld_tr, _, _ = loaders
