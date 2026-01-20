@@ -6,7 +6,7 @@ from monai.metrics import DiceMetric
 
 from src.utils.logging import get_logger
 from src.dataset import get_dataloaders
-from src.models.model import get_model
+from src.models.registry import get_model
 
 from src.analysis.latent_profile import LatentProfiler
 from src.analysis.adaptive_calibration import AdaptiveScaler

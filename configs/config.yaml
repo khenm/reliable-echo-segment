@@ -1,15 +1,12 @@
+model:
+  name: "r2plus1d"
 data:
-  root_dir: "/content/drive/MyDrive/Dataset/CAMUS"
-  nifti_dir: "/content/drive/MyDrive/Dataset/CAMUS/database_nifti"
-  split_dir: "/content/drive/MyDrive/Dataset/CAMUS/database_split"
-  img_size: [256, 256]
-  num_classes: 4
-  stratify_bins: [0, 45, 100]
+  name: "echonet"
 
 training:
-  epochs: 100
-  batch_size_train: 32
-  batch_size_val: 32
+  epochs: 50
+  batch_size_train: 16
+  batch_size_val: 16
   num_workers: 4
   persistent_workers: True
   lr: 3.0e-4
@@ -17,15 +14,14 @@ training:
   kl_weight: 1.0e-4
   patience: 10
   seed: 42
-  ckpt_save_path: "best_camus.pt"
-  checkpoint_dir: "/content/drive/MyDrive/Dataset/CAMUS/checkpoints/vaeunet/"
-  save_dir: "/content/drive/MyDrive/Dataset/CAMUS/runs"
-  test_metrics_csv: "camus_test_metrics.csv"
+  ckpt_save_path: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_r2plus1d/best_r2plus1d.pt"
+  save_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_r2plus1d"
+  test_metrics_csv: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_r2plus1d/echonet_metrics.csv"
+  clinical_pairs_csv: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_r2plus1d/echonet_clinical_pairs.csv"
 
-model:
-  spatial_dims: 2
-  in_channels: 1
-  channels: [32, 64, 128, 256, 512]
-  strides: [2, 2, 2, 2]
-  num_res_units: 2
-  latent_dim: 256
+tta:
+  enabled: true
+  lr: 0.0001
+  n_augments: 4
+  steps: 1
+  optimizer: "SGD"

@@ -1,0 +1,7 @@
+name: "VAEUNet"
+spatial_dims: 2
+in_channels: 1
+channels: [32, 64, 128, 256, 512]
+strides: [2, 2, 2, 2]
+num_res_units: 2
+latent_dim: 256

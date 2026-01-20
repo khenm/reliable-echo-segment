@@ -1,4 +1,5 @@
 import yaml
+from src.utils.config_loader import load_config
 import argparse
 import os
 import torch
@@ -6,10 +7,15 @@ import pandas as pd
 from tqdm import tqdm
 from datetime import datetime
 from src.utils.util_ import seed_everything, get_device, load_checkpoint
-from src.dataset import get_dataloaders
-from src.models.model import get_model
+from src.datasets.registry import DatasetRegistry
+import src.datasets
+from src.models.registry import get_model
+import src.models.r2plus1d # Register R2Plus1D
+import src.models.vae_unet # Register VAEUNet
 from src.trainer import Trainer
 from src.utils.logging import get_logger
+from src.losses import KLLoss
+from monai.losses import DiceCELoss
 from src.utils.postprecessing import generate_clinical_pairs
 from src.utils.plot import (
     plot_metrics_summary, 
@@ -17,65 +23,127 @@ from src.utils.plot import (
     plot_reliability_curves, 
     plot_ef_category_roc
 )
-from src.eval_rcps import run_rcps_pipeline
 from src.analysis.latent_profile import LatentProfiler
-from src.eval_adaptive import run_adaptive_pipeline
 from src.tta.engine import TTA_Engine
 
 # Setup logging (stdout only initially)
 logger = get_logger()
 
-def run_init(cfg):
+def resolve_resume_path(resume_mode, runs_root, model_name):
+    """
+    Resolves the checkpoint path for resuming based on the mode.
+    
+    Args:
+        resume_mode (str|bool): 'auto', path string, or True (treated as 'auto').
+        runs_root (str): Root directory for runs (e.g., 'runs').
+        model_name (str): Name of the model (for directory scoping).
+        
+    Returns:
+        str | None: Path to the checkpoint to resume from, or None if fresh run.
+    """
+    # If mode is None or False, fresh run
+    if not resume_mode:
+        return None
+        
+    # If mode is a specific path, verify and return
+    if isinstance(resume_mode, str) and resume_mode != 'auto' and "/" in resume_mode:
+        if os.path.exists(resume_mode):
+            return resume_mode
+        else:
+            logger.warning(f"Explicit resume path {resume_mode} not found. Starting fresh.")
+            return None
+            
+    # Auto-Resume Logic
+    model_runs_dir = os.path.join(runs_root, model_name)
+    if not os.path.exists(model_runs_dir):
+        logger.info(f"No previous runs found for {model_name}. Starting fresh.")
+        return None
+        
+    # List all run directories, sorted by creation time (descending)
+    runs = sorted([
+        os.path.join(model_runs_dir, d) for d in os.listdir(model_runs_dir) 
+        if os.path.isdir(os.path.join(model_runs_dir, d))
+    ], key=os.path.getmtime, reverse=True)
+    
+    for run in runs:
+        last_ckpt = os.path.join(run, "last.ckpt")
+        if os.path.exists(last_ckpt):
+            logger.info(f"Auto-Discovery: Found resume point at {last_ckpt}")
+            return last_ckpt
+            
+    logger.info("Auto-Discovery: No 'last.ckpt' found in recent history. Starting fresh.")
+    return None
+
+def run_init(cfg, args_resume):
     """
     Initializes the environment, logging, and output directories.
+    Enforces Split-Storage:
+    - Workspace: runs/{model_name}/{timestamp}/ (Logs, Config, last.ckpt)
+    - Vault: checkpoints/{model_name}/ (best artifacts)
 
     Args:
         cfg (dict): Configuration dictionary.
+        args_resume (bool): Command line resume flag.
 
     Returns:
         torch.device: The device (CPU or CUDA) to be used.
     """
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_root = cfg['training'].get('save_dir', 'runs')
-    run_dir = os.path.join(save_root, timestamp)
-    os.makedirs(run_dir, exist_ok=True)
-    os.makedirs("checkpoints", exist_ok=True)
+    model_name = cfg['model'].get('name', 'VAEUNet')
+    
+    # 1. Directory Setup
+    # Workspace
+    runs_root = cfg['training'].get('save_dir', 'runs')
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    
+    # Vault 
+    ckpt_root = cfg['training'].get('checkpoint_dir', 'checkpoints')
+    vault_dir = os.path.join(ckpt_root, model_name)
+    os.makedirs(vault_dir, exist_ok=True)
+    
+    # Determine Resume State
+    resume_mode = 'auto' if args_resume else cfg['training'].get('resume_mode', None)
+    resume_path = resolve_resume_path(resume_mode, runs_root, model_name)
+    
+    if resume_path:
+        # Resume from existing run directory
+        # The run_dir is the parent of the checkpoint
+        run_dir = os.path.dirname(resume_path)
+        logger.info(f"Resuming workspace: {run_dir}")
+        cfg['training']['resume_path'] = resume_path
+    else:
+        # Create NEW Workspace
+        run_dir = os.path.join(runs_root, model_name, timestamp)
+        os.makedirs(run_dir, exist_ok=True)
+        logger.info(f"Created new workspace: {run_dir}")
     
     cfg['training']['run_dir'] = run_dir
+    cfg['training']['vault_dir'] = vault_dir
     
+    # Setup Logging
     log_file = os.path.join(run_dir, "run.log")
     _ = get_logger(log_file=log_file)
     
+    # 2. Dump Configuration (Immutable Snapshot)
+    with open(os.path.join(run_dir, "config.yaml"), 'w') as f:
+        yaml.dump(cfg, f)
+    
     logger.info("Initializing...")
-    logger.info(f"Run Directory: {run_dir}")
-    logger.info("Settings: " + str(cfg['training']))
+    logger.info(f"Workspace: {run_dir}")
+    logger.info(f"Vault: {vault_dir}")
+    
     seed_everything(cfg['training']['seed'])
     device = get_device()
     logger.info(f"Using device: {device}")
     
-    ckpt_name = cfg['training']['ckpt_save_path']
-    if "/" in ckpt_name:
-        configured_ckpt_dir = os.path.dirname(ckpt_name)
-        if configured_ckpt_dir:
-            ckpt_dir = configured_ckpt_dir
-        else:
-            ckpt_dir = cfg['training'].get('checkpoint_dir', 'checkpoints')
-        ckpt_name = os.path.basename(ckpt_name)
-    else:
-        ckpt_dir = cfg['training'].get('checkpoint_dir', 'checkpoints')
+    # Update paths in config for other components
+    cfg['training']['ckpt_save_path'] = os.path.join(run_dir, "last.ckpt") # Workspace path
     
-    os.makedirs(ckpt_dir, exist_ok=True)
-    
-    cfg['training']['ckpt_save_path'] = os.path.join(ckpt_dir, f"run_{timestamp}_{ckpt_name}")
-    
-    metrics_csv = cfg['training']['test_metrics_csv']
-    if "/" in metrics_csv:
-        metrics_csv = os.path.basename(metrics_csv)
+    metrics_csv = cfg['training'].get('test_metrics_csv', 'test_metrics.csv')
+    if "/" in metrics_csv: metrics_csv = os.path.basename(metrics_csv)
     cfg['training']['test_metrics_csv'] = os.path.join(run_dir, metrics_csv)
     
     clinical_csv = cfg['training'].get('clinical_pairs_csv', 'clinical_pairs.csv')
-    if "/" in clinical_csv:
-        clinical_csv = os.path.basename(clinical_csv)
+    if "/" in clinical_csv: clinical_csv = os.path.basename(clinical_csv)
     cfg['training']['clinical_pairs_csv'] = os.path.join(run_dir, clinical_csv)
 
     return device
@@ -88,7 +156,7 @@ def run_preprocess(cfg):
         cfg (dict): Configuration dictionary.
     """
     logger.info("Checking data loading...")
-    loaders = get_dataloaders(cfg)
+    loaders = DatasetRegistry.get_dataloaders(cfg)
     
     # Iterate through all loaders to ensure data is readable
     for i, loader in enumerate(loaders):
@@ -99,6 +167,36 @@ def run_preprocess(cfg):
             
     logger.info("Data verification complete.")
 
+def _load_model_for_inference(cfg, device):
+    """
+    Instantiates model and loads weights from configured checkpoint path.
+    Handles existence checks and logging.
+    
+    Args:
+        cfg (dict): Configuration dictionary.
+        device (torch.device): Computation device.
+        
+    Returns:
+        torch.nn.Module | None: Loaded model or None if checkpoint missing.
+    """
+    ckpt_path = cfg['training']['ckpt_save_path']
+    
+    # Robust check (handle relative path in checkpoints dir if not found absolute)
+    if not os.path.exists(ckpt_path):
+        alt_path = os.path.join("checkpoints", ckpt_path)
+        if os.path.exists(alt_path):
+             ckpt_path = alt_path
+    
+    if not os.path.exists(ckpt_path):
+        logger.error(f"Checkpoint not found at {ckpt_path}. Cannot proceed.")
+        return None
+        
+    model = get_model(cfg, device)
+    logger.info(f"Loading checkpoint: {ckpt_path}")
+    load_checkpoint(model, ckpt_path, device)
+    model.eval()
+    return model
+
 def run_train(cfg, device):
     """
     Instantiates the model and trainer, then starts the training loop.
@@ -108,10 +206,23 @@ def run_train(cfg, device):
         device (torch.device): The computation device.
     """
     logger.info("Starting Training...")
-    loaders = get_dataloaders(cfg)
+    loaders = DatasetRegistry.get_dataloaders(cfg)
     model = get_model(cfg, device)
     
-    trainer = Trainer(model, loaders, cfg, device)
+    # Define Criterions based on Model Type
+    model_name = cfg['model'].get('name', 'VAEUNet')
+    is_regression = (model_name.lower() == "r2plus1d")
+    
+    criterions = {}
+    if is_regression:
+        criterions['ef'] = torch.nn.MSELoss()
+        criterions['seg'] = DiceCELoss(to_onehot_y=True, softmax=True)
+    else:
+        criterions['dice'] = DiceCELoss(to_onehot_y=True, softmax=True)
+        kl_weight = cfg['training'].get('kl_weight', 1e-4)
+        criterions['kl'] = KLLoss(weight=kl_weight)
+
+    trainer = Trainer(model, loaders, cfg, device, criterions=criterions)
     trainer.train()
 
 def run_eval(cfg, device):
@@ -124,16 +235,13 @@ def run_eval(cfg, device):
         device (torch.device): The computation device.
     """
     logger.info("Starting Evaluation...")
-    loaders = get_dataloaders(cfg)
+    loaders = DatasetRegistry.get_dataloaders(cfg)
     _, _, ld_ts = loaders
     
-    model = get_model(cfg, device)
-    ckpt_path = cfg['training']['ckpt_save_path']
-    if not os.path.exists(ckpt_path):
-        logger.error(f"Checkpoint not found at {ckpt_path}. Skipping evaluation.")
+    model = _load_model_for_inference(cfg, device)
+    if model is None:
+        logger.error("Skipping evaluation due to missing checkpoint.")
         return
-
-    load_checkpoint(model, ckpt_path, device)
     
     # Standard Dice/HD statistics
     trainer = Trainer(model, loaders, cfg, device)
@@ -148,22 +256,14 @@ def run_tta(cfg, device):
     Runs Test-Time Adaptation on the test set.
     """
     logger.info("Starting Test-Time Adaptation (TTA)...")
-    loaders = get_dataloaders(cfg)
+    loaders = DatasetRegistry.get_dataloaders(cfg)
     _, _, ld_ts = loaders
     
-    # Force batch_size=1 for TTA usually (online adaptation)
-    # But get_dataloaders might have set it to config value.
-    # TTA Engine handles batch if needed, but online usually implies 1 video at a time.
-    # The dataloader returns (C, T, H, W).
     
-    model = get_model(cfg, device)
-    ckpt_path = cfg['training']['ckpt_save_path']
-    if not os.path.exists(ckpt_path):
-        logger.error(f"Checkpoint not found at {ckpt_path}. Skipping TTA.")
+    model = _load_model_for_inference(cfg, device)
+    if model is None:
+        logger.error("Skipping TTA due to missing checkpoint.")
         return
-
-    logger.info(f"Loading checkpoint: {ckpt_path}")
-    load_checkpoint(model, ckpt_path, device)
     
     # Configure TTA Engine
     tta_cfg = cfg.get('tta', {})
@@ -251,20 +351,12 @@ def run_profile(cfg, device):
     """
     logger.info("Starting Latent Profiling...")
     
-    model = get_model(cfg, device)
-    ckpt_path = cfg['training']['ckpt_save_path']
-    if not os.path.exists(ckpt_path):
-        if os.path.exists(os.path.join("checkpoints", ckpt_path)):
-             ckpt_path = os.path.join("checkpoints", ckpt_path)
-             
-    if not os.path.exists(ckpt_path):
-        logger.error(f"Checkpoint not found at {ckpt_path}. Skipping profiling.")
+    model = _load_model_for_inference(cfg, device)
+    if model is None:
+        logger.error("Skipping profiling due to missing checkpoint.")
         return
-
-    logger.info(f"Loading checkpoint: {ckpt_path}")
-    load_checkpoint(model, ckpt_path, device)
     
-    loaders = get_dataloaders(cfg)
+    loaders = DatasetRegistry.get_dataloaders(cfg)
     ld_tr, _, _ = loaders
     
     latent_dim = cfg['model']['latent_dim']
@@ -298,40 +390,14 @@ def main():
     
     args = parser.parse_args()
 
-    with open(args.config, 'r') as f:
-        cfg = yaml.safe_load(f)
+    cfg = load_config(args.config)
 
     run_all = args.all or not (args.init or args.preprocess or args.train or args.eval or args.plot or args.rcps or args.profile or args.adaptive or args.tta)
 
-    device = run_init(cfg)
-
-    # Logic to handle resuming or loading checkpoint for evaluation
-    needs_checkpoint = args.eval or args.rcps or args.profile or args.adaptive or args.plot or args.resume or args.tta
-    is_training = args.train or args.all
+    device = run_init(cfg, args.resume)
     
-    if needs_checkpoint:
-        current_ckpt = cfg['training']['ckpt_save_path']
-        ckpt_dir = os.path.dirname(current_ckpt)
-        
-        # If resuming or if the specific checkpoint doesn't exist, try to find the latest one
-        if args.resume or not os.path.exists(current_ckpt):
-            if args.resume:
-                logger.info(f"Resume requested. Searching for latest checkpoint in {ckpt_dir}...")
-            else:
-                 logger.info(f"Checkpoint {current_ckpt} not found. Searching for latest in {ckpt_dir}...")
-            
-            latest_ckpt = find_latest_checkpoint(ckpt_dir)
-            if latest_ckpt:
-                logger.info(f"Using latest checkpoint: {latest_ckpt}")
-                cfg['training']['ckpt_save_path'] = latest_ckpt
-                if args.resume and is_training:
-                    # Explicitly mark that we are resuming for the Trainer
-                    cfg['training']['resume_path'] = latest_ckpt
-            else:
-                if args.resume:
-                    logger.warning(f"No checkpoint found in {ckpt_dir} to resume from. Starting from scratch.")
-                else:
-                    logger.warning(f"No checkpoint found in {ckpt_dir}. Subsequent steps may fail.")
+    if args.resume and 'resume_path' not in cfg['training']:
+        logger.warning("Resume requested but no previous run found. Starting fresh (unless specific path provided later).")
 
     if run_all or args.preprocess:
         run_preprocess(cfg)
@@ -341,12 +407,6 @@ def main():
 
     if run_all or args.profile:
         run_profile(cfg, device)
-
-    if run_all or args.rcps:
-        run_rcps_pipeline(cfg)
-
-    if run_all or args.adaptive:
-        run_adaptive_pipeline(cfg)
         
     if run_all or args.tta:
         run_tta(cfg, device)
@@ -356,23 +416,6 @@ def main():
         
     if run_all or args.plot:
         run_plot(cfg)
-
-def find_latest_checkpoint(ckpt_dir):
-    """
-    Finds the most recently modified checkpoint file in the directory.
-
-    Args:
-        ckpt_dir (str): Directory path content checkpoint files.
-
-    Returns:
-        str | None: Path to the latest checkpoint file, or None if not found.
-    """
-    if not os.path.exists(ckpt_dir):
-        return None
-    files = [os.path.join(ckpt_dir, f) for f in os.listdir(ckpt_dir) if f.endswith(".pt")]
-    if not files:
-        return None
-    return max(files, key=os.path.getmtime)
 
 if __name__ == "__main__":
     main()

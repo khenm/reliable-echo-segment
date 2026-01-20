@@ -8,8 +8,8 @@ from monai.transforms import Compose, LoadImaged, EnsureChannelFirstd, ScaleInte
 
 # Import from src
 from src.utils.logging import get_logger
-from src.dataset import _read_ids, _get_files
-from src.models.model import get_model
+from src.datasets.registry import _read_ids, _get_files
+from src.models.registry import get_model
 from src.core.conformal import ConformalCalibrator
 from src.calibration_split import split_validation_set
 from src.inference.wrapper import predict_with_guarantee
@@ -109,8 +109,8 @@ def run_rcps_pipeline(cfg):
     if best_lambda is not None:
         plt.axvline(x=best_lambda, color='g', linestyle='-', label=f'Optimal Lambda ({best_lambda:.3f})')
     
-    plt.xlabel('Threshold $\lambda$')
-    plt.ylabel('Risk ($1 - Dice$)')
+    plt.xlabel('Threshold (Lambda)')
+    plt.ylabel(f'Risk ({1 - Dice})')
     plt.title('RCPS Calibration: Risk vs Threshold')
     plt.legend()
     plt.grid(True)

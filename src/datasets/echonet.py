@@ -15,9 +15,10 @@ from monai.transforms import (
     ScaleIntensityRangePercentiles,
     ToTensor,
 )
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 
 from src.utils.logging import get_logger
+from src.datasets.registry import register_dataset
 
 logger = get_logger()
 
@@ -332,11 +333,12 @@ class EchoNetVideoDataset(Dataset):
         if not fname.lower().endswith(".avi"):
              video_path += ".avi"
              
-        video, start_frame = self._load_video_clip(video_path)
-        if video is None:
+        result = self._load_video_clip(video_path)
+        if result is None:
             # Fallback
             return self.__getitem__((idx+1)%len(self))
-            
+        
+        video, start_frame = result
         T_clip, H, W, C = video.shape
 
         # Generate Masks for the clip
@@ -372,54 +374,61 @@ class EchoNetVideoDataset(Dataset):
             video = data["video"]
             mask_clip = data.get("label", mask_clip)
             
+        # Normalization: EF is 0-100, we want 0-1 for loss balancing with Dice
+        if self.targets is not None:
+            target = target / 100.0
+            
         return {"video": video, "target": torch.tensor(target, dtype=torch.float32), "label": mask_clip, "case": fname}
 
-def get_echonet_dataloaders(cfg):
-    """
-    Returns (train, val, test) dataloaders for EchoNet.
-    """
-    root_dir = cfg['data']['root_dir']
-    img_size = tuple(cfg['data']['img_size'])
-    batch_size = cfg['training']['batch_size_train']
-    num_workers = cfg['training'].get('num_workers', 4)
-    model_name = cfg['model'].get('name', 'VAEUNet') # Default to VAEUNet
-    
-    if model_name == "R2Plus1D":
-        # Video Configuration
-        clip_len = cfg['model'].get('clip_length', 32)
+@register_dataset("ECHONET")
+class EchoNet:
+    @staticmethod
+    def get_dataloaders(cfg):
+        """
+        Returns (train, val, test) dataloaders for EchoNet.
+        """
+        root_dir = cfg['data']['root_dir']
+        img_size = tuple(cfg['data']['img_size'])
+        batch_size = cfg['training']['batch_size_train']
+        num_workers = cfg['training'].get('num_workers', 4)
+        model_name = cfg['model'].get('name', 'VAEUNet') # Default to VAEUNet
         
-        # Helper for resizing video (trilinear) and label (nearest)
-        def resize_video_label(data):
-            # data is dict
-            vid = torch.as_tensor(data["video"]).unsqueeze(0) # (1, C, T, H, W)
-            tgt_size = (clip_len, img_size[0], img_size[1])
+        if model_name.lower() == "r2plus1d":
+            # Video Configuration
+            clip_len = cfg['model'].get('clip_length', 32)
             
-            vid = torch.nn.functional.interpolate(vid, size=tgt_size, mode='trilinear', align_corners=False).squeeze(0)
-            data["video"] = vid
+            # Helper for resizing video (trilinear) and label (nearest)
+            def resize_video_label(data):
+                # data is dict
+                vid = torch.as_tensor(data["video"]).unsqueeze(0) # (1, C, T, H, W)
+                tgt_size = (clip_len, img_size[0], img_size[1])
+                
+                vid = torch.nn.functional.interpolate(vid, size=tgt_size, mode='trilinear', align_corners=False).squeeze(0)
+                data["video"] = vid
+                
+                if "label" in data:
+                    lab = torch.as_tensor(data["label"]).unsqueeze(0) # (1, C, T, H, W)
+                    lab = torch.nn.functional.interpolate(lab, size=tgt_size, mode='nearest').squeeze(0)
+                    data["label"] = lab
+                return data
+
+            train_transforms = Compose([
+                Lambda(func=resize_video_label),
+                # Add augmentations here later
+            ])
             
-            if "label" in data:
-                lab = torch.as_tensor(data["label"]).unsqueeze(0) # (1, C, T, H, W)
-                lab = torch.nn.functional.interpolate(lab, size=tgt_size, mode='nearest').squeeze(0)
-                data["label"] = lab
-            return data
+            val_transforms = Compose([
+                Lambda(func=resize_video_label),
+            ])
 
-        train_transforms = Compose([
-            Lambda(func=resize_video_label),
-            # Add augmentations here later
-        ])
-        
-        val_transforms = Compose([
-            Lambda(func=resize_video_label),
-        ])
+            ds_tr = EchoNetVideoDataset(root_dir, split="TRAIN", clip_len=clip_len, transform=train_transforms)
+            ds_va = EchoNetVideoDataset(root_dir, split="VAL", clip_len=clip_len, transform=val_transforms)
+            ds_ts = EchoNetVideoDataset(root_dir, split="TEST", clip_len=clip_len, transform=val_transforms)
 
-        ds_tr = EchoNetVideoDataset(root_dir, split="TRAIN", clip_len=clip_len, transform=train_transforms)
-        ds_va = EchoNetVideoDataset(root_dir, split="VAL", clip_len=clip_len, transform=val_transforms)
-        ds_ts = EchoNetVideoDataset(root_dir, split="TEST", clip_len=clip_len, transform=val_transforms)
-
-        from torch.utils.data import DataLoader
-        ld_tr = DataLoader(ds_tr, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-        ld_va = DataLoader(ds_va, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-        ld_ts = DataLoader(ds_ts, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-        
-        return ld_tr, ld_va, ld_ts
-
+            ld_tr = DataLoader(ds_tr, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+            ld_va = DataLoader(ds_va, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+            ld_ts = DataLoader(ds_ts, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+            
+            return ld_tr, ld_va, ld_ts
+        else:
+            raise NotImplementedError(f"EchoNet dataloader not implemented for model '{model_name}'")

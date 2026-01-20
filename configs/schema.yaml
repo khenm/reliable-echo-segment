@@ -1,0 +1,9 @@
+project: "Reliable Echo Segmentation"
+
+available_models:
+  - "vae_unet"
+  - "r2plus1d"
+
+available_datasets:
+  - "camus"
+  - "echonet"
