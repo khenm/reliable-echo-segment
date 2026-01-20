@@ -1,5 +1,7 @@
+import os
 import time
 import numpy as np
+import random
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -16,32 +18,32 @@ class Trainer:
     Handles training, validation, and testing for both segmentation (VAE-U-Net) and 
     dual-task regression/segmentation (R2+1D) models.
     """
-    def __init__(self, model, loaders, cfg, device):
+    def __init__(self, model, loaders, cfg, device, criterions=None):
         """
         Args:
             model (torch.nn.Module): The model to train.
             loaders (tuple): Tuple containing (train_loader, val_loader, test_loader).
             cfg (dict): Configuration dictionary defining hyperparameters and paths.
             device (torch.device): Device to execute computation on.
+            criterions (dict): Dictionary of loss functions. e.g. {'dice': DiceLoss(), 'kl': KLLoss()}
         """
         self.model = model
         self.ld_tr, self.ld_va, self.ld_ts = loaders
         self.cfg = cfg
         self.device = device
+        self.criterions = criterions if criterions is not None else {}
         self.num_classes = cfg['data']['num_classes']
-        self.ckpt_path = cfg['training']['ckpt_save_path']
+        self.ckpt_path = cfg['training']['ckpt_save_path'] # Workspace: .../last.ckpt
+        self.vault_dir = cfg['training'].get('vault_dir', None) # Vault: checkpoints/{model_name}/
         
         self.model_name = cfg['model'].get('name', 'VAEUNet')
-        self.is_regression = (self.model_name == "R2Plus1D")
+        self.is_regression = (self.model_name.lower() == "r2plus1d")
 
+        # Metric initialization
         if self.is_regression:
-            self.loss_fn = nn.MSELoss()
             self.metr_mae_val = MAEMetric(reduction="mean")
-            # Aux segmentation loss/metric
-            self.loss_seg = DiceCELoss(to_onehot_y=True, softmax=True)
             self.metr_dice_val = DiceMetric(include_background=False, reduction="mean")
         else:
-            self.loss_fn = DiceCELoss(to_onehot_y=True, softmax=True)
             self.metr_dice_val = DiceMetric(include_background=False, reduction="mean")
             
         self.opt = torch.optim.AdamW(model.parameters(), 
@@ -50,7 +52,6 @@ class Trainer:
         
         dev_type = device.type if hasattr(device, 'type') else str(device)
         self.scaler = torch.amp.GradScaler(device=dev_type, enabled=(dev_type == 'cuda'))
-        self.kl_weight = cfg['training'].get('kl_weight', 1e-4) # Beta parameter
 
     def _load_checkpoint(self, path, load_optimizer=False):
         """
@@ -72,8 +73,21 @@ class Trainer:
         if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
             # New format
             self.model.load_state_dict(checkpoint["model_state_dict"])
-            if load_optimizer and "optimizer_state_dict" in checkpoint:
-                self.opt.load_state_dict(checkpoint["optimizer_state_dict"])
+            if load_optimizer:
+                if "optimizer_state_dict" in checkpoint:
+                    self.opt.load_state_dict(checkpoint["optimizer_state_dict"])
+                else:
+                    logger.warning("Optimizer state not found in checkpoint. Starting optimizer fresh.")
+                
+                # Restore RNG State
+                if "rng_state" in checkpoint:
+                    rng_state = checkpoint["rng_state"]
+                    torch.set_rng_state(rng_state["torch"])
+                    torch.cuda.set_rng_state(rng_state["cuda"])
+                    np.random.set_state(rng_state["numpy"])
+                    random.setstate(rng_state["python"])
+                    logger.info("Restored RNG states.")
+                    
             if "epoch" in checkpoint:
                 start_epoch = checkpoint["epoch"] + 1
             if "best_metric" in checkpoint:
@@ -106,12 +120,18 @@ class Trainer:
             self.model.train()
             run_loss = 0.0
             
+            # Track individual losses for logging
+            epoch_loss_components = {key: 0.0 for key in self.criterions.keys()}
+
             pbar = tqdm(self.ld_tr, desc=f"Epoch {ep}/{epochs}", mininterval=2.0)
             for batch in pbar:
                 self.opt.zero_grad(set_to_none=True)
                 
                 dev_type = self.device.type if hasattr(self.device, 'type') else str(self.device)
                 
+                loss = 0.0
+                loss_dict = {}
+
                 if self.is_regression:
                     # Generic handling for Video Dataset (returns 'video', 'target', 'label')
                     imgs = batch.get("video", batch.get("image")).to(self.device)
@@ -123,65 +143,100 @@ class Trainer:
                     
                     with torch.amp.autocast(device_type=dev_type):
                         preds, seg_logits = self.model(imgs)
-                        loss_ef = self.loss_fn(preds.squeeze(), targets)
                         
-                        loss_seg = 0.0
-                        if mask_targets is not None:
-                            # Combined loss: MSE (EF) + Dice (Segmentation)
-                            loss_seg = self.loss_seg(seg_logits, mask_targets.long())
+                        # Calculate losses based on keys
+                        if 'ef' in self.criterions:
+                            l_ef = self.criterions['ef'](preds.squeeze(), targets)
+                            loss += l_ef
+                            loss_dict['ef'] = l_ef.item()
                         
-                        loss = loss_ef + loss_seg
+                        if 'seg' in self.criterions and mask_targets is not None:
+                             l_seg = self.criterions['seg'](seg_logits, mask_targets.long())
+                             loss += l_seg
+                             loss_dict['seg'] = l_seg.item()
+
                 else:
                     imgs = batch["image"].to(self.device)
                     labs = batch["label"].to(self.device)
                 
                     with torch.amp.autocast(device_type=dev_type):
                         logits, mu, log_var = self.model(imgs)
-                        dice_ce_loss = self.loss_fn(logits, labs)
                         
-                        # KL Divergence: -0.5 * sum(1 + log_var - mu^2 - exp(log_var))
-                        # Sum over latent dim, mean over batch usually
-                        kl_div = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1)
-                        kl_loss = torch.mean(kl_div)
+                        if 'dice' in self.criterions:
+                            l_dice = self.criterions['dice'](logits, labs)
+                            loss += l_dice
+                            loss_dict['dice'] = l_dice.item()
                         
-                        loss = dice_ce_loss + self.kl_weight * kl_loss
+                        if 'kl' in self.criterions:
+                            l_kl = self.criterions['kl'](mu, log_var)
+                            loss += l_kl
+                            loss_dict['kl'] = l_kl.item()
                 
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.opt)
                 self.scaler.update()
                 run_loss += loss.item()
+
+                # Update accumulated component losses
+                for k, v in loss_dict.items():
+                    if k in epoch_loss_components:
+                         epoch_loss_components[k] += v
                 
-                pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+                # Pbar update
+                pbar_postfix = {"loss": f"{loss.item():.4f}"}
+                for k, v in loss_dict.items():
+                    pbar_postfix[k] = f"{v:.4f}"
+                pbar.set_postfix(pbar_postfix)
 
             val_dice = self._validate()
+            
+            # Prepare log message
+            avg_run_loss = run_loss / len(self.ld_tr)
+            log_msg = f"E{ep:03d} trainLoss={avg_run_loss:.4f} "
+            
+            for k, v in epoch_loss_components.items():
+                avg_comp = v / len(self.ld_tr)
+                log_msg += f"{k}={avg_comp:.4f} "
+            
             if self.is_regression:
-                # Log both components
-                logger.info(f"E{ep:03d} trainLoss={run_loss/len(self.ld_tr):.4f} valMAE={-val_dice:.4f}")
+                 log_msg += f"valMAE={-val_dice:.4f}"
             else:
-                logger.info(f"E{ep:03d} trainLoss={run_loss/len(self.ld_tr):.4f} (KL={kl_loss.item():.6f}) valDice={val_dice:.4f}")
+                 log_msg += f"valDice={val_dice:.4f}"
+            
+            logger.info(log_msg)
 
             if val_dice > best_metric:
-                logger.info(f"Saving BEST checkpoint to {self.ckpt_path}...")
-                torch.save({
-                    'epoch': ep,
-                    'model_state_dict': self.model.state_dict(),
-                    'optimizer_state_dict': self.opt.state_dict(),
-                    'best_metric': val_dice
-                }, self.ckpt_path)
-                logger.info("Checkpoint saved.")
                 best_metric = val_dice
                 wait = 0
+                
+                # Save BEST to Vault
+                if self.vault_dir:
+                    best_ckpt_name = f"{self.cfg['training']['run_dir'].split('/')[-1]}_best.ckpt"
+                    best_ckpt_path = os.path.join(self.vault_dir, best_ckpt_name)
+                    logger.info(f"Saving BEST checkpoint to Vault: {best_ckpt_path}...")
+                    torch.save({
+                        'epoch': ep,
+                        'model_state_dict': self.model.state_dict(),
+                        'optimizer_state_dict': self.opt.state_dict(),
+                        'best_metric': val_dice
+                    }, best_ckpt_path)
             else:
                 wait += 1
             
-            # Save Latest Checkpoint
-            last_ckpt_path = self.ckpt_path.replace(".pt", "_last.pt")
+            # Save Latest Checkpoint to Workspace (THE STATE DUMP)
+            # This is overwriting 'last.ckpt' at every epoch
             torch.save({
                 'epoch': ep,
                 'model_state_dict': self.model.state_dict(),
                 'optimizer_state_dict': self.opt.state_dict(),
-                'best_metric': best_metric
-            }, last_ckpt_path)
+                'best_metric': best_metric,
+                'rng_state': {
+                    "torch": torch.get_rng_state(),
+                    "cuda": torch.cuda.get_rng_state(),
+                    "numpy": np.random.get_state(),
+                    "python": random.getstate()
+                }
+            }, self.ckpt_path)
             
             if wait >= patience:
                 logger.info("⏹ Early stop")

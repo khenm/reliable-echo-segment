@@ -1,0 +1,7 @@
+name: "ECHONET"
+root_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic"
+split_dir: ""
+nifti_dir: ""
+img_size: [112, 112]
+num_classes: 2
+stratify_bins: [0, 45, 100]

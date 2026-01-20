@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
 from monai.networks.blocks import Convolution, UpSample
+from src.models.registry import ModelRegistry
 
+@ModelRegistry.register("VAEUNet")
 class VAEUNet(nn.Module):
     """
     VAE-U-Net implementation for segmentation with variational regularization.
@@ -158,6 +160,20 @@ class VAEUNet(nn.Module):
             current_c = out_c
             
         self.final = Convolution(spatial_dims, current_c, out_channels, kernel_size=1, act=None, norm=None)
+
+    @classmethod
+    def from_config(cls, cfg):
+        latent_dim = cfg['model'].get('latent_dim', 256)
+        return cls(
+            spatial_dims=cfg['model']['spatial_dims'],
+            in_channels=cfg['model']['in_channels'],
+            out_channels=cfg['data']['num_classes'],
+            channels=tuple(cfg['model']['channels']),
+            strides=tuple(cfg['model']['strides']),
+            num_res_units=cfg['model']['num_res_units'],
+            latent_dim=latent_dim,
+            norm="INSTANCE",
+        )
 
     def reparameterize(self, mu, logvar):
         """
