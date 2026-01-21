@@ -93,10 +93,19 @@ def run_init(cfg, args_resume):
     # 1. Directory Setup
     # Workspace
     runs_root = cfg['training'].get('save_dir', 'runs')
+    if not os.path.exists(runs_root):
+        if runs_root.startswith("/"):
+             logger.warning(f"Configured save_dir '{runs_root}' does not exist. Falling back to local 'runs'.")
+             runs_root = "runs"
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     
     # Vault 
     ckpt_root = cfg['training'].get('checkpoint_dir', 'checkpoints')
+    if not os.path.exists(ckpt_root):
+        if ckpt_root.startswith("/"):
+            logger.warning(f"Configured checkpoint_dir '{ckpt_root}' does not exist. Falling back to local 'checkpoints'.")
+            ckpt_root = "checkpoints"
+
     vault_dir = os.path.join(ckpt_root, model_name)
     os.makedirs(vault_dir, exist_ok=True)
     
@@ -216,7 +225,8 @@ def run_train(cfg, device):
     criterions = {}
     if is_regression:
         # criterions['ef'] = DifferentiableEFLoss(pixel_spacing=1.0, weight=20.0)
-        criterions['seg'] = DiceCELoss(to_onehot_y=True, softmax=True, lambda_dice=0.7, lambda_ce=0.3)
+        num_classes = cfg['data'].get('num_classes', 1)
+        criterions['seg'] = DiceCELoss(sigmoid=True, lambda_dice=0.7, lambda_ce=0.3)
     else:
         criterions['dice'] = DiceCELoss(to_onehot_y=True, softmax=True)
         kl_weight = cfg['training'].get('kl_weight', 1e-4)

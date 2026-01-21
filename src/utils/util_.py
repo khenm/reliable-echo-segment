@@ -58,17 +58,57 @@ def find_latest_latent_profile(root_dir="runs"):
         return os.path.abspath(latest_file)
     return None
 
+def load_checkpoint_dict(ckpt_path, device):
+    """
+    Loads the raw checkpoint dictionary or object from a file.
+    
+    Args:
+        ckpt_path (str): Path to the checkpoint file.
+        device (torch.device): Device to load the checkpoint onto.
+        
+    Returns:
+        dict or object: The loaded checkpoint content.
+    """
+    return torch.load(ckpt_path, map_location=device, weights_only=False)
+
+def load_model_weights(model, checkpoint, strict=True):
+    """
+    Loads model weights from a checkpoint, handling both state_dict and full checkpoint dicts.
+    
+    Args:
+        model (torch.nn.Module): The model to load weights into.
+        checkpoint (dict or object): The loaded checkpoint object/dict.
+        strict (bool): Whether to enforce strict key matching.
+        
+    Returns:
+        dict: The loaded state dict (for reference).
+    """
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        state_dict = checkpoint["model_state_dict"]
+    else:
+        state_dict = checkpoint
+        
+    model.load_state_dict(state_dict, strict=strict)
+    return state_dict
+
+def save_checkpoint(path, state_dict):
+    """
+    Saves a checkpoint dictionary to the specified path.
+    
+    Args:
+        path (str): Path to save the checkpoint.
+        state_dict (dict): The dictionary containing model/optim state.
+    """
+    torch.save(state_dict, path)
+
 def load_checkpoint(model, ckpt_path, device):
     """
-    Loads model state from a checkpoint file.
+    Legacy wrapper for backward compatibility. Loads model state.
     
     Args:
         model (torch.nn.Module): The model to load weights into.
         ckpt_path (str): Path to the checkpoint file.
         device (torch.device): Device to load the checkpoint onto.
     """
-    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
-    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-        model.load_state_dict(checkpoint["model_state_dict"])
-    else:
-        model.load_state_dict(checkpoint)
+    ckpt = load_checkpoint_dict(ckpt_path, device)
+    load_model_weights(model, ckpt)
