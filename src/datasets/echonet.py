@@ -263,8 +263,12 @@ class EchoNetVideoDataset(Dataset):
             # Filter tracings for relevant files
             valid_files = set(self.samples)
             self.tracings = self.tracings[self.tracings["FileName"].isin(valid_files)]
+            
+            # Cache annotated frames for smarter sampling
+            self.file_to_frames = self.tracings.groupby("FileName")["Frame"].apply(list).to_dict()
         else:
             logger.warning(f"VolumeTracings.csv not found at {self.tracings_path}. No masks will be generated.")
+            self.file_to_frames = {}
 
     def __len__(self):
         return len(self.samples)
@@ -301,7 +305,24 @@ class EchoNetVideoDataset(Dataset):
             if self.split == "TRAIN":
                 start_frame = np.random.randint(0, total_frames - self.clip_len * self.sampling_rate)
             else:
-                start_frame = (total_frames - self.clip_len * self.sampling_rate) // 2
+                # For Val/Test, try to center on traces if available
+                fname = os.path.basename(video_path).split('.')[0]
+                if fname in self.file_to_frames:
+                    # Pick median frame of annotations
+                    annotated = sorted(self.file_to_frames[fname])
+                    center_annot = annotated[len(annotated)//2]
+                    
+                    # Try to center the clip around this frame
+                    # clip covers [start, start + len*rate]
+                    half_clip = (self.clip_len * self.sampling_rate) // 2
+                    start_frame = max(0, center_annot - half_clip)
+                    
+                    # Ensure we don't go out of bounds
+                    max_start = total_frames - self.clip_len * self.sampling_rate
+                    start_frame = min(start_frame, max_start)
+                    start_frame = max(0, start_frame) # prevent negative if max_start is negative (short video)
+                else:
+                    start_frame = (total_frames - self.clip_len * self.sampling_rate) // 2
         
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
         
