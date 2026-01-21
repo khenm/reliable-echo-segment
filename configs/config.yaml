@@ -2,7 +2,7 @@ model:
   name: "r2plus1d"
 data:
   name: "echonet"
-  subset_size: 50 # remove it for full training
+  subset_size: 50
 
 training:
   epochs: 50

@@ -51,7 +51,7 @@ def run_rcps_pipeline(cfg):
         logger.error(f"Checkpoint not found at {ckpt_path}. Cannot run RCPS.")
         return
         
-    checkpoint = torch.load(ckpt_path, map_location=device)
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
         model.load_state_dict(checkpoint["model_state_dict"])
     else:

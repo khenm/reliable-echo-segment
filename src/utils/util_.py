@@ -67,7 +67,7 @@ def load_checkpoint(model, ckpt_path, device):
         ckpt_path (str): Path to the checkpoint file.
         device (torch.device): Device to load the checkpoint onto.
     """
-    checkpoint = torch.load(ckpt_path, map_location=device)
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
         model.load_state_dict(checkpoint["model_state_dict"])
     else:
