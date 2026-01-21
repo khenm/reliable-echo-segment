@@ -215,7 +215,7 @@ def run_train(cfg, device):
     
     criterions = {}
     if is_regression:
-        criterions['ef'] = DifferentiableEFLoss(pixel_spacing=1.0, weight=1.0)
+        criterions['ef'] = DifferentiableEFLoss(pixel_spacing=1.0, weight=20.0)
         criterions['seg'] = DiceCELoss(to_onehot_y=True, softmax=True, lambda_dice=0.7, lambda_ce=0.3)
     else:
         criterions['dice'] = DiceCELoss(to_onehot_y=True, softmax=True)
