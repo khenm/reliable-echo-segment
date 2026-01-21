@@ -82,7 +82,8 @@ class Trainer:
                 if "rng_state" in checkpoint:
                     rng_state = checkpoint["rng_state"]
                     torch.set_rng_state(rng_state["torch"])
-                    torch.cuda.set_rng_state(rng_state["cuda"])
+                    if rng_state["cuda"] is not None and torch.cuda.is_available():
+                        torch.cuda.set_rng_state(rng_state["cuda"])
                     np.random.set_state(rng_state["numpy"])
                     random.setstate(rng_state["python"])
                     logger.info("Restored RNG states.")
@@ -260,7 +261,7 @@ class Trainer:
                 'best_metric': best_metric,
                 'rng_state': {
                     "torch": torch.get_rng_state(),
-                    "cuda": torch.cuda.get_rng_state(),
+                    "cuda": torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
                     "numpy": np.random.get_state(),
                     "python": random.getstate()
                 }
