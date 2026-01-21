@@ -146,7 +146,8 @@ class Trainer:
                         
                         # Calculate losses based on keys
                         if 'ef' in self.criterions:
-                            l_ef = self.criterions['ef'](preds.squeeze(), targets)
+                            # DifferentiableEFLoss expects seg logits and returns (loss, pred_ef)
+                            l_ef, _ = self.criterions['ef'](seg_logits, targets)
                             loss += l_ef
                             loss_dict['ef'] = l_ef.item()
                         

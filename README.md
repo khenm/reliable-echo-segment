@@ -6,7 +6,6 @@ End-to-End Pipeline for 2-D U-Net training on the CAMUS dataset.
 
 * `configs/`: YAML configuration files.
 * `src/`: Source code for dataset, model, and training.
-* `notebooks/`: EDA and visualization notebooks.
 * `main.py`: Entry point for training and testing.
 
 ## Usage

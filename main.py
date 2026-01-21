@@ -14,7 +14,7 @@ import src.models.r2plus1d # Register R2Plus1D
 import src.models.vae_unet # Register VAEUNet
 from src.trainer import Trainer
 from src.utils.logging import get_logger
-from src.losses import KLLoss
+from src.losses import KLLoss, DifferentiableEFLoss
 from monai.losses import DiceCELoss
 from src.utils.postprecessing import generate_clinical_pairs
 from src.utils.plot import (
@@ -215,7 +215,7 @@ def run_train(cfg, device):
     
     criterions = {}
     if is_regression:
-        criterions['ef'] = torch.nn.MSELoss()
+        criterions['ef'] = DifferentiableEFLoss(pixel_spacing=1.0, weight=1.0)
         criterions['seg'] = DiceCELoss(to_onehot_y=True, softmax=True)
     else:
         criterions['dice'] = DiceCELoss(to_onehot_y=True, softmax=True)
