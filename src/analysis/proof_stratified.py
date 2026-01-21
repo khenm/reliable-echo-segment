@@ -44,7 +44,7 @@ def run_stratified_analysis(cfg):
 
     # Model
     model = get_model(cfg, device)
-    model.load_state_dict(torch.load(ckpt_path, map_location=device))
+    model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=False))
     model.eval()
     
     # Profiler

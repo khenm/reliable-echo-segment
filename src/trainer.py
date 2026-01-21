@@ -65,7 +65,7 @@ class Trainer:
             tuple: (start_epoch, best_metric)
         """
         logger.info(f"Loading checkpoint from {path}")
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         
         start_epoch = 1
         best_metric = 0.0
