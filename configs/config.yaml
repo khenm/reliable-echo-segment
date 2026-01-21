@@ -14,7 +14,7 @@ training:
   kl_weight: 1.0e-4
   patience: 10
   seed: 42
-  ckpt_save_path: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_r2plus1d/best_r2plus1d.pt"
+  ckpt_save_path: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/checkpoints/best_r2plus1d.pt"
   save_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_r2plus1d"
   test_metrics_csv: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_r2plus1d/echonet_metrics.csv"
   clinical_pairs_csv: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_r2plus1d/echonet_clinical_pairs.csv"

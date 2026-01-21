@@ -189,7 +189,7 @@ class Trainer:
                     pbar_postfix[k] = f"{v:.4f}"
                 pbar.set_postfix(pbar_postfix)
 
-            val_dice = self._validate()
+            val_result = self._validate()
             
             # Prepare log message
             avg_run_loss = run_loss / len(self.ld_tr)
@@ -200,14 +200,16 @@ class Trainer:
                 log_msg += f"{k}={avg_comp:.4f} "
             
             if self.is_regression:
-                 log_msg += f"valMAE={-val_dice:.4f}"
+                val_score, val_mae, val_dice = val_result
+                log_msg += f"valMAE={val_mae:.4f} valDice={val_dice:.4f}"
             else:
-                 log_msg += f"valDice={val_dice:.4f}"
+                val_score = val_result
+                log_msg += f"valDice={val_score:.4f}"
             
             logger.info(log_msg)
 
-            if val_dice > best_metric:
-                best_metric = val_dice
+            if val_score > best_metric:
+                best_metric = val_score
                 wait = 0
                 
                 # Save BEST to Vault
@@ -301,8 +303,9 @@ class Trainer:
         if self.is_regression:
             mae = float(self.metr_mae_val.aggregate().cpu())
             dice = float(self.metr_dice_val.aggregate().cpu()) if self.metr_dice_val.get_buffer() is not None else 0.0
-            logger.info(f"Validation Stats: MAE={mae:.4f} Dice={dice:.4f}")
-            return -mae
+            # Return tuple: (combined_score, mae, dice)
+            # Use negative MAE as score since lower MAE is better
+            return (-mae, mae, dice)
         else:
             return float(self.metr_dice_val.aggregate().cpu())
 
