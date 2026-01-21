@@ -147,16 +147,19 @@ class EchoNetDataset(Dataset):
         
         return mask
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx, _retry_count=0):
         """
         Retrieves a sample from the dataset.
 
         Args:
             idx (int): Index of the sample.
+            _retry_count (int): Internal counter for retry attempts.
 
         Returns:
             dict: Dictionary containing 'image', 'label', 'case', 'view', and 'phase'.
         """
+        max_retries = 5
+        
         fname, frame_idx = self.samples[idx]
         
         video_path = os.path.join(self.videos_dir, fname)
@@ -167,7 +170,9 @@ class EchoNetDataset(Dataset):
         img_arr = self._load_video_frame(video_path, frame_idx)
         if img_arr is None:
             logger.error(f"Error loading {fname} frame {frame_idx}")
-            return self.__getitem__((idx+1)%len(self))
+            if _retry_count >= max_retries:
+                raise RuntimeError(f"Failed to load {max_retries} consecutive samples starting from idx {idx}")
+            return self.__getitem__((idx+1)%len(self), _retry_count + 1)
             
         H, W = img_arr.shape
         
@@ -325,7 +330,9 @@ class EchoNetVideoDataset(Dataset):
         video = np.stack(frames, axis=0)
         return video, start_frame
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx, _retry_count=0):
+        max_retries = 5
+        
         fname = self.samples[idx]
         target = self.targets[idx] if self.targets is not None else 0.0
         
@@ -335,8 +342,10 @@ class EchoNetVideoDataset(Dataset):
              
         result = self._load_video_clip(video_path)
         if result is None:
-            # Fallback
-            return self.__getitem__((idx+1)%len(self))
+            logger.warning(f"Failed to load video clip: {video_path}")
+            if _retry_count >= max_retries:
+                raise RuntimeError(f"Failed to load {max_retries} consecutive video samples starting from idx {idx}")
+            return self.__getitem__((idx+1)%len(self), _retry_count + 1)
         
         video, start_frame = result
         T_clip, H, W, C = video.shape
