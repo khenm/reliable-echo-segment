@@ -10,6 +10,7 @@ from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric, HausdorffDistanceMetric, MAEMetric
 from tqdm import tqdm
 from src.utils.logging import get_logger
+from src.utils.util_ import load_checkpoint_dict, save_checkpoint
 
 logger = get_logger()
 
@@ -65,7 +66,8 @@ class Trainer:
             tuple: (start_epoch, best_metric)
         """
         logger.info(f"Loading checkpoint from {path}")
-        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        time.sleep(0.1) # small delay before load
+        checkpoint = load_checkpoint_dict(path, self.device)
         
         start_epoch = 1
         best_metric = 0.0
@@ -217,18 +219,18 @@ class Trainer:
                     best_ckpt_name = f"{self.cfg['training']['run_dir'].split('/')[-1]}_best.ckpt"
                     best_ckpt_path = os.path.join(self.vault_dir, best_ckpt_name)
                     logger.info(f"Saving BEST checkpoint to Vault: {best_ckpt_path}...")
-                    torch.save({
+                    save_checkpoint(best_ckpt_path, {
                         'epoch': ep,
                         'model_state_dict': self.model.state_dict(),
                         'optimizer_state_dict': self.opt.state_dict(),
                         'best_metric': val_dice
-                    }, best_ckpt_path)
+                    })
             else:
                 wait += 1
             
             # Save Latest Checkpoint to Workspace (THE STATE DUMP)
             # This is overwriting 'last.ckpt' at every epoch
-            torch.save({
+            save_checkpoint(self.ckpt_path, {
                 'epoch': ep,
                 'model_state_dict': self.model.state_dict(),
                 'optimizer_state_dict': self.opt.state_dict(),
@@ -239,7 +241,7 @@ class Trainer:
                     "numpy": np.random.get_state(),
                     "python": random.getstate()
                 }
-            }, self.ckpt_path)
+            })
             
             if wait >= patience:
                 logger.info("⏹ Early stop")
