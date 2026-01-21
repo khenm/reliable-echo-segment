@@ -19,7 +19,7 @@ class Trainer:
     Handles training, validation, and testing for both segmentation (VAE-U-Net) and 
     dual-task regression/segmentation (R2+1D) models.
     """
-    def __init__(self, model, loaders, cfg, device, criterions=None):
+    def __init__(self, model, loaders, cfg, device, criterions=None, metrics=None):
         """
         Args:
             model (torch.nn.Module): The model to train.
@@ -27,25 +27,20 @@ class Trainer:
             cfg (dict): Configuration dictionary defining hyperparameters and paths.
             device (torch.device): Device to execute computation on.
             criterions (dict): Dictionary of loss functions. e.g. {'dice': DiceLoss(), 'kl': KLLoss()}
+            metrics (list): List of metrics to evaluate.
         """
         self.model = model
         self.ld_tr, self.ld_va, self.ld_ts = loaders
         self.cfg = cfg
         self.device = device
         self.criterions = criterions if criterions is not None else {}
+        self.metrics = metrics if metrics is not None else {}
         self.num_classes = cfg['data']['num_classes']
         self.ckpt_path = cfg['training']['ckpt_save_path'] # Workspace: .../last.ckpt
         self.vault_dir = cfg['training'].get('vault_dir', None) # Vault: checkpoints/{model_name}/
         
         self.model_name = cfg['model'].get('name', 'VAEUNet')
         self.is_regression = (self.model_name.lower() == "r2plus1d")
-
-        # Metric initialization
-        if self.is_regression:
-            self.metr_mae_val = MAEMetric(reduction="mean")
-            self.metr_dice_val = DiceMetric(include_background=False, reduction="mean")
-        else:
-            self.metr_dice_val = DiceMetric(include_background=False, reduction="mean")
             
         self.opt = torch.optim.AdamW(model.parameters(), 
                                      lr=cfg['training']['lr'], 
@@ -223,7 +218,7 @@ class Trainer:
                         'epoch': ep,
                         'model_state_dict': self.model.state_dict(),
                         'optimizer_state_dict': self.opt.state_dict(),
-                        'best_metric': val_dice
+                        'best_metric': best_metric
                     })
             else:
                 wait += 1
@@ -257,11 +252,9 @@ class Trainer:
         """
         self.model.eval()
         
-        if self.is_regression:
-             self.metr_mae_val.reset()
-             self.metr_dice_val.reset()
-        else:
-             self.metr_dice_val.reset()
+        # Reset all metrics
+        for metric in self.metrics.values():
+            metric.reset()
         
         dev_type = self.device.type if hasattr(self.device, 'type') else str(self.device)
         with torch.no_grad(), torch.amp.autocast(device_type=dev_type):
@@ -272,19 +265,19 @@ class Trainer:
                     
                     v_preds, v_seg = self.model(v_img)
                     
-                    if v_target.ndim == 1:
-                        v_target = v_target.view(-1, 1)
-                    self.metr_mae_val(v_preds, v_target)
+                    # MAE Metric
+                    if 'mae' in self.metrics:
+                        if v_target.ndim == 1:
+                            v_target = v_target.view(-1, 1)
+                        self.metrics['mae'](v_preds, v_target)
                     
                     # Dice Metric
-                    v_mask_target = vb.get("label")
-                    if v_mask_target is not None:
-                        v_mask_target = v_mask_target.to(self.device).long()
-                        # Convert logits to one-hot for DiceMetric
-                        v_pred_labels = torch.argmax(v_seg, dim=1)
-                        v_y_pred = F.one_hot(v_pred_labels, num_classes=self.num_classes).permute(0, 4, 1, 2, 3).float()
-                        v_y_true = F.one_hot(v_mask_target.squeeze(1), num_classes=self.num_classes).permute(0, 4, 1, 2, 3).float()
-                        self.metr_dice_val(v_y_pred, v_y_true)
+                    if 'dice' in self.metrics:
+                        v_mask_target = vb.get("label")
+                        if v_mask_target is not None:
+                            v_mask_target = v_mask_target.to(self.device).long()
+                            v_pred_labels = (torch.sigmoid(v_seg) > 0.5).float() 
+                            self.metrics['dice'](v_pred_labels, v_mask_target)
                 else:
                     v_img = vb["image"].to(self.device)
                     v_lab = vb["label"].to(self.device)
@@ -300,16 +293,17 @@ class Trainer:
                     v_y_pred = F.one_hot(v_pred_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
                     v_y_true = F.one_hot(v_gt_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
 
-                    self.metr_dice_val(v_y_pred, v_y_true)
+                    if 'dice' in self.metrics:
+                        self.metrics['dice'](v_y_pred, v_y_true)
         
         if self.is_regression:
-            mae = float(self.metr_mae_val.aggregate().cpu())
-            dice = float(self.metr_dice_val.aggregate().cpu()) if self.metr_dice_val.get_buffer() is not None else 0.0
+            mae = float(self.metrics['mae'].aggregate().cpu()) if 'mae' in self.metrics else 0.0
+            dice = float(self.metrics['dice'].aggregate().cpu()) if 'dice' in self.metrics and self.metrics['dice'].get_buffer() is not None else 0.0
             # Return tuple: (combined_score, mae, dice)
             # Use negative MAE as score since lower MAE is better
             return (-mae, mae, dice)
         else:
-            return float(self.metr_dice_val.aggregate().cpu())
+            return float(self.metrics['dice'].aggregate().cpu()) if 'dice' in self.metrics else 0.0
 
     def evaluate_test(self):
         """

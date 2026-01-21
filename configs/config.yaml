@@ -3,6 +3,13 @@ model:
 data:
   name: "echonet"
   subset_size: 50
+  max_retries: 5
+
+loss:
+  weights:
+    dice: 0.7
+    ce: 0.3
+    ef: 1.0
 
 training:
   epochs: 50
@@ -12,7 +19,6 @@ training:
   persistent_workers: True
   lr: 3.0e-4
   weight_decay: 1.0e-4
-  kl_weight: 1.0e-4
   patience: 10
   seed: 42
   checkpoint_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/checkpoints"

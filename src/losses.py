@@ -72,7 +72,10 @@ class DifferentiableEFLoss(nn.Module):
         Returns:
             Volume per frame, shape [B, T].
         """
-        lv_prob = mask[:, self.foreground_class]  # [B, T, H, W]
+        if mask.shape[1] == 1:
+            lv_prob = mask[:, 0]
+        else:
+            lv_prob = mask[:, self.foreground_class]
         
         diameter = torch.sum(lv_prob, dim=3) * self.pixel_spacing  # [B, T, H]
         disk_areas = (math.pi / 4.0) * (diameter ** 2)
@@ -91,7 +94,7 @@ class DifferentiableEFLoss(nn.Module):
         Returns:
             Tuple of (weighted_loss, pred_ef) where pred_ef has shape [B].
         """
-        pred_probs = torch.softmax(pred_masks, dim=1)
+        pred_probs = torch.sigmoid(pred_masks)
         volumes = self.get_volume(pred_probs)
         
         ed_vol, _ = torch.max(volumes, dim=1)
