@@ -434,6 +434,14 @@ class EchoNet:
             ds_va = EchoNetVideoDataset(root_dir, split="VAL", clip_len=clip_len, transform=val_transforms)
             ds_ts = EchoNetVideoDataset(root_dir, split="TEST", clip_len=clip_len, transform=val_transforms)
 
+            if cfg['data'].get('subset_size'):
+                from torch.utils.data import Subset
+                subset_size = int(cfg['data']['subset_size'])
+                logger.info(f"Using subset of size {subset_size} for all splits")
+                ds_tr = Subset(ds_tr, range(min(len(ds_tr), subset_size)))
+                ds_va = Subset(ds_va, range(min(len(ds_va), subset_size)))
+                ds_ts = Subset(ds_ts, range(min(len(ds_ts), subset_size)))
+
             ld_tr = DataLoader(ds_tr, batch_size=batch_size, shuffle=True, num_workers=num_workers)
             ld_va = DataLoader(ds_va, batch_size=batch_size, shuffle=False, num_workers=num_workers)
             ld_ts = DataLoader(ds_ts, batch_size=batch_size, shuffle=False, num_workers=num_workers)
