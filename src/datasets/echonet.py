@@ -427,7 +427,13 @@ class EchoNetVideoDataset(Dataset):
         if self.targets is not None:
             target = target / 100.0
             
-        return {"video": video, "target": torch.tensor(target, dtype=torch.float32), "label": mask_clip, "case": fname}
+        return {
+            "video": video, 
+            "target": torch.tensor(target, dtype=torch.float32), 
+            "label": mask_clip, 
+            "case": fname,
+            "frame_mask": torch.tensor(frame_mask, dtype=torch.float32)
+        }
 
 @register_dataset("ECHONET")
 class EchoNet:
