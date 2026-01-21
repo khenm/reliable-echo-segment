@@ -94,18 +94,12 @@ def run_init(cfg, args_resume):
     # 1. Directory Setup
     # Workspace
     runs_root = cfg['training'].get('save_dir', 'runs')
-    if not os.path.exists(runs_root):
-        if runs_root.startswith("/"):
-             logger.warning(f"Configured save_dir '{runs_root}' does not exist. Falling back to local 'runs'.")
-             runs_root = "runs"
+    os.makedirs(runs_root, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     
     # Vault 
     ckpt_root = cfg['training'].get('checkpoint_dir', 'checkpoints')
-    if not os.path.exists(ckpt_root):
-        if ckpt_root.startswith("/"):
-            logger.warning(f"Configured checkpoint_dir '{ckpt_root}' does not exist. Falling back to local 'checkpoints'.")
-            ckpt_root = "checkpoints"
+    os.makedirs(ckpt_root, exist_ok=True)
 
     vault_dir = os.path.join(ckpt_root, model_name)
     os.makedirs(vault_dir, exist_ok=True)

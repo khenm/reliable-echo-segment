@@ -255,6 +255,20 @@ class EchoNetVideoDataset(Dataset):
             
         # Normalize FileName
         df["FileName"] = df["FileName"].astype(str).apply(lambda x: x[:-4] if x.lower().endswith('.avi') else x)
+        
+        # Filter by existence on disk (Robustness for partial datasets)
+        if os.path.exists(self.videos_dir):
+            available_files = set(os.listdir(self.videos_dir))
+            # Create set of available basenames (assuming .avi)
+            available_bases = {f[:-4] if f.lower().endswith('.avi') else f for f in available_files}
+            
+            # Keep only files that exist
+            original_len = len(df)
+            df = df[df["FileName"].isin(available_bases)]
+            
+            if len(df) < original_len:
+                logger.warning(f"Filtered {original_len - len(df)} missing videos from FileList. Remaining: {len(df)}")
+        
         self.file_list = df
         self.samples = df["FileName"].values
         self.targets = df["EF"].values if "EF" in df.columns else None
@@ -377,6 +391,7 @@ class EchoNetVideoDataset(Dataset):
         # Generate Masks for the clip
         # Output shape: (T, H, W) -> will become (1, T, H, W) after transform usually or we handle it manually
         mask_clip = np.zeros((T_clip, H, W), dtype=np.uint8)
+        frame_mask = np.zeros((T_clip,), dtype=np.float32)
 
         if self.tracings is not None:
              # Find tracings for this file
@@ -389,6 +404,7 @@ class EchoNetVideoDataset(Dataset):
                      t_subset = file_tracings[file_tracings["Frame"] == current_frame_idx]
                      if not t_subset.empty:
                          mask_clip[t] = self._generate_mask(t_subset, H, W)
+                         frame_mask[t] = 1.0
                      
                      current_frame_idx += self.sampling_rate
 

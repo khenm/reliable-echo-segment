@@ -22,9 +22,9 @@ training:
   patience: 10
   seed: 42
   checkpoint_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/checkpoints"
-  save_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet"
-  test_metrics_csv: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet/echonet_metrics.csv"
-  clinical_pairs_csv: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet/echonet_clinical_pairs.csv"
+  save_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/"
+  test_metrics_csv: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_metrics.csv"
+  clinical_pairs_csv: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_clinical_pairs.csv"
 
 tta:
   enabled: true

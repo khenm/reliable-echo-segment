@@ -36,8 +36,10 @@ class Trainer:
         self.criterions = criterions if criterions is not None else {}
         self.metrics = metrics if metrics is not None else {}
         self.num_classes = cfg['data']['num_classes']
-        self.ckpt_path = cfg['training']['ckpt_save_path'] # Workspace: .../last.ckpt
-        self.vault_dir = cfg['training'].get('vault_dir', None) # Vault: checkpoints/{model_name}/
+        # Checkpoint paths derived from config
+        checkpoint_dir = cfg['training']['checkpoint_dir']
+        self.ckpt_path = os.path.join(checkpoint_dir, 'last.ckpt') # Workspace: .../last.ckpt
+        self.vault_dir = checkpoint_dir  # Vault for best checkpoints
         
         self.model_name = cfg['model'].get('name', 'VAEUNet')
         self.is_regression = (self.model_name.lower() == "r2plus1d")
@@ -134,9 +136,13 @@ class Trainer:
                     imgs = batch.get("video", batch.get("image")).to(self.device)
                     targets = batch["target"].to(self.device)
                     mask_targets = batch.get("label")
+                    frame_mask = batch.get("frame_mask") # (B, T)
                     
                     if mask_targets is not None:
                         mask_targets = mask_targets.to(self.device)
+                    
+                    if frame_mask is not None:
+                        frame_mask = frame_mask.to(self.device)
                     
                     with torch.amp.autocast(device_type=dev_type):
                         preds, seg_logits = self.model(imgs)
@@ -149,7 +155,29 @@ class Trainer:
                             loss_dict['ef'] = l_ef.item()
                         
                         if 'seg' in self.criterions and mask_targets is not None:
-                             l_seg = self.criterions['seg'](seg_logits, mask_targets.long())
+                             if frame_mask is not None:
+                                 # Temporal Indexing: only calc loss on labeled frames
+                                 # seg_logits: (B, 1, T, H, W) -> need to transpose to (B, T, 1, H, W) to flatten T
+                                 B, C, T, H, W = seg_logits.shape
+                                 
+                                 # Reshape to (B*T, ...)
+                                 sl_flat = seg_logits.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
+                                 mt_flat = mask_targets.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
+                                 fm_flat = frame_mask.view(-1) # (B*T)
+                                 
+                                 # Filter
+                                 valid_indices = torch.nonzero(fm_flat).squeeze()
+                                 
+                                 if valid_indices.numel() > 0:
+                                     sl_valid = sl_flat[valid_indices]
+                                     mt_valid = mt_flat[valid_indices]
+                                     l_seg = self.criterions['seg'](sl_valid, mt_valid.long())
+                                 else:
+                                     l_seg = torch.tensor(0.0, device=self.device, requires_grad=True)
+                                     
+                             else:
+                                 l_seg = self.criterions['seg'](seg_logits, mask_targets.long())
+                                 
                              loss += l_seg
                              loss_dict['seg'] = l_seg.item()
 
@@ -211,7 +239,7 @@ class Trainer:
                 
                 # Save BEST to Vault
                 if self.vault_dir:
-                    best_ckpt_name = f"{self.cfg['training']['run_dir'].split('/')[-1]}_best.ckpt"
+                    best_ckpt_name = f"{self.cfg['training']['save_dir'].split('/')[-1]}_best.ckpt"
                     best_ckpt_path = os.path.join(self.vault_dir, best_ckpt_name)
                     logger.info(f"Saving BEST checkpoint to Vault: {best_ckpt_path}...")
                     save_checkpoint(best_ckpt_path, {
@@ -274,10 +302,26 @@ class Trainer:
                     # Dice Metric
                     if 'dice' in self.metrics:
                         v_mask_target = vb.get("label")
+                        frame_mask = vb.get("frame_mask")
+                        
                         if v_mask_target is not None:
                             v_mask_target = v_mask_target.to(self.device).long()
                             v_pred_labels = (torch.sigmoid(v_seg) > 0.5).float() 
-                            self.metrics['dice'](v_pred_labels, v_mask_target)
+                            
+                            if frame_mask is not None:
+                                frame_mask = frame_mask.to(self.device)
+                                B, C, T, H, W = v_pred_labels.shape
+                                
+                                # Reshape and filter
+                                vl_flat = v_pred_labels.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
+                                vt_flat = v_mask_target.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
+                                fm_flat = frame_mask.view(-1)
+                                
+                                valid_indices = torch.nonzero(fm_flat).squeeze()
+                                if valid_indices.numel() > 0:
+                                    self.metrics['dice'](vl_flat[valid_indices], vt_flat[valid_indices])
+                            else:
+                                self.metrics['dice'](v_pred_labels, v_mask_target)
                 else:
                     v_img = vb["image"].to(self.device)
                     v_lab = vb["label"].to(self.device)
