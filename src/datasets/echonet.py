@@ -34,11 +34,13 @@ class EchoNetDataset(Dataset):
             split (str): One of "TRAIN", "VAL", "TEST".
             img_size (tuple): Target size (H, W).
             transform (callable): MONAI transforms.
+            max_retries (int): Maximum number of retries for loading samples.
         """
         self.root_dir = root_dir
         self.split = split.upper()
         self.img_size = img_size
         self.transform = transform
+        self.max_retries = 5
         
         self.file_list_path = os.path.join(root_dir, "FileList.csv")
         self.tracings_path = os.path.join(root_dir, "VolumeTracings.csv")
@@ -158,8 +160,8 @@ class EchoNetDataset(Dataset):
         Returns:
             dict: Dictionary containing 'image', 'label', 'case', 'view', and 'phase'.
         """
-        max_retries = 5
-        
+        max_retries = self.max_retries
+
         fname, frame_idx = self.samples[idx]
         
         video_path = os.path.join(self.videos_dir, fname)
@@ -229,12 +231,14 @@ class EchoNetVideoDataset(Dataset):
             clip_len (int): Number of frames to sample.
             sampling_rate (int): Step size between frames.
             transform (callable): Spatial transforms.
+            max_retries (int): Maximum number of retries for video loading.
         """
         self.root_dir = root_dir
         self.split = split.upper()
         self.clip_len = clip_len
         self.sampling_rate = sampling_rate
         self.transform = transform
+        self.max_retries = 5
         
         self.file_list_path = os.path.join(root_dir, "FileList.csv")
         self.videos_dir = os.path.join(root_dir, "Videos")
@@ -352,8 +356,7 @@ class EchoNetVideoDataset(Dataset):
         return video, start_frame
 
     def __getitem__(self, idx, _retry_count=0):
-        max_retries = 5
-        
+        max_retries = self.max_retries
         fname = self.samples[idx]
         target = self.targets[idx] if self.targets is not None else 0.0
         
@@ -427,33 +430,42 @@ class EchoNet:
             # Video Configuration
             clip_len = cfg['model'].get('clip_length', 32)
             
-            # Helper for resizing video (trilinear) and label (nearest)
-            def resize_video_label(data):
-                # data is dict
-                vid = torch.as_tensor(data["video"]).unsqueeze(0) # (1, C, T, H, W)
-                tgt_size = (clip_len, img_size[0], img_size[1])
-                
-                vid = torch.nn.functional.interpolate(vid, size=tgt_size, mode='trilinear', align_corners=False).squeeze(0)
-                data["video"] = vid
-                
-                if "label" in data:
-                    lab = torch.as_tensor(data["label"]).unsqueeze(0) # (1, C, T, H, W)
-                    lab = torch.nn.functional.interpolate(lab, size=tgt_size, mode='nearest').squeeze(0)
-                    data["label"] = lab
-                return data
+            class ResizeVideoLabel:
+                def __init__(self, size):
+                    self.size = size
+                def __call__(self, data):
+                    # data is dict
+                    vid = torch.as_tensor(data["video"]).unsqueeze(0) # (1, C, T, H, W)
+                    tgt_size = (clip_len, self.size[0], self.size[1])
+                    
+                    vid = torch.nn.functional.interpolate(vid, size=tgt_size, mode='trilinear', align_corners=False).squeeze(0)
+                    data["video"] = vid
+                    
+                    if "label" in data:
+                        lab = torch.as_tensor(data["label"]).unsqueeze(0) # (1, C, T, H, W)
+                        lab = torch.nn.functional.interpolate(lab, size=tgt_size, mode='nearest').squeeze(0)
+                        data["label"] = lab
+                    return data
+
+            resize_op = ResizeVideoLabel(img_size)
 
             train_transforms = Compose([
-                Lambda(func=resize_video_label),
+                Lambda(func=resize_op),
                 # Add augmentations here later
             ])
             
             val_transforms = Compose([
-                Lambda(func=resize_video_label),
+                Lambda(func=resize_op),
             ])
 
+            max_retries = cfg['data'].get('max_retries', 5)
             ds_tr = EchoNetVideoDataset(root_dir, split="TRAIN", clip_len=clip_len, transform=train_transforms)
+            ds_tr.max_retries = max_retries
             ds_va = EchoNetVideoDataset(root_dir, split="VAL", clip_len=clip_len, transform=val_transforms)
+            ds_va.max_retries = max_retries
             ds_ts = EchoNetVideoDataset(root_dir, split="TEST", clip_len=clip_len, transform=val_transforms)
+            ds_ts.max_retries = max_retries
+
 
             if cfg['data'].get('subset_size'):
                 from torch.utils.data import Subset

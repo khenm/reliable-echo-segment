@@ -16,6 +16,7 @@ from src.trainer import Trainer
 from src.utils.logging import get_logger
 from src.losses import KLLoss, DifferentiableEFLoss
 from monai.losses import DiceCELoss
+from monai.metrics import DiceMetric, MAEMetric
 from src.utils.postprecessing import generate_clinical_pairs
 from src.utils.plot import (
     plot_metrics_summary, 
@@ -223,16 +224,33 @@ def run_train(cfg, device):
     is_regression = (model_name.lower() == "r2plus1d")
     
     criterions = {}
+    weights = cfg.get('loss', {}).get('weights', {})
+
     if is_regression:
-        # criterions['ef'] = DifferentiableEFLoss(pixel_spacing=1.0, weight=20.0)
+        if weights.get('ef', 0.0) > 0:
+            criterions['ef'] = DifferentiableEFLoss(pixel_spacing=1.0, weight=weights.get('ef'))
+             
         num_classes = cfg['data'].get('num_classes', 1)
-        criterions['seg'] = DiceCELoss(sigmoid=True, lambda_dice=0.7, lambda_ce=0.3)
+        criterions['seg'] = DiceCELoss(sigmoid=True, 
+                                       lambda_dice=weights.get('dice', 0.7), 
+                                       lambda_ce=weights.get('ce', 0.3))
     else:
         criterions['dice'] = DiceCELoss(to_onehot_y=True, softmax=True)
-        kl_weight = cfg['training'].get('kl_weight', 1e-4)
+        kl_weight = weights.get('kl', 1e-4)
         criterions['kl'] = KLLoss(weight=kl_weight)
 
-    trainer = Trainer(model, loaders, cfg, device, criterions=criterions)
+    # Define Metrics based on Model Type
+    num_classes = cfg['data'].get('num_classes', 1)
+    include_bg = (num_classes == 1)
+    
+    metrics = {}
+    if is_regression:
+        metrics['mae'] = MAEMetric(reduction="mean")
+        metrics['dice'] = DiceMetric(include_background=include_bg, reduction="mean")
+    else:
+        metrics['dice'] = DiceMetric(include_background=include_bg, reduction="mean")
+
+    trainer = Trainer(model, loaders, cfg, device, criterions=criterions, metrics=metrics)
     trainer.train()
 
 def run_eval(cfg, device):
