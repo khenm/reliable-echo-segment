@@ -33,7 +33,7 @@ class EchoR2Plus1D(nn.Module):
     1. Scalar Regression (EF prediction).
     2. Segmentation (Mask prediction) using a U-Net style decoder.
     """
-    def __init__(self, pretrained=True, progress=True, num_classes=2):
+    def __init__(self, pretrained=True, progress=True, num_classes=1):
         super().__init__()
         
         # Load pre-trained R(2+1)D-18
@@ -70,6 +70,8 @@ class EchoR2Plus1D(nn.Module):
         self.up4 = UpBlock3D(64, 64, 32) # Skip from stem (64)
         
         self.final_conv = nn.Conv3d(32, num_classes, kernel_size=1)
+
+        self._init_decoder_weights()
         
     @classmethod
     def from_config(cls, cfg):
@@ -111,3 +113,17 @@ class EchoR2Plus1D(nn.Module):
             seg_pred = nn.functional.interpolate(seg_pred, size=x.shape[2:], mode='trilinear', align_corners=False)
             
         return ef_pred, seg_pred
+    
+    def _init_decoder_weights(self):
+        # Initialize decoder and final layers to avoid "dead neurons" at start
+        for m in [self.up1, self.up2, self.up3, self.up4]:
+            for module in m.modules():
+                if isinstance(module, nn.Conv3d):
+                    nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+                elif isinstance(module, nn.BatchNorm3d):
+                    nn.init.constant_(module.weight, 1)
+                    nn.init.constant_(module.bias, 0)
+        
+        # Initialize final conv with small weights to output near 0 (0.5 probability) initially
+        nn.init.xavier_uniform_(self.final_conv.weight)
+        nn.init.constant_(self.final_conv.bias, 0)
