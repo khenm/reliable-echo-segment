@@ -201,14 +201,50 @@ def _load_model_for_inference(cfg, device):
     Returns:
         torch.nn.Module | None: Loaded model or None if checkpoint missing.
     """
-    ckpt_dir = cfg['training']['checkpoint_dir']
-    ckpt_paths = glob.glob(os.path.join(ckpt_dir, "*.ckpt"))
+    import glob
+    model_name = cfg['model']['name']
     
+    # 1. Check for explicit path
+    if cfg['training'].get('resume_path'):
+         ckpt_path = cfg['training']['resume_path']
+         if not os.path.exists(ckpt_path):
+             logger.warning(f"Explicit path {ckpt_path} not found. Falling back to auto-discovery.")
+         else:
+             logger.info(f"Using explicit checkpoint: {ckpt_path}")
+             model = get_model(cfg, device)
+             load_checkpoint(model, ckpt_path, device)
+             model.eval()
+             return model
 
-    # Robust check (handle relative path in checkpoints dir if not found absolute)
+    # 2. Search for BEST in Vault
+    # vault_dir = checkpoints/{model_name}
+    vault_dir = os.path.join(cfg['training'].get('checkpoint_dir', 'checkpoints'), model_name)
+    best_ckpts = glob.glob(os.path.join(vault_dir, "*_best.ckpt"))
     
+    if best_ckpts:
+        # Sort by modification time, desc
+        best_ckpts.sort(key=os.path.getmtime, reverse=True)
+        ckpt_path = best_ckpts[0]
+        logger.info(f"Found BEST checkpoint: {ckpt_path}")
+        
+    else:
+        # 3. Fallback to LAST in Runs
+        # runs/{model_name}/*/last.ckpt
+        logger.info("No best checkpoint found. Searching for latest last.ckpt...")
+        runs_root = cfg['training'].get('save_dir', 'runs')
+        search_pattern = os.path.join(runs_root, model_name, "*", "last.ckpt")
+        last_ckpts = glob.glob(search_pattern)
+        
+        if last_ckpts:
+            last_ckpts.sort(key=os.path.getmtime, reverse=True)
+            ckpt_path = last_ckpts[0]
+            logger.info(f"Found LATEST checkpoint: {ckpt_path}")
+        else:
+            logger.error(f"No checkpoints found for model {model_name} in {vault_dir} or {runs_root}.")
+            return None
+            
     if not os.path.exists(ckpt_path):
-        logger.error(f"Checkpoint not found at {ckpt_path}. Cannot proceed.")
+        logger.error(f"Checkpoint path determined but not found: {ckpt_path}")
         return None
         
     model = get_model(cfg, device)
