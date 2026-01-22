@@ -606,3 +606,83 @@ def plot_coverage_by_difficulty(df_bins, save_path=None):
         plt.savefig(save_path, bbox_inches='tight', dpi=300)
         print(f"Figure saved to {save_path}")
     return fig
+
+def plot_clinical_comparison(sample, save_path=None):
+    """
+    Plots a 3-subfigure comparison:
+    1. Raw Picture
+    2. Raw Picture + Ground Truth Mask Overlay + EF (Ref)
+    3. Picture + Predicted Mask Overlay + EF (Pred)
+    
+    Args:
+        sample (dict): containing:
+            'img': (H, W) or (3, H, W) numpy array, normalized or uint8
+            'gt_mask': (H, W)
+            'pred_mask': (H, W)
+            'gt_ef': float
+            'pred_ef': float
+            'title': str (optional)
+        save_path (str): Optional path to save figure.
+    """
+    setup_style()
+    img = sample['img']
+    gt_mask = sample['gt_mask']
+    pred_mask = sample['pred_mask']
+    gt_ef = sample['gt_ef']
+    pred_ef = sample['pred_ef']
+    title = sample.get('title', 'Case Comparison')
+
+    # Normalize image to [0, 1] for display if needed
+    if img.max() > 1.05:
+        img = img / 255.0
+    
+    # Handle Channels
+    if img.ndim == 3 and img.shape[0] == 3:
+        img = img.transpose(1, 2, 0) # (3, H, W) -> (H, W, 3)
+    elif img.ndim == 2:
+        # Grayscale to RGB for overlay
+        img = np.stack([img]*3, axis=-1)
+
+    fig, axes = plt.subplots(1, 3, figsize=(10, 3.5), dpi=300)
+    
+    # 1. Raw Picture
+    axes[0].imshow(img)
+    axes[0].set_title("Raw Input")
+    axes[0].axis('off')
+
+    # 2. GT Overlay + EF
+    axes[1].imshow(img)
+    if gt_mask is not None and gt_mask.sum() > 0:
+         # Create a red contour for GT
+         # contours = find_boundaries(gt_mask, mode='thick')
+         axes[1].contour(gt_mask, levels=[0.5], colors='lime', linewidths=1.5)
+    
+    axes[1].text(0.5, 0.05, f"Ref EF: {gt_ef:.1f}%", 
+                 color='lime', fontsize=10, fontweight='bold', 
+                 ha='center', transform=axes[1].transAxes,
+                 bbox=dict(facecolor='black', alpha=0.5, edgecolor='none'))
+    axes[1].set_title("Ground Truth")
+    axes[1].axis('off')
+
+    # 3. Pred Overlay + EF
+    axes[2].imshow(img)
+    if pred_mask is not None and pred_mask.sum() > 0:
+         # Create a blue contour for Pred
+         axes[2].contour(pred_mask, levels=[0.5], colors='cyan', linewidths=1.5)
+
+    axes[2].text(0.5, 0.05, f"Pred EF: {pred_ef:.1f}%", 
+                 color='cyan', fontsize=10, fontweight='bold', 
+                 ha='center', transform=axes[2].transAxes,
+                 bbox=dict(facecolor='black', alpha=0.5, edgecolor='none'))
+    
+    axes[2].set_title("Prediction")
+    axes[2].axis('off')
+
+    plt.suptitle(title, fontsize=12)
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, bbox_inches='tight', dpi=300)
+        print(f"Comparison plot saved to {save_path}")
+    
+    return fig
