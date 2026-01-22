@@ -10,7 +10,7 @@ from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric, HausdorffDistanceMetric, MAEMetric
 from tqdm import tqdm
 from src.utils.logging import get_logger
-from src.utils.util_ import load_checkpoint_dict, save_checkpoint
+from src.utils.util_ import load_checkpoint_dict, save_checkpoint, load_full_checkpoint
 
 logger = get_logger()
 
@@ -37,9 +37,13 @@ class Trainer:
         self.metrics = metrics if metrics is not None else {}
         self.num_classes = cfg['data']['num_classes']
         # Checkpoint paths derived from config
-        checkpoint_dir = cfg['training']['checkpoint_dir']
-        self.ckpt_path = os.path.join(checkpoint_dir, 'last.ckpt') # Workspace: .../last.ckpt
-        self.vault_dir = checkpoint_dir  # Vault for best checkpoints
+        self.run_dir = cfg['training']['run_dir']
+        self.vault_dir = cfg['training']['vault_dir']
+        self.run_id = cfg['training'].get('run_id', 'unknown')
+        
+        self.ckpt_path = os.path.join(self.run_dir, 'last.ckpt') # Workspace: .../last.ckpt
+        # Vault path template: checkpoints/{model_name}/{timestamp}_best.ckpt
+        self.vault_path = os.path.join(self.vault_dir, f"{self.run_id}_best.ckpt")
         
         self.model_name = cfg['model'].get('name', 'VAEUNet')
         self.is_regression = (self.model_name.lower() == "r2plus1d")
@@ -53,52 +57,13 @@ class Trainer:
 
     def _load_checkpoint(self, path, load_optimizer=False):
         """
-        Loads a checkpoint, handling both legacy (weights only) and new (full dict) formats.
-        
-        Args:
-            path (str): Path to the checkpoint file.
-            load_optimizer (bool): Whether to load optimizer state.
-            
-        Returns:
-            tuple: (start_epoch, best_metric)
+        Loads a checkpoint using the unified utility.
         """
-        logger.info(f"Loading checkpoint from {path}")
-        time.sleep(0.1) # small delay before load
-        checkpoint = load_checkpoint_dict(path, self.device)
-        
-        start_epoch = 1
-        best_metric = 0.0
-        
-        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            # New format
-            self.model.load_state_dict(checkpoint["model_state_dict"])
-            if load_optimizer:
-                if "optimizer_state_dict" in checkpoint:
-                    self.opt.load_state_dict(checkpoint["optimizer_state_dict"])
-                else:
-                    logger.warning("Optimizer state not found in checkpoint. Starting optimizer fresh.")
-                
-                # Restore RNG State
-                if "rng_state" in checkpoint:
-                    rng_state = checkpoint["rng_state"]
-                    torch.set_rng_state(rng_state["torch"])
-                    if rng_state["cuda"] is not None and torch.cuda.is_available():
-                        torch.cuda.set_rng_state(rng_state["cuda"])
-                    np.random.set_state(rng_state["numpy"])
-                    random.setstate(rng_state["python"])
-                    logger.info("Restored RNG states.")
-                    
-            if "epoch" in checkpoint:
-                start_epoch = checkpoint["epoch"] + 1
-            if "best_metric" in checkpoint:
-                best_metric = checkpoint["best_metric"]
-            logger.info(f"Loaded checkpoint (epoch {checkpoint.get('epoch')}, best_metric {best_metric:.4f})")
-        else:
-            # Legacy format (assuming it's just state_dict)
-            self.model.load_state_dict(checkpoint)
-            logger.info("Loaded legacy checkpoint (model weights only). Resetting optimizer/epoch.")
-            
-        return start_epoch, best_metric
+        from src.utils.util_ import load_full_checkpoint
+        return load_full_checkpoint(path, self.model, 
+                                    optimizer=self.opt if load_optimizer else None, 
+                                    device=self.device, 
+                                    load_rng=load_optimizer)
 
     def train(self):
         """
@@ -106,7 +71,7 @@ class Trainer:
         """
         epochs = self.cfg['training']['epochs']
         patience = self.cfg['training']['patience']
-        best_metric = 0.0
+        best_metric = -float('inf')
         wait = 0
         stop_ep = epochs
 
@@ -240,15 +205,19 @@ class Trainer:
                 
                 # Save BEST to Vault
                 if self.vault_dir:
-                    best_ckpt_name = f"{self.cfg['training']['save_dir'].split('/')[-1]}_best.ckpt"
-                    best_ckpt_path = os.path.join(self.vault_dir, best_ckpt_name)
-                    logger.info(f"Saving BEST checkpoint to Vault: {best_ckpt_path}...")
-                    save_checkpoint(best_ckpt_path, {
+                    logger.info(f"Saving BEST checkpoint to Vault: {self.vault_path}...")
+                    save_checkpoint(self.vault_path, {
                         'epoch': ep,
                         'model_state_dict': self.model.state_dict(),
                         'optimizer_state_dict': self.opt.state_dict(),
                         'best_metric': best_metric
                     })
+                    
+                    # Save metrics.json
+                    import json
+                    metrics_path = os.path.join(self.run_dir, "metrics.json")
+                    with open(metrics_path, 'w') as f:
+                        json.dump({"best_metric": best_metric, "epoch": ep}, f, indent=4)
             else:
                 wait += 1
             

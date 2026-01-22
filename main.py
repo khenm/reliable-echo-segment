@@ -30,7 +30,7 @@ from src.tta.engine import TTA_Engine
 # Setup logging (stdout only initially)
 logger = get_logger()
 
-def resolve_resume_path(resume_mode, runs_root, model_name):
+def resolve_resume_path(resume_mode, runs_root, model_name, cfg_resume_path=None):
     """
     Resolves the checkpoint path for resuming based on the mode.
     
@@ -38,15 +38,24 @@ def resolve_resume_path(resume_mode, runs_root, model_name):
         resume_mode (str|bool): 'auto', path string, or True (treated as 'auto').
         runs_root (str): Root directory for runs (e.g., 'runs').
         model_name (str): Name of the model (for directory scoping).
+        cfg_resume_path (str | None): Explicit path from config.
         
     Returns:
         str | None: Path to the checkpoint to resume from, or None if fresh run.
     """
-    # If mode is None or False, fresh run
+    # 1. Explicit path in config takes precedence
+    if cfg_resume_path:
+        if os.path.exists(cfg_resume_path):
+             logger.info(f"Resuming from config path: {cfg_resume_path}")
+             return cfg_resume_path
+        else:
+             logger.warning(f"Configured resume_path {cfg_resume_path} not found. Falling back to logic.")
+
+    # 2. If mode is None or False, fresh run
     if not resume_mode:
         return None
         
-    # If mode is a specific path, verify and return
+    # 3. If mode is a specific path, verify and return
     if isinstance(resume_mode, str) and resume_mode != 'auto' and "/" in resume_mode:
         if os.path.exists(resume_mode):
             return resume_mode
@@ -54,7 +63,7 @@ def resolve_resume_path(resume_mode, runs_root, model_name):
             logger.warning(f"Explicit resume path {resume_mode} not found. Starting fresh.")
             return None
             
-    # Auto-Resume Logic
+    # 4. Auto-Resume Logic
     model_runs_dir = os.path.join(runs_root, model_name)
     if not os.path.exists(model_runs_dir):
         logger.info(f"No previous runs found for {model_name}. Starting fresh.")
@@ -105,8 +114,11 @@ def run_init(cfg, args_resume):
     os.makedirs(vault_dir, exist_ok=True)
     
     # Determine Resume State
+    # Check config 'resume_path' first, then context args
     resume_mode = 'auto' if args_resume else cfg['training'].get('resume_mode', None)
-    resume_path = resolve_resume_path(resume_mode, runs_root, model_name)
+    cfg_resume_path = cfg['training'].get('resume_path')
+    
+    resume_path = resolve_resume_path(resume_mode, runs_root, model_name, cfg_resume_path)
     
     if resume_path:
         # Resume from existing run directory
@@ -114,6 +126,11 @@ def run_init(cfg, args_resume):
         run_dir = os.path.dirname(resume_path)
         logger.info(f"Resuming workspace: {run_dir}")
         cfg['training']['resume_path'] = resume_path
+        
+        run_dir = os.path.join(runs_root, model_name, timestamp)
+        os.makedirs(run_dir, exist_ok=True)
+        logger.info(f"Created new workspace for resume session: {run_dir}")
+
     else:
         # Create NEW Workspace
         run_dir = os.path.join(runs_root, model_name, timestamp)
@@ -122,9 +139,10 @@ def run_init(cfg, args_resume):
     
     cfg['training']['run_dir'] = run_dir
     cfg['training']['vault_dir'] = vault_dir
+    cfg['training']['run_id'] = timestamp # Pass ID for naming
     
     # Setup Logging
-    log_file = os.path.join(run_dir, "run.log")
+    log_file = os.path.join(run_dir, ".log") # Hidden log file as requested
     _ = get_logger(log_file=log_file)
     
     # 2. Dump Configuration (Immutable Snapshot)
@@ -183,13 +201,11 @@ def _load_model_for_inference(cfg, device):
     Returns:
         torch.nn.Module | None: Loaded model or None if checkpoint missing.
     """
-    ckpt_path = cfg['training']['ckpt_save_path']
+    ckpt_dir = cfg['training']['checkpoint_dir']
+    ckpt_paths = glob.glob(os.path.join(ckpt_dir, "*.ckpt"))
     
+
     # Robust check (handle relative path in checkpoints dir if not found absolute)
-    if not os.path.exists(ckpt_path):
-        alt_path = os.path.join("checkpoints", ckpt_path)
-        if os.path.exists(alt_path):
-             ckpt_path = alt_path
     
     if not os.path.exists(ckpt_path):
         logger.error(f"Checkpoint not found at {ckpt_path}. Cannot proceed.")
