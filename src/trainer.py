@@ -78,7 +78,7 @@ class Trainer:
         start_tr = time.time()
         
         start_epoch = 1
-        if 'resume_path' in self.cfg['training']:
+        if self.cfg['training'].get('resume_path'):
             start_epoch, best_metric = self._load_checkpoint(self.cfg['training']['resume_path'], load_optimizer=True)
 
         for ep in range(start_epoch, epochs + 1):

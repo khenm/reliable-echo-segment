@@ -2,7 +2,7 @@ model:
   name: "r2plus1d"
 data:
   name: "echonet"
-  subset_size: 50
+  subset_size: 200
   max_retries: 5
 
 loss:
