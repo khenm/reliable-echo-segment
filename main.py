@@ -219,7 +219,7 @@ def _load_model_for_inference(cfg, device):
     # 2. Search for BEST in Vault
     # vault_dir = checkpoints/{model_name}
     vault_dir = os.path.join(cfg['training'].get('checkpoint_dir', 'checkpoints'), model_name)
-    best_ckpts = glob.glob(os.path.join(vault_dir, "*_best.ckpt"))
+    best_ckpts = glob.glob(os.path.join(vault_dir, "*best.ckpt"))
     
     if best_ckpts:
         # Sort by modification time, desc
