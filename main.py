@@ -275,6 +275,9 @@ def run_train(cfg, device):
     if is_regression:
         if weights.get('ef', 0.0) > 0:
             criterions['ef'] = DifferentiableEFLoss(pixel_spacing=1.0, weight=weights.get('ef'))
+        
+        if weights.get('reg', 0.0) > 0:
+            criterions['reg'] = torch.nn.L1Loss()
              
         num_classes = cfg['data'].get('num_classes', 1)
         criterions['seg'] = DiceCELoss(sigmoid=True, 
@@ -320,10 +323,13 @@ def run_eval(cfg, device):
     # Standard Dice/HD statistics
     trainer = Trainer(model, loaders, cfg, device)
     trainer.evaluate_test()
+
+    # Plot a few examples
+    
     
     # Clinical Metrics (EF, Volumes)
-    ef_save_path = cfg['training']['clinical_pairs_csv']
-    generate_clinical_pairs(model, ld_ts, device, ef_save_path)
+    # ef_save_path = cfg['training']['clinical_pairs_csv']
+    # generate_clinical_pairs(model, ld_ts, device, ef_save_path)
 
 def run_tta(cfg, device):
     """

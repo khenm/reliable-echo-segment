@@ -114,6 +114,11 @@ class Trainer:
                         preds, seg_logits = self.model(imgs)
                         
                         # Calculate losses based on keys
+                        if 'reg' in self.criterions:
+                            l_reg = self.criterions['reg'](preds.view(-1, 1), targets.view(-1, 1))
+                            loss += l_reg
+                            loss_dict['reg'] = l_reg.item()
+
                         if 'ef' in self.criterions:
                             # DifferentiableEFLoss expects seg logits and returns (loss, pred_ef)
                             l_ef, _ = self.criterions['ef'](seg_logits, targets)
@@ -328,8 +333,6 @@ class Trainer:
         Returns:
             pd.DataFrame: DataFrame containing per-sample metrics.
         """
-        logger.info(f"Loading best checkpoint from: {self.ckpt_path}")
-        self._load_checkpoint(self.ckpt_path, load_optimizer=False)
         self.model.eval()
 
         records = []
