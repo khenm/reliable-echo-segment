@@ -427,3 +427,92 @@ class Trainer:
         df.to_csv(self.cfg['training']['test_metrics_csv'], index=False)
         logger.info(f"Saved metrics to {self.cfg['training']['test_metrics_csv']}")
         return df
+
+    def get_examples(self, num_examples=3):
+        """
+        Runs inference on a few test samples and returns data for visualization.
+        
+        Args:
+            num_examples (int): Number of examples to retrieve.
+            
+        Returns:
+            list: List of sample dictionaries containing:
+                  'img', 'gt_mask', 'pred_mask', 'gt_ef', 'pred_ef', 'title'.
+        """
+        self.model.eval()
+        samples = []
+        
+        try:
+            # Get a batch from test loader
+            # We use an iterator to just get one batch
+            batch = next(iter(self.ld_ts))
+            
+            # Move to device
+            if self.is_regression:
+                 videos = batch['video'].to(self.device)
+            else:
+                 videos = batch['image'].to(self.device).unsqueeze(2) # (B, C, 1, H, W) for compatibility if needed
+            
+            targets = batch['target'].to(self.device)
+            labels = batch.get('label')
+            if labels is not None: labels = labels.to(self.device)
+            cases = batch['case']
+            
+            with torch.no_grad():
+                ef_pred, seg_pred = self.model(videos)
+                
+            # Iterate
+            limit = min(num_examples, len(videos))
+            for i in range(limit):
+                vid = videos[i].cpu().numpy() # (C, T, H, W)
+                
+                # EF Handling
+                if targets.ndim == 2: t_ef = targets[i, 0].item()
+                else: t_ef = targets[i].item()
+                
+                if ef_pred.ndim == 2: p_ef = ef_pred[i, 0].item()
+                else: p_ef = ef_pred[i].item()
+                
+                gt_ef = t_ef * 100.0
+                pr_ef = p_ef * 100.0
+                
+                fname = cases[i]
+                
+                # Select best frame
+                # If R2+1D, vid is (C, T, H, W)
+                T = vid.shape[1]
+                t_idx = T // 2
+                gt_mask = None
+                
+                if labels is not None:
+                    # labels: (B, C, T, H, W) -> ith sample: (C, T, H, W) -> (T, H, W)
+                    lbl = labels[i, 0].cpu().numpy() 
+                    mask_sums = lbl.sum(axis=(1, 2))
+                    if mask_sums.max() > 0:
+                        t_idx = mask_sums.argmax()
+                        gt_mask = lbl[t_idx]
+                
+                # Extract Image Frame (C, H, W)
+                frame_img = vid[:, t_idx]
+                
+                # Extract Pred Mask
+                # seg_pred: (B, 1, T, H, W)
+                pr_mask_t = torch.sigmoid(seg_pred[i]).cpu().numpy() # (1, T, H, W)
+                pr_mask = (pr_mask_t[0, t_idx] > 0.5).astype(float)
+                
+                sample = {
+                    "img": frame_img,
+                    "gt_mask": gt_mask,
+                    "pred_mask": pr_mask,
+                    "gt_ef": gt_ef,
+                    "pred_ef": pr_ef,
+                    "title": f"Case: {fname} | Frame: {t_idx} | EF: {gt_ef:.1f}% vs {pr_ef:.1f}%",
+                    "fname": fname,
+                    "frame_idx": t_idx
+                }
+                samples.append(sample)
+                
+        except Exception as e:
+            logger.error(f"Failed to get visualization examples: {e}")
+            
+        return samples

@@ -22,7 +22,8 @@ from src.utils.plot import (
     plot_metrics_summary, 
     plot_clinical_bland_altman, 
     plot_reliability_curves, 
-    plot_ef_category_roc
+    plot_ef_category_roc,
+    plot_clinical_comparison
 )
 from src.analysis.latent_profile import LatentProfiler
 from src.tta.engine import TTA_Engine
@@ -325,8 +326,15 @@ def run_eval(cfg, device):
     trainer.evaluate_test()
 
     # Plot a few examples
+    logger.info("Generating visualization examples...")
     
-    
+    try:
+        samples = trainer.get_examples(num_examples=3)
+        for s in samples:
+            save_name = os.path.join(cfg['training']['run_dir'], f"vis_{s['fname']}_f{s['frame_idx']}.png")
+            plot_clinical_comparison(s, save_path=save_name)
+    except Exception as e:
+        logger.error(f"Failed to plot visualization examples: {e}")
     # Clinical Metrics (EF, Volumes)
     # ef_save_path = cfg['training']['clinical_pairs_csv']
     # generate_clinical_pairs(model, ld_ts, device, ef_save_path)
