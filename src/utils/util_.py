@@ -105,6 +105,8 @@ def load_full_checkpoint(ckpt_path, model, optimizer=None, device='cpu', load_rn
     Returns:
         tuple: (start_epoch, best_metric)
     """
+    if ckpt_path is None:
+        raise ValueError("checkpoint path is None")
     if not os.path.exists(ckpt_path):
         raise FileNotFoundError(f"Checkpoint not found at {ckpt_path}")
         
