@@ -98,7 +98,7 @@ class EchoR2Plus1D(nn.Module):
         # Regression Branch
         pool = self.avgpool(x4)
         flat = pool.flatten(1)
-        ef_pred = self.fc_ef(flat)
+        ef_pred = torch.sigmoid(self.fc_ef(flat))
         
         # Segmentation Branch
         d1 = self.up1(x4, x3)

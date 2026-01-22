@@ -9,7 +9,8 @@ loss:
   weights:
     dice: 0.7
     ce: 0.3
-    ef: 1.0
+    # ef: 1.0
+    reg: 1.0
 
 training:
   epochs: 50
