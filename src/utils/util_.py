@@ -91,6 +91,70 @@ def load_model_weights(model, checkpoint, strict=True):
     model.load_state_dict(state_dict, strict=strict)
     return state_dict
 
+def load_full_checkpoint(ckpt_path, model, optimizer=None, device='cpu', load_rng=False):
+    """
+    Loads a full checkpoint including model state, optimizer state, epoch, and RNG states.
+    
+    Args:
+        ckpt_path (str): Path to the checkpoint file.
+        model (torch.nn.Module): The model to load.
+        optimizer (torch.optim.Optimizer, optional): Optimizer to load state into.
+        device (torch.device | str): Device to load checkpoint onto.
+        load_rng (bool): Whether to restore RNG states.
+        
+    Returns:
+        tuple: (start_epoch, best_metric)
+    """
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(f"Checkpoint not found at {ckpt_path}")
+        
+    print(f"Loading checkpoint from {ckpt_path}")
+    checkpoint = load_checkpoint_dict(ckpt_path, device)
+    
+    start_epoch = 1
+    best_metric = -float('inf')
+    
+    # helper for rng
+    def restore_rng(rng_state):
+        if rng_state is None: return
+        try:
+            torch.set_rng_state(rng_state["torch"])
+            # Only restore cuda rng if available and state exists
+            if torch.cuda.is_available() and "cuda" in rng_state and rng_state["cuda"] is not None:
+                torch.cuda.set_rng_state(rng_state["cuda"])
+            np.random.set_state(rng_state["numpy"])
+            random.setstate(rng_state["python"])
+            print("Restored RNG states")
+        except Exception as e:
+             print(f"Warning: Failed to restore RNG state: {e}")
+
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        # New format
+        model.load_state_dict(checkpoint["model_state_dict"])
+        
+        if optimizer is not None:
+            if "optimizer_state_dict" in checkpoint:
+                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            else:
+                print("Warning: Optimizer state not found in checkpoint.")
+                
+        if load_rng and "rng_state" in checkpoint:
+            restore_rng(checkpoint["rng_state"])
+            
+        if "epoch" in checkpoint:
+            start_epoch = checkpoint["epoch"] + 1
+        if "best_metric" in checkpoint:
+            best_metric = checkpoint["best_metric"]
+            
+        print(f"Loaded checkpoint (epoch {checkpoint.get('epoch')}, best_metric {best_metric:.4f})")
+        
+    else:
+        # Legacy format (weights only)
+        model.load_state_dict(checkpoint)
+        print("Loaded legacy checkpoint (model weights only).")
+        
+    return start_epoch, best_metric
+
 def save_checkpoint(path, state_dict):
     """
     Saves a checkpoint dictionary to the specified path.
@@ -110,5 +174,4 @@ def load_checkpoint(model, ckpt_path, device):
         ckpt_path (str): Path to the checkpoint file.
         device (torch.device): Device to load the checkpoint onto.
     """
-    ckpt = load_checkpoint_dict(ckpt_path, device)
-    load_model_weights(model, ckpt)
+    load_full_checkpoint(ckpt_path, model, device=device)
