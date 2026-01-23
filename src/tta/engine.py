@@ -189,85 +189,96 @@ class SafeTTAEngine:
             q_val: Quantile used
             collapsed: Boolean indicating if model collapsed
         """
-        self.model.eval() # Eval for feature extraction initially
-        
-        # 1. Forward Pass (Need logits and features)
-        try:
-            out = self.model(x_t, return_features=True)
-            if isinstance(out, tuple):
-                logits, features = out
-            else:
-                logits = out
-                features = getattr(self.model, 'features', None)
-                if features is None:
-                    raise RuntimeError("Model features not found.")
-        except TypeError:
-            logits = self.model(x_t)
-            features = getattr(self.model, 'last_features', torch.zeros_like(logits))
-
-        # 2. Phase 3: Audit
-        # Auditor handles tuple unpacking internally to compute entropy from the most relevant output (e.g. segmentation)
-        is_collapsed = self.auditor.update(logits, features)
-        
-        final_output = None
-        q_used = 1.0
-        
-        if is_collapsed:
-            logger.warning("SafeTTA: Collapse detected. Outputting max uncertainty.")
-            # Recovery: Reset model
-            self.model.load_state_dict(self.initial_state)
-            self.auditor.reset_audit()
+        # 1. Forward Pass & Audit (No Grad)
+        with torch.no_grad():
+            self.model.eval() # Eval for feature extraction initially
             
-            # final_output remains None, main.py should handle it
-            
-        else:
-            # 3. Phase 4: Conformal Output
-            # Calibrator (including AuditCalibrator) handles tuple logits
-            final_output, q_used = self.calibrator.predict(logits, martingale_stable=True)
-            
-            # 4. Phase 2: Adaptation (Optional)
-            if adapt and self.optimizer:
-                self.model.train()
-                self.optimizer.zero_grad()
-                
-                out_train = self.model(x_t)
-                
-                # Adaptation Loss Strategy:
-                # If hybrid (ef, seg), which one to minimize entropy on?
-                # R2Plus1D TTA usually adapts on Segmentation entropy as it's dense.
-                
-                loss = 0.0
-                if isinstance(out_train, tuple):
-                    # Hybrid: Sum entropies? or just Seg?
-                    # Let's try minimizing Seg entropy (index 1) as it provides more signal (pixels)
-                    # EF (index 0) is single scalar, less gradient?
-                    # For safety, let's do both weighted? Or just Seg.
-                    
-                    # Logits train extraction
-                    logits_ef = out_train[0]
-                    logits_seg = out_train[1]
-                    
-                    # 1. EF Entropy
-                    p_ef = logits_ef
-                    ent_ef = -torch.sum(p_ef * torch.log(p_ef + 1e-10) + (1-p_ef) * torch.log(1-p_ef + 1e-10), dim=1).mean()
-                    
-                    # 2. Seg Entropy
-                    probs_seg = F.softmax(logits_seg, dim=1)
-                    ent_seg = -torch.sum(probs_seg * torch.log(probs_seg + 1e-10), dim=1).mean()
-                    
-                    loss = ent_ef + ent_seg
+            # Forward Pass (Need logits and features)
+            try:
+                out = self.model(x_t, return_features=True)
+                if isinstance(out, tuple):
+                    logits, features = out
                 else:
-                    logits_train = out_train
-                    # Handle Binary Case (B, 1) - explicit entropy calculation
-                    if logits_train.shape[1] == 1:
-                        p = logits_train
-                        loss = -torch.sum(p * torch.log(p + 1e-10) + (1-p) * torch.log(1-p + 1e-10), dim=1).mean()
-                    else:
-                        probs = F.softmax(logits_train, dim=1)
-                        loss = -torch.sum(probs * torch.log(probs + 1e-10), dim=1).mean()
+                    logits = out
+                    features = getattr(self.model, 'features', None)
+                    if features is None:
+                        raise RuntimeError("Model features not found.")
+            except TypeError:
+                logits = self.model(x_t)
+                features = getattr(self.model, 'last_features', torch.zeros_like(logits))
+
+            # 2. Phase 3: Audit
+            # Auditor handles tuple unpacking internally to compute entropy from the most relevant output (e.g. segmentation)
+            is_collapsed = self.auditor.update(logits, features)
+            
+            final_output = None
+            q_used = 1.0
+            
+            if is_collapsed:
+                logger.warning("SafeTTA: Collapse detected. Outputting max uncertainty.")
+                # Recovery: Reset model
+                self.model.load_state_dict(self.initial_state)
+                self.auditor.reset_audit()
                 
-                loss.backward()
-                self.optimizer.step()
-                self.model.eval()
+                # final_output remains None, main.py should handle it
+                return None, 1.0, True
+                
+            else:
+                # 3. Phase 4: Conformal Output
+                # Calibrator (including AuditCalibrator) handles tuple logits
+                final_output, q_used = self.calibrator.predict(logits, martingale_stable=True)
+            
+        # Explicit clean up to prevent double-graph retention
+        del out, logits, features
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # 4. Phase 2: Adaptation (Optional)
+        # Adapt only if not collapsed and optimizer is set
+        if adapt and self.optimizer:
+            self.model.train()
+            self.optimizer.zero_grad()
+            
+            # Re-forward for gradients
+            out_train = self.model(x_t)
+            
+            # Adaptation Loss Strategy:
+            # If hybrid (ef, seg), which one to minimize entropy on?
+            # R2Plus1D TTA usually adapts on Segmentation entropy as it's dense.
+            
+            loss = 0.0
+            if isinstance(out_train, tuple):
+                # Hybrid: Sum entropies? or just Seg?
+                # Let's try minimizing Seg entropy (index 1) as it provides more signal (pixels)
+                # EF (index 0) is single scalar, less gradient?
+                # For safety, let's do both weighted? Or just Seg.
+                
+                # Logits train extraction
+                logits_ef = out_train[0]
+                logits_seg = out_train[1]
+                
+                # 1. EF Entropy
+                p_ef = logits_ef
+                ent_ef = -torch.sum(p_ef * torch.log(p_ef + 1e-10) + (1-p_ef) * torch.log(1-p_ef + 1e-10), dim=1).mean()
+                
+                # 2. Seg Entropy
+                probs_seg = F.softmax(logits_seg, dim=1)
+                ent_seg = -torch.sum(probs_seg * torch.log(probs_seg + 1e-10), dim=1).mean()
+                
+                loss = ent_ef + ent_seg
+            else:
+                logits_train = out_train
+                # Handle Binary Case (B, 1) - explicit entropy calculation
+                if logits_train.shape[1] == 1:
+                    p = logits_train
+                    loss = -torch.sum(p * torch.log(p + 1e-10) + (1-p) * torch.log(1-p + 1e-10), dim=1).mean()
+                else:
+                    probs = F.softmax(logits_train, dim=1)
+                    loss = -torch.sum(probs * torch.log(probs + 1e-10), dim=1).mean()
+            
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0) # Safety clip
+            self.optimizer.step()
+            self.model.eval()
 
         return final_output, q_used, is_collapsed
