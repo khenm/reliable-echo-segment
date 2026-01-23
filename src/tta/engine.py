@@ -4,6 +4,9 @@ import torch.optim as optim
 import copy
 import logging
 from .augmentations import VideoAugmentor
+from src.tta.auditor import SelfAuditor
+from src.tta.conformal import ConformalCalibrator
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -124,3 +127,120 @@ class TTA_Engine(nn.Module):
             self.model.train() 
             
         return final_pred
+
+
+class SafeTTAEngine:
+    """
+    Implements the Safe-TTA Loop:
+    1. Forward Pass
+    2. Phase 3: Self-Auditor Check (Drift/Entropy)
+    3. Phase 4: Conformal Prediction (Prediction Sets)
+    4. Adaptation (Optional/Conditional)
+    """
+    def __init__(self, 
+                 model: nn.Module, 
+                 auditor: SelfAuditor, 
+                 calibrator: ConformalCalibrator,
+                 optimizer_name: str = "SGD",
+                 lr: float = 1e-4):
+        self.model = model
+        self.auditor = auditor
+        self.calibrator = calibrator
+        self.lr = lr
+        
+        # Save initial state
+        self.initial_state = copy.deepcopy(model.state_dict())
+        self.optimizer_name = optimizer_name
+        self.configure_optimization()
+
+    def configure_optimization(self):
+        """Sets up optimizer for the adaptation phase."""
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        if not params:
+            # If model frozen, maybe unfreeze specific layers or warn
+            # For now, assume model came pre-configured or we don't adapt
+            self.optimizer = None
+            return
+
+        if self.optimizer_name == "SGD":
+            self.optimizer = optim.SGD(params, lr=self.lr, momentum=0.9)
+        elif self.optimizer_name == "Adam":
+            self.optimizer = optim.Adam(params, lr=self.lr)
+        else:
+             self.optimizer = optim.SGD(params, lr=self.lr)
+
+    def reset(self):
+        """Resets model to initial state and resets auditor."""
+        self.model.load_state_dict(self.initial_state)
+        self.auditor.reset_audit()
+        self.configure_optimization()
+
+    def run_calibration(self, val_loader, device):
+        """Runs the offline calibration for both Auditor and Conformal Calibrator."""
+        logger.info("Running Safe-TTA Calibration Phase...")
+        self.auditor.calibrate(val_loader, self.model, device)
+        self.calibrator.calibrate(val_loader, self.model, device)
+
+    def predict_step(self, x_t, adapt=True):
+        """
+        Processes a single test batch x_t.
+        Returns:
+            prediction_sets: List of sets
+            q_val: Quantile used
+            collapsed: Boolean indicating if model collapsed
+        """
+        self.model.eval() # Eval for feature extraction initially
+        
+        # 1. Forward Pass (Need logits and features)
+        try:
+            out = self.model(x_t, return_features=True)
+            if isinstance(out, tuple):
+                logits, features = out
+            else:
+                logits = out
+                features = getattr(self.model, 'features', None)
+                if features is None:
+                    raise RuntimeError("Model features not found.")
+        except TypeError:
+            logits = self.model(x_t)
+            features = getattr(self.model, 'last_features', torch.zeros_like(logits))
+
+        # 2. Phase 3: Audit
+        is_collapsed = self.auditor.update(logits, features)
+        
+        final_output = []
+        q_used = 1.0
+        
+        if is_collapsed:
+            logger.warning("SafeTTA: Collapse detected. Outputting max uncertainty.")
+            # Recovery: Reset model
+            self.model.load_state_dict(self.initial_state)
+            self.auditor.reset_audit()
+            
+            # Max uncertainty output
+            num_classes = self.calibrator.num_classes
+            batch_size = logits.shape[0]
+            final_output = [list(range(num_classes))] * batch_size
+            
+        else:
+            # 3. Phase 4: Conformal Output
+            final_output, q_used = self.calibrator.predict_interval(logits, martingale_stable=True)
+            
+            # 4. Phase 2: Adaptation (Optional)
+            if adapt and self.optimizer:
+                self.model.train()
+                self.optimizer.zero_grad()
+                
+                # Re-compute logits for graph
+                # Note: Efficient implementation would reuse graph or check if features detached
+                # For simplicity here, we do a quick re-forward or standard TTA loss
+                # Here uses Entropy Minimization as example
+                logits_train = self.model(x_t)
+                probs = F.softmax(logits_train, dim=1)
+                entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=1).mean()
+                
+                entropy.backward()
+                self.optimizer.step()
+                self.model.eval()
+
+        return final_output, q_used, is_collapsed

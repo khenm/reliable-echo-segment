@@ -2,6 +2,8 @@ model:
   name: "r2plus1d"
 data:
   name: "CAMUS"
+  img_size: [112, 112, 16]
+  num_classes: 1
   subset_size: 200
   max_retries: 5
 
@@ -24,8 +26,8 @@ training:
   seed: 42
   checkpoint_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/checkpoints" # load ckpt from other dataset
   save_dir: "/content/drive/MyDrive/Dataset/CAMUS/runs"
-  test_metrics_csv: "/content/drive/MyDrive/Dataset/CAMUS/runs/camus_metrics.csv"
-  clinical_pairs_csv: "/content/drive/MyDrive/Dataset/CAMUS/runs/camus_clinical_pairs.csv"
+  test_metrics_csv: "/content/drive/MyDrive/Dataset/CAMUS/camus_metrics.csv"
+  clinical_pairs_csv: "/content/drive/MyDrive/Dataset/CAMUS/camus_clinical_pairs.csv"
   resume_path: null
 
 tta:

@@ -8,16 +8,12 @@ from tqdm import tqdm
 from datetime import datetime
 from src.utils.util_ import seed_everything, get_device, load_checkpoint
 from src.datasets.registry import DatasetRegistry
-import src.datasets
 from src.models.registry import get_model
-import src.models.r2plus1d # Register R2Plus1D
-import src.models.vae_unet # Register VAEUNet
 from src.trainer import Trainer
 from src.utils.logging import get_logger
 from src.losses import KLLoss, DifferentiableEFLoss
 from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric, MAEMetric
-from src.utils.postprecessing import generate_clinical_pairs
 from src.utils.plot import (
     plot_metrics_summary, 
     plot_clinical_bland_altman, 
@@ -26,7 +22,9 @@ from src.utils.plot import (
     plot_clinical_comparison
 )
 from src.analysis.latent_profile import LatentProfiler
-from src.tta.engine import TTA_Engine
+from src.tta.engine import TTA_Engine, SafeTTAEngine
+from src.tta.auditor import SelfAuditor
+from src.tta.conformal import ConformalCalibrator
 
 # Setup logging (stdout only initially)
 logger = get_logger()
@@ -457,6 +455,65 @@ def run_profile(cfg, device):
     profiler.save(save_path)
     logger.info(f"Latent profile saved to {save_path}")
 
+def run_safe_tta(cfg, device):
+    """
+    Runs Safe Test-Time Adaptation with Self-Auditor and Conformal Prediction.
+    """
+    logger.info("Starting Safe-TTA...")
+    loaders = DatasetRegistry.get_dataloaders(cfg)
+    _, ld_val, ld_ts = loaders # Train (unused), Val, Test
+    
+    model = _load_model_for_inference(cfg, device)
+    if model is None:
+        logger.error("Skipping Safe-TTA due to missing checkpoint.")
+        return
+        
+    # 1. Initialize Components
+    feature_dim = cfg['model'].get('latent_dim', 512) 
+    auditor = SelfAuditor(feature_dim=feature_dim)
+    
+    num_classes = cfg['data'].get('num_classes', 10)
+    calibrator = ConformalCalibrator(alpha=0.05, num_classes=num_classes)
+    
+    safe_engine = SafeTTAEngine(
+        model, 
+        auditor=auditor, 
+        calibrator=calibrator,
+        lr=float(cfg.get('tta', {}).get('lr', 1e-4))
+    )
+    safe_engine.model.to(device)
+    
+    # 2. Calibration Phase (Offline)
+    safe_engine.run_calibration(ld_val, device)
+    
+    # 3. Test Phase (Online)
+    results = []
+    logger.info(f"Running Safe-TTA on {len(ld_ts)} videos...")
+    
+    for batch in tqdm(ld_ts, desc="Safe-TTA Inference"):
+        safe_engine.reset()
+        
+        video = batch["video"].to(device)
+        target = batch["target"].to(device)
+        case = batch["case"][0] 
+        
+        prediction_sets, q_used, collapsed = safe_engine.predict_step(video)
+        
+        for i, p_set in enumerate(prediction_sets):
+             results.append({
+                "FileName": case,
+                "Actual_Class": target.view(-1)[i].item() if target.numel() > i else -1,
+                "Prediction_Set": str(p_set),
+                "Set_Size": len(p_set),
+                "Q_Val": q_used,
+                "Collapsed": collapsed
+            })
+            
+    df_results = pd.DataFrame(results)
+    save_path = os.path.join(cfg['training']['run_dir'], "safe_tta_results.csv")
+    df_results.to_csv(save_path, index=False)
+    logger.info(f"Safe-TTA Results saved to {save_path}")
+
 def main():
     """
     Main entry point for the Reliable Echo Segmentation Pipeline.
@@ -470,6 +527,7 @@ def main():
     parser.add_argument("--eval", action="store_true", help="Run evaluation (metrics + EF)")
     parser.add_argument("--rcps", action="store_true", help="Run RCPS calibration and evaluation")
     parser.add_argument("--tta", action="store_true", help="Run Test-Time Adaptation")
+    parser.add_argument("--safe_tta", action="store_true", help="Run Safe-TTA (Audited Conformal)")
     parser.add_argument("--adaptive", action="store_true", help="Run Adaptive Calibration")
     parser.add_argument("--profile", action="store_true", help="Run Latent Profiling")
     parser.add_argument("--plot", action="store_true", help="Generate all plots")
@@ -480,7 +538,7 @@ def main():
 
     cfg = load_config(args.config)
 
-    run_all = args.all or not (args.init or args.preprocess or args.train or args.eval or args.plot or args.rcps or args.profile or args.adaptive or args.tta)
+    run_all = args.all or not (args.init or args.preprocess or args.train or args.eval or args.plot or args.rcps or args.profile or args.adaptive or args.tta or args.safe_tta)
 
     device = run_init(cfg, args.resume)
     
@@ -498,6 +556,9 @@ def main():
         
     if run_all or args.tta:
         run_tta(cfg, device)
+
+    if run_all or args.safe_tta:
+        run_safe_tta(cfg, device)
         
     if run_all or args.eval:
         run_eval(cfg, device)

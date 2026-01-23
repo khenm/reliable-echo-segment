@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torchvision.models.video import r2plus1d_18, R2Plus1D_18_Weights
-from src.models.registry import ModelRegistry
+from src.registry import register_model
 
 class UpBlock3D(nn.Module):
     def __init__(self, in_channels, skip_channels, out_channels):
@@ -26,7 +26,7 @@ class UpBlock3D(nn.Module):
         x = torch.cat([x, skip], dim=1)
         return self.conv(x)
 
-@ModelRegistry.register("r2plus1d")
+@register_model("r2plus1d")
 class EchoR2Plus1D(nn.Module):
     """
     R(2+1)D-18 model adapted for Dual Output:

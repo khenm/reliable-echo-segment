@@ -18,7 +18,7 @@ from monai.transforms import (
 from torch.utils.data import Dataset, DataLoader
 
 from src.utils.logging import get_logger
-from src.datasets.registry import register_dataset
+from src.registry import register_dataset
 
 logger = get_logger()
 

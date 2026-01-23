@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
 from monai.networks.blocks import Convolution, UpSample
-from src.models.registry import ModelRegistry
+from src.registry import register_model
 
-@ModelRegistry.register("VAEUNet")
+@register_model("VAEUNet")
 class VAEUNet(nn.Module):
     """
     VAE-U-Net implementation for segmentation with variational regularization.
