@@ -33,6 +33,64 @@ class SelfAuditor:
         # Buffer for running stats (optional, for debugging)
         self.scores = []
 
+    def _compute_entropy(self, inputs):
+        """
+        Computes entropy for a batch of inputs (logits or tuple).
+        Returns:
+            entropy: (B,) tensor
+            max_ent: float (normalization factor)
+        """
+        logits = inputs
+        # 1. Handle Tuple (Hybrid Models)
+        if isinstance(logits, (tuple, list)):
+            # Heuristic: Find first tensor with ndim >= 3 (Spatial)
+            # If none, find first tensor with ndim == 2 (Classification)
+            # If none, take the first element
+            selected = logits[0]
+            for item in logits:
+                if isinstance(item, torch.Tensor) and item.ndim >= 3:
+                    selected = item
+                    break
+            logits = selected
+            
+        # 2. Compute Entropy
+        if logits.ndim > 2:
+            # Spatial/Temporal Segmentation (B, C, T, H, W) or (B, C, H, W)
+            if logits.shape[1] == 1:
+                # Binary Segmentation -> Use Sigmoid
+                probs = torch.sigmoid(logits)
+                ent = -(probs * torch.log(probs + 1e-10) + (1-probs) * torch.log(1-probs + 1e-10))
+                # Average over all remaining dimensions (C, T, H, W)
+                # Note: dim 1 is Channel (size 1), so averaging it is fine/noop
+                dims = list(range(1, ent.ndim))
+                ent = ent.mean(dim=dims)
+                max_ent = np.log(2) # Max entropy for binary
+            else:
+                # Multiclass -> Use Softmax
+                probs = F.softmax(logits, dim=1)
+                ent = -torch.sum(probs * torch.log(probs + 1e-10), dim=1) # (B, T, H, W)
+                dims = list(range(1, ent.ndim))
+                ent = ent.mean(dim=dims) 
+                
+                num_classes = logits.shape[1]
+                max_ent = np.log(num_classes)
+            
+        else:
+            # Flat Classification (B, C) or Regression (B, 1)
+            if logits.shape[1] == 1:
+                # Binary/Regression
+                # Assuming logits. Use Sigmoid.
+                p = torch.sigmoid(logits)
+                ent = -(p * torch.log(p + 1e-10) + (1-p) * torch.log(1-p + 1e-10))
+                ent = ent.squeeze(1)
+                max_ent = np.log(2)
+            else:
+                probs = F.softmax(logits, dim=1)
+                ent = -torch.sum(probs * torch.log(probs + 1e-10), dim=1)
+                max_ent = np.log(logits.shape[1])
+                
+        return ent, max_ent
+
     def calibrate(self, valid_loader, model, device):
         """
         Step 1: Calibration
@@ -48,6 +106,8 @@ class SelfAuditor:
         entropies_list = []
         
         logger.info("Starting SelfAuditor Calibration...")
+        max_ent_sample = 1.0
+
         with torch.no_grad():
             for batch in valid_loader:
                 if isinstance(batch, dict):
@@ -56,7 +116,6 @@ class SelfAuditor:
                     elif "image" in batch:
                         inputs = batch["image"]
                     else:
-                        # Fallback: assume first key is input
                         inputs = list(batch.values())[0]
                 elif isinstance(batch, (list, tuple)):
                     inputs = batch[0]
@@ -70,24 +129,21 @@ class SelfAuditor:
                     if isinstance(out, tuple):
                         logits, features = out
                     else:
-                        # Fallback if model doesn't return tuple but has attribute
                         logits = out
                         features = getattr(model, 'features', None)
                         if features is None:
                              raise ValueError("Model must return features or have 'features' attribute for SelfAuditor.")
                 except TypeError:
-                     # If return_features is not a valid arg, assume standard forward
                      logits = model(inputs)
-                     # Start of strict assumption: Model MUST provide features for Drift
                      raise ValueError("SelfAuditor requires model to support feature extraction via return_features=True or similar mechanism.")
 
                 # 1. Collect Features for Drift
                 features_list.append(features.cpu())
                 
                 # 2. Collect Entropy
-                probs = F.softmax(logits, dim=1)
-                entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=1)
+                entropy, max_e = self._compute_entropy(logits)
                 entropies_list.append(entropy.cpu())
+                max_ent_sample = max_e
 
         if not features_list:
             logger.warning("Calibration data empty.")
@@ -96,39 +152,32 @@ class SelfAuditor:
         # Compute Mu_Source
         all_features = torch.cat(features_list, dim=0)
         self.mu_source = torch.mean(all_features, dim=0).to(device)
-        self.mu_source = F.normalize(self.mu_source, dim=0) # Normalize for Cosine
+        self.mu_source = F.normalize(self.mu_source, dim=0) 
         
         # Compute Expected Score (Epsilon)
         all_entropies = torch.cat(entropies_list, dim=0)
         
         # Normalize Entropy roughly to [0, 1]
-        # Using logits shape from last iteration to determine max_ent
-        if logits is not None:
-             max_ent = np.log(logits.shape[1])
-        else:
-             max_ent = 1.0 # Fallback
-             
-        norm_entropies = all_entropies / max_ent
+        norm_entropies = all_entropies / max_ent_sample
         
         # Calculate Drift for all validation samples
-        # Cosine Distance = 1 - Cosine Similarity
-        # Normalize features per sample
         all_features_norm = F.normalize(all_features, dim=1)
         
-        # Ensure mu_source is on CPU for this massive batch calculation if needed, 
-        # or keep on device if generic. Let's start with CPU to avoid OOM on large Val sets.
+        # Drift Calculation
+        # drift = 1 - sim
+        # (N, D) @ (D, 1) -> (N, 1)
         drift_scores = 1 - (all_features_norm @ self.mu_source.cpu().unsqueeze(1)).squeeze()
         
         # Composite Scores
         scores = self.alpha * norm_entropies + (1 - self.alpha) * drift_scores
         
-        # Set Epsilon (Expected value under Null Hypothesis)
+        # Set Epsilon
         self.epsilon = scores.mean().item()
         
-        # Safety margin: slightly inflate epsilon to make betting harder (conservative)
+        # Safety margin
         self.epsilon *= 1.05 
         
-        logger.info(f"Calibration Complete. Epsilon: {self.epsilon:.4f}, Threshold: {self.threshold:.2f}")
+        logger.info(f"Calibration Complete. Epsilon: {self.epsilon:.4f}, Threshold: {self.threshold:.2f}, MaxEnt: {max_ent_sample:.4f}")
 
     def update(self, logits, features):
         """
@@ -143,9 +192,7 @@ class SelfAuditor:
             return True
 
         # --- 1. Calculate Entropy Component ---
-        probs = F.softmax(logits, dim=1)
-        entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=1)
-        max_ent = np.log(logits.shape[1])
+        entropy, max_ent = self._compute_entropy(logits)
         norm_entropy = entropy / max_ent
 
         # --- 2. Calculate Drift Component ---
