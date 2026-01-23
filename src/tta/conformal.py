@@ -74,7 +74,7 @@ class ConformalCalibrator:
                 else:
                     raise ValueError("DataLoader must return tuple/list or dict with (inputs, targets, ...)")
                 
-                inputs, targets = inputs.to(device), targets.to(device)
+                inputs, targets = inputs.to(device), targets.to(device, dtype=torch.long)
                 
                 # Forward pass
                 out = model(inputs)
