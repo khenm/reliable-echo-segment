@@ -78,15 +78,16 @@ class EchoR2Plus1D(nn.Module):
          num_classes = cfg['data'].get('num_classes', 2)
          return cls(pretrained=True, progress=True, num_classes=num_classes)
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         """
         Args:
             x (torch.Tensor): Input video tensor of shape (B, C, T, H, W).
+            return_features (bool): If True, returns (ef_pred, features) instead of (ef_pred, seg_pred).
             
         Returns:
-            tuple: (ef_pred, seg_pred)
-                - ef_pred (B, 1): Predicted scalar EF.
-                - seg_pred (B, NumClasses, T, H, W): Predicted segmentation logits.
+            tuple: 
+                If return_features=False: (ef_pred, seg_pred)
+                If return_features=True: (ef_pred, features) where features is (B, 512)
         """
         # Encoder
         x0 = self.stem(x)      # 64
@@ -99,6 +100,9 @@ class EchoR2Plus1D(nn.Module):
         pool = self.avgpool(x4)
         flat = pool.flatten(1)
         ef_pred = torch.sigmoid(self.fc_ef(flat))
+
+        if return_features:
+            return ef_pred, flat
         
         # Segmentation Branch
         d1 = self.up1(x4, x3)
