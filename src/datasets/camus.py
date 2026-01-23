@@ -2,11 +2,11 @@ import os
 import math
 from monai.transforms import (
     Compose, LoadImaged, EnsureChannelFirstd, ScaleIntensityRangePercentilesd,
-    ResizeWithPadOrCropd, RandFlipd, RandRotate90d, RandAffined
+    ResizeWithPadOrCropd, RandFlipd, RandRotate90d, RandAffined, RepeatChanneld
 )
 from monai.data import CacheDataset, DataLoader, list_data_collate
 from src.utils.logging import get_logger
-from src.datasets.registry import register_dataset
+from src.registry import register_dataset
 
 @register_dataset("CAMUS")
 class CamusDataset:
@@ -36,7 +36,8 @@ class CamusDataset:
                             "label": lbl,
                             "case":  pid,
                             "view":  view,
-                            "phase": ph
+                            "phase": ph,
+                            "target": 0.0 # Dummy EF for compatibility
                         })
         return items
 
@@ -67,6 +68,7 @@ class CamusDataset:
         _common = [
             LoadImaged(("image", "label")),
             EnsureChannelFirstd(("image", "label")),
+            RepeatChanneld(keys=["image"], repeats=3),
             ScaleIntensityRangePercentilesd("image", 1, 99, 0, 1, clip=True),
             ResizeWithPadOrCropd(("image", "label"), img_size),
         ]

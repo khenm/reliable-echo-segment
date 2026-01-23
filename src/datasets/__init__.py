@@ -1,2 +1,2 @@
-from .registry import DatasetRegistry, register_dataset
+from src.registry import register_dataset
 from . import camus, echonet
