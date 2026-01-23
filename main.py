@@ -343,7 +343,14 @@ def run_tta(cfg, device):
     Runs Test-Time Adaptation on the test set.
     """
     logger.info("Starting Test-Time Adaptation (TTA)...")
+    
+    # Enforce Batch Size 1 for TTA
+    original_bs = cfg['training'].get('batch_size_train')
+    cfg['training']['batch_size_train'] = 1
+    
     loaders = get_dataloaders(cfg)
+    cfg['training']['batch_size_train'] = original_bs
+    
     _, _, ld_ts = loaders
     
     
@@ -461,7 +468,14 @@ def run_safe_tta(cfg, device):
     Runs Safe Test-Time Adaptation with Self-Auditor and Conformal Prediction.
     """
     logger.info("Starting Safe-TTA...")
+    
+    # Enforce Batch Size 1 for TTA (Instance-level adaptation)
+    original_bs = cfg['training'].get('batch_size_train')
+    cfg['training']['batch_size_train'] = 1
+    
     loaders = get_dataloaders(cfg)
+    cfg['training']['batch_size_train'] = original_bs # Restore
+    
     _, ld_val, ld_ts = loaders # Train (unused), Val, Test
     
     model = _load_model_for_inference(cfg, device)
@@ -535,7 +549,7 @@ def run_safe_tta(cfg, device):
             
             results.append({
                 "FileName": case,
-                "Actual_EF": target.item() if target.numel() == 1 else -1,
+                "Actual_EF": target[0].item() if target.numel() > 0 else -1,
                 "Predicted_EF_Low": pred_ef_interval[0],
                 "Predicted_EF_High": pred_ef_interval[1],
                 "Q_Val": q_used,
