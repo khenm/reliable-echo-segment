@@ -206,9 +206,21 @@ class SafeTTAEngine:
             features = getattr(self.model, 'last_features', torch.zeros_like(logits))
 
         # 2. Phase 3: Audit
-        is_collapsed = self.auditor.update(logits, features)
+        # If logits is tuple (e.g., hybrid), use the segmentation part (index 1) for entropy if available, 
+        # as regression (index 0) scalar entropy is less informative for drift detection.
+        # This is a heuristic for R2Plus1D.
         
-        final_output = []
+        logits_for_audit = logits
+        if isinstance(logits, (tuple, list)):
+            # Assuming (ef, seg) structure
+            if len(logits) > 1 and logits[1].ndim == 4: # Segmentation map
+                logits_for_audit = logits[1]
+            else:
+                 logits_for_audit = logits[0]
+
+        is_collapsed = self.auditor.update(logits_for_audit, features)
+        
+        final_output = None
         q_used = 1.0
         
         if is_collapsed:
@@ -217,14 +229,12 @@ class SafeTTAEngine:
             self.model.load_state_dict(self.initial_state)
             self.auditor.reset_audit()
             
-            # Max uncertainty output
-            num_classes = self.calibrator.num_classes
-            batch_size = logits.shape[0]
-            final_output = [list(range(num_classes))] * batch_size
+            # final_output remains None, main.py should handle it
             
         else:
             # 3. Phase 4: Conformal Output
-            final_output, q_used = self.calibrator.predict_interval(logits, martingale_stable=True)
+            # Calibrator (including AuditCalibrator) handles tuple logits
+            final_output, q_used = self.calibrator.predict(logits, martingale_stable=True)
             
             # 4. Phase 2: Adaptation (Optional)
             if adapt and self.optimizer:
@@ -232,22 +242,42 @@ class SafeTTAEngine:
                 self.optimizer.zero_grad()
                 
                 out_train = self.model(x_t)
+                
+                # Adaptation Loss Strategy:
+                # If hybrid (ef, seg), which one to minimize entropy on?
+                # R2Plus1D TTA usually adapts on Segmentation entropy as it's dense.
+                
+                loss = 0.0
                 if isinstance(out_train, tuple):
-                    logits_train = out_train[0]
+                    # Hybrid: Sum entropies? or just Seg?
+                    # Let's try minimizing Seg entropy (index 1) as it provides more signal (pixels)
+                    # EF (index 0) is single scalar, less gradient?
+                    # For safety, let's do both weighted? Or just Seg.
+                    
+                    # Logits train extraction
+                    logits_ef = out_train[0]
+                    logits_seg = out_train[1]
+                    
+                    # 1. EF Entropy
+                    p_ef = logits_ef
+                    ent_ef = -torch.sum(p_ef * torch.log(p_ef + 1e-10) + (1-p_ef) * torch.log(1-p_ef + 1e-10), dim=1).mean()
+                    
+                    # 2. Seg Entropy
+                    probs_seg = F.softmax(logits_seg, dim=1)
+                    ent_seg = -torch.sum(probs_seg * torch.log(probs_seg + 1e-10), dim=1).mean()
+                    
+                    loss = ent_ef + ent_seg
                 else:
                     logits_train = out_train
+                    # Handle Binary Case (B, 1) - explicit entropy calculation
+                    if logits_train.shape[1] == 1:
+                        p = logits_train
+                        loss = -torch.sum(p * torch.log(p + 1e-10) + (1-p) * torch.log(1-p + 1e-10), dim=1).mean()
+                    else:
+                        probs = F.softmax(logits_train, dim=1)
+                        loss = -torch.sum(probs * torch.log(probs + 1e-10), dim=1).mean()
                 
-                # Handle Binary Case (B, 1) - explicit entropy calculation
-                if logits_train.shape[1] == 1:
-                    # logits_train are already probabilities from Sigmoid
-                    p = logits_train
-                    # Binary Entropy: -[p*log(p) + (1-p)*log(1-p)]
-                    entropy = -torch.sum(p * torch.log(p + 1e-10) + (1-p) * torch.log(1-p + 1e-10), dim=1).mean()
-                else:
-                    probs = F.softmax(logits_train, dim=1)
-                    entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=1).mean()
-                
-                entropy.backward()
+                loss.backward()
                 self.optimizer.step()
                 self.model.eval()
 

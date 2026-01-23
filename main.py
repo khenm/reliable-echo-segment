@@ -25,7 +25,7 @@ from src.utils.plot import (
 from src.analysis.latent_profile import LatentProfiler
 from src.tta.engine import TTA_Engine, SafeTTAEngine
 from src.tta.auditor import SelfAuditor
-from src.tta.conformal import ConformalCalibrator
+from src.registry import get_tta_component_class
 
 # Setup logging (stdout only initially)
 logger = get_logger()
@@ -473,8 +473,26 @@ def run_safe_tta(cfg, device):
     feature_dim = cfg['model'].get('latent_dim', 512) 
     auditor = SelfAuditor(feature_dim=feature_dim)
     
-    num_classes = cfg['data'].get('num_classes', 10)
-    calibrator = ConformalCalibrator(alpha=0.05, num_classes=num_classes)
+    model_name = cfg['model'].get('name', 'VAEUNet')
+    calibrator = None
+    
+    if "r2plus1d" in model_name.lower():
+         # Hybrid (Regression + Segmentation)
+         logger.info("Initializing AuditCalibrator for R2Plus1D (Hybrid)...")
+         RegCal = get_tta_component_class("regression_calibrator")
+         SegCal = get_tta_component_class("segmentation_calibrator")
+         AuditCal = get_tta_component_class("audit_calibrator")
+         
+         calibrator = AuditCal({
+             'regression': RegCal(alpha=0.05),
+             'segmentation': SegCal(alpha=0.05)
+         })
+    else:
+        # Default Classification
+        num_classes = cfg['data'].get('num_classes', 10)
+        logger.info(f"Initializing ClassificationCalibrator for {model_name}...")
+        ClassCal = get_tta_component_class("classification_calibrator")
+        calibrator = ClassCal(alpha=0.05, num_classes=num_classes)
     
     safe_engine = SafeTTAEngine(
         model, 
@@ -498,17 +516,53 @@ def run_safe_tta(cfg, device):
         target = batch["target"].to(device)
         case = batch["case"][0] 
         
-        prediction_sets, q_used, collapsed = safe_engine.predict_step(video)
+        output, q_used, collapsed = safe_engine.predict_step(video)
         
-        for i, p_set in enumerate(prediction_sets):
+        # Handle Output Type
+        if collapsed:
+            results.append({
+                "FileName": case,
+                "Status": "COLLAPSED",
+                "Q_Val": q_used
+            })
+            continue
+
+        if isinstance(output, dict):
+            # Hybrid
+            reg_res = output.get('regression') # [(low, high), ...]
+            # Flatten predictions (assume batch 1)
+            pred_ef_interval = reg_res[0] if reg_res else (0.0, 0.0)
+            
+            results.append({
+                "FileName": case,
+                "Actual_EF": target.item() if target.numel() == 1 else -1,
+                "Predicted_EF_Low": pred_ef_interval[0],
+                "Predicted_EF_High": pred_ef_interval[1],
+                "Q_Val": q_used,
+                "Status": "OK"
+            })
+            # Segmentation mask saving logic could go here if needed
+            
+        elif isinstance(output, tuple):
+             # Segmentation (Core, Shadow)
+             # Not logging heavy masks to CSV
              results.append({
                 "FileName": case,
-                "Actual_Class": target.view(-1)[i].item() if target.numel() > i else -1,
-                "Prediction_Set": str(p_set),
-                "Set_Size": len(p_set),
-                "Q_Val": q_used,
-                "Collapsed": collapsed
+                "Status": "OK (Segmentation)",
+                "Q_Val": q_used
             })
+
+        elif isinstance(output, list):
+             # Classification (Prediction Sets)
+            for i, p_set in enumerate(output):
+                 results.append({
+                    "FileName": case,
+                    "Actual_Class": target.view(-1)[i].item() if target.numel() > i else -1,
+                    "Prediction_Set": str(p_set),
+                    "Set_Size": len(p_set),
+                    "Q_Val": q_used,
+                    "Status": "OK"
+                })
             
     df_results = pd.DataFrame(results)
     save_path = os.path.join(cfg['training']['run_dir'], "safe_tta_results.csv")
