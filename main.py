@@ -1,5 +1,7 @@
 import yaml
 from src.utils.config_loader import load_config
+import src.datasets
+import src.models
 import argparse
 import os
 import torch
