@@ -49,13 +49,22 @@ class SelfAuditor:
         
         logger.info("Starting SelfAuditor Calibration...")
         with torch.no_grad():
-            for inputs, _ in valid_loader:
+            for batch in valid_loader:
+                if isinstance(batch, dict):
+                    if "video" in batch:
+                        inputs = batch["video"]
+                    elif "image" in batch:
+                        inputs = batch["image"]
+                    else:
+                        # Fallback: assume first key is input
+                        inputs = list(batch.values())[0]
+                elif isinstance(batch, (list, tuple)):
+                    inputs = batch[0]
+                else:
+                    inputs = batch
+                    
                 inputs = inputs.to(device)
                 
-                # Assume model returns (logits, features)
-                # Note: Model must support return_features=True or return a tuple
-                # We handle the case where the model might output just logits if not adjusted,
-                # but per design it requires features.
                 try:
                     out = model(inputs, return_features=True)
                     if isinstance(out, tuple):
