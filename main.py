@@ -7,8 +7,7 @@ import pandas as pd
 from tqdm import tqdm
 from datetime import datetime
 from src.utils.util_ import seed_everything, get_device, load_checkpoint
-from src.datasets.registry import DatasetRegistry
-from src.models.registry import get_model
+from src.registry import get_dataloaders, build_model
 from src.trainer import Trainer
 from src.utils.logging import get_logger
 from src.losses import KLLoss, DifferentiableEFLoss
@@ -177,7 +176,7 @@ def run_preprocess(cfg):
         cfg (dict): Configuration dictionary.
     """
     logger.info("Checking data loading...")
-    loaders = DatasetRegistry.get_dataloaders(cfg)
+    loaders = get_dataloaders(cfg)
     
     # Iterate through all loaders to ensure data is readable
     for i, loader in enumerate(loaders):
@@ -210,7 +209,7 @@ def _load_model_for_inference(cfg, device):
              logger.warning(f"Explicit path {ckpt_path} not found. Falling back to auto-discovery.")
          else:
              logger.info(f"Using explicit checkpoint: {ckpt_path}")
-             model = get_model(cfg, device)
+             model = build_model(cfg, device)
              load_checkpoint(model, ckpt_path, device)
              model.eval()
              return model
@@ -246,7 +245,7 @@ def _load_model_for_inference(cfg, device):
         logger.error(f"Checkpoint path determined but not found: {ckpt_path}")
         return None
         
-    model = get_model(cfg, device)
+    model = build_model(cfg, device)
     logger.info(f"Loading checkpoint: {ckpt_path}")
     load_checkpoint(model, ckpt_path, device)
     model.eval()
@@ -261,8 +260,8 @@ def run_train(cfg, device):
         device (torch.device): The computation device.
     """
     logger.info("Starting Training...")
-    loaders = DatasetRegistry.get_dataloaders(cfg)
-    model = get_model(cfg, device)
+    loaders = get_dataloaders(cfg)
+    model = build_model(cfg, device)
     
     # Define Criterions based on Model Type
     model_name = cfg['model'].get('name', 'VAEUNet')
@@ -311,7 +310,7 @@ def run_eval(cfg, device):
         device (torch.device): The computation device.
     """
     logger.info("Starting Evaluation...")
-    loaders = DatasetRegistry.get_dataloaders(cfg)
+    loaders = get_dataloaders(cfg)
     _, _, ld_ts = loaders
     
     model = _load_model_for_inference(cfg, device)
@@ -342,7 +341,7 @@ def run_tta(cfg, device):
     Runs Test-Time Adaptation on the test set.
     """
     logger.info("Starting Test-Time Adaptation (TTA)...")
-    loaders = DatasetRegistry.get_dataloaders(cfg)
+    loaders = get_dataloaders(cfg)
     _, _, ld_ts = loaders
     
     
@@ -442,7 +441,7 @@ def run_profile(cfg, device):
         logger.error("Skipping profiling due to missing checkpoint.")
         return
     
-    loaders = DatasetRegistry.get_dataloaders(cfg)
+    loaders = get_dataloaders(cfg)
     ld_tr, _, _ = loaders
     
     latent_dim = cfg['model']['latent_dim']
@@ -460,7 +459,7 @@ def run_safe_tta(cfg, device):
     Runs Safe Test-Time Adaptation with Self-Auditor and Conformal Prediction.
     """
     logger.info("Starting Safe-TTA...")
-    loaders = DatasetRegistry.get_dataloaders(cfg)
+    loaders = get_dataloaders(cfg)
     _, ld_val, ld_ts = loaders # Train (unused), Val, Test
     
     model = _load_model_for_inference(cfg, device)
