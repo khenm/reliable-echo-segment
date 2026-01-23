@@ -74,7 +74,6 @@ class BaseConformalCalibrator(ABC):
         self.current_alpha = np.clip(self.current_alpha, 0.001, 0.999)
 
 
-@register_tta_component("conformal_calibrator")  # Legacy name
 @register_tta_component("classification_calibrator")
 class ClassificationCalibrator(BaseConformalCalibrator):
     """
@@ -119,7 +118,13 @@ class ClassificationCalibrator(BaseConformalCalibrator):
                 
                 # Score = 1 - probability of true class
                 batch_scores = 1.0 - true_class_probs
-                scores_list.append(batch_scores.cpu().numpy())
+                
+                # Ensure 1D for storage
+                batch_scores_np = batch_scores.cpu().numpy()
+                if batch_scores_np.ndim == 0:
+                    batch_scores_np = np.expand_dims(batch_scores_np, axis=0)
+                    
+                scores_list.append(batch_scores_np)
                 
         if not scores_list:
             logger.warning("Calibration data empty.")
@@ -219,7 +224,13 @@ class RegressionCalibrator(BaseConformalCalibrator):
                 
                 # Non-conformity score: Absolute Error
                 batch_residuals = torch.abs(preds.squeeze() - targets.squeeze())
-                residuals.extend(batch_residuals.cpu().numpy())
+                
+                # Ensure 1D for iterable extension
+                batch_residuals_np = batch_residuals.cpu().numpy()
+                if batch_residuals_np.ndim == 0:
+                     batch_residuals_np = np.expand_dims(batch_residuals_np, axis=0)
+                     
+                residuals.extend(batch_residuals_np)
                 
         self.cal_scores = np.array(residuals)
         
@@ -230,6 +241,7 @@ class RegressionCalibrator(BaseConformalCalibrator):
              return
 
         q_level = np.ceil((n + 1) * (1 - self.target_alpha)) / n
+        q_level = min(max(q_level, 0.0), 1.0)
         self.q_hat = np.quantile(self.cal_scores, q_level)
         logger.info(f"Calibration Complete. Margin (q_hat): +/- {self.q_hat:.4f}")
 
@@ -242,9 +254,6 @@ class RegressionCalibrator(BaseConformalCalibrator):
         if self.q_hat is None:
             current_q = 0.5 # Fallback
         else:
-            # We can apply ACI here too if we had a way to verify coverage online (requires ground truth)
-            # For regression TTA without labels, we usually stick to static or unsupervised ACI.
-            # Here we assume static for simplicity unless we have pseudo-label logic.
             current_q = self.q_hat 
         
         # Create Intervals
@@ -281,62 +290,43 @@ class SegmentationCalibrator(BaseConformalCalibrator):
         
         with torch.no_grad():
             for batch in valid_loader:
-                if curr_samples >= max_samples: break
+                inputs = batch["video"].to(device)
+                targets = batch["label"].to(device)      # Shape: (B, 1, T, H, W)
+                frame_mask = batch["frame_mask"].to(device) # Shape: (B, T)
                 
-                if isinstance(batch, dict):
-                     if "video" in batch: inputs = batch["video"]
-                     elif "image" in batch: inputs = batch["image"]
-                     else: inputs = list(batch.values())[0]
-
-                     # For segmentation, we prefer 'label' or 'mask'
-                     if "label" in batch: targets = batch["label"]
-                     elif "mask" in batch: targets = batch["mask"]
-                     else: targets = list(batch.values())[1] # Warning: Might pick up regression target if ordered that way
-                elif isinstance(batch, (list, tuple)):
-                    inputs, targets = batch[0], batch[1]
-                
-                inputs, targets = inputs.to(device), targets.to(device)
-                
-                # Forward
                 logits = model(inputs)
-                if isinstance(logits, tuple): logits = logits[0]
+                if isinstance(logits, tuple): logits = logits[1] # R2Plus1D seg output is index 1
                 
-                probs = torch.sigmoid(logits) # (B, 1, H, W)
+                probs = torch.sigmoid(logits) # (B, 1, T, H, W)
                 
-                # Check target shape
-                if targets.ndim == 3: targets = targets.unsqueeze(1) # (B, 1, H, W)
+                # 2. Filter out UNLABELED frames using the frame_mask
+                # Flatten the batch and time dimensions: (B*T, 1, H, W)
+                B, C, T, H, W = probs.shape
+                probs_flat = probs.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
+                targets_flat = targets.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
+                frame_mask_flat = frame_mask.view(-1)
                 
-                # Score = 1 - prob of true class. 
-                # For binary: if y=1, s = 1-p. If y=0, s = 1-(1-p) = p.
+                # Get indices of frames that actually have ground truth
+                valid_indices = torch.nonzero(frame_mask_flat).squeeze()
                 
-                # Gather probability of true label
-                # p_true = p if y=1 else (1-p)
-                p_true = torch.where(targets > 0.5, probs, 1.0 - probs)
-                
+                if valid_indices.numel() == 0:
+                    continue # Skip video if no labeled frames found
+                    
+                probs_valid = probs_flat[valid_indices]
+                targets_valid = targets_flat[valid_indices]
+
+                # 3. Calculate Conformal Scores on VALID pixels only
+                # Score = 1 - p(true_class)
+                p_true = torch.where(targets_valid > 0.5, probs_valid, 1.0 - probs_valid)
                 batch_scores = 1.0 - p_true
                 
-                # Downsample scores to save memory? Or take random subset of pixels
-                # Let's take random subset of 1000 pixels per image to estimate quantile
+                # Subsample pixels to prevent Out-Of-Memory (OOM)
                 flat_scores = batch_scores.flatten()
                 if flat_scores.numel() > 10000:
                     idx = torch.randperm(flat_scores.numel())[:10000]
                     flat_scores = flat_scores[idx]
                     
                 scores_list.append(flat_scores.cpu().numpy())
-                curr_samples += inputs.shape[0]
-
-        if not scores_list:
-            logger.warning("Segmentation calibration empty.")
-            self.q_hat = 0.1
-            return
-
-        self.cal_scores = np.concatenate(scores_list)
-        n = len(self.cal_scores)
-        
-        # Calculate Quantile
-        q_level = np.ceil((n + 1) * (1 - self.target_alpha)) / n
-        self.q_hat = np.quantile(self.cal_scores, q_level)
-        logger.info(f"Segmentation Calibration Complete. q_hat: {self.q_hat:.4f}")
 
     def predict(self, logits: torch.Tensor, martingale_stable: bool = True) -> Tuple[Tuple[torch.Tensor, torch.Tensor], float]:
         """
@@ -350,16 +340,6 @@ class SegmentationCalibrator(BaseConformalCalibrator):
              current_q = 0.1 # default
         else:
              current_q = self.q_hat
-             
-        # Upper threshold = 1 - q_hat (high confidence)
-        # Lower threshold = q_hat (low confidence, if q_hat is small error)
-        # Wait, if q_hat is score threshold (e.g. 0.05), then 1-p_true <= 0.05 => p_true >= 0.95
-        # So included set is {y | p(y) >= 1 - q_hat}
-        
-        # For segmentation, we often want the range of valid probabilities?
-        # Let's stick to the logic:
-        # Core: p >= 1 - q_hat
-        # Shadow: q_hat <= p < 1 - q_hat  (Ambiguous region)
         
         upper_thresh = 1.0 - current_q
         lower_thresh = current_q

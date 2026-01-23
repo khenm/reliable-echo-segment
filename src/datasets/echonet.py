@@ -435,6 +435,25 @@ class EchoNetVideoDataset(Dataset):
             "frame_mask": torch.tensor(frame_mask, dtype=torch.float32)
         }
 
+class ResizeVideoLabel:
+    def __init__(self, size, clip_len):
+        self.size = size
+        self.clip_len = clip_len
+
+    def __call__(self, data):
+        # data is dict
+        vid = torch.as_tensor(data["video"]).unsqueeze(0) # (1, C, T, H, W)
+        tgt_size = (self.clip_len, self.size[0], self.size[1])
+        
+        vid = torch.nn.functional.interpolate(vid, size=tgt_size, mode='trilinear', align_corners=False).squeeze(0)
+        data["video"] = vid
+        
+        if "label" in data:
+            lab = torch.as_tensor(data["label"]).unsqueeze(0) # (1, C, T, H, W)
+            lab = torch.nn.functional.interpolate(lab, size=tgt_size, mode='nearest').squeeze(0)
+            data["label"] = lab
+        return data
+
 @register_dataset("ECHONET")
 class EchoNet:
     @staticmethod
@@ -452,24 +471,7 @@ class EchoNet:
             # Video Configuration
             clip_len = cfg['model'].get('clip_length', 32)
             
-            class ResizeVideoLabel:
-                def __init__(self, size):
-                    self.size = size
-                def __call__(self, data):
-                    # data is dict
-                    vid = torch.as_tensor(data["video"]).unsqueeze(0) # (1, C, T, H, W)
-                    tgt_size = (clip_len, self.size[0], self.size[1])
-                    
-                    vid = torch.nn.functional.interpolate(vid, size=tgt_size, mode='trilinear', align_corners=False).squeeze(0)
-                    data["video"] = vid
-                    
-                    if "label" in data:
-                        lab = torch.as_tensor(data["label"]).unsqueeze(0) # (1, C, T, H, W)
-                        lab = torch.nn.functional.interpolate(lab, size=tgt_size, mode='nearest').squeeze(0)
-                        data["label"] = lab
-                    return data
-
-            resize_op = ResizeVideoLabel(img_size)
+            resize_op = ResizeVideoLabel(img_size, clip_len)
 
             train_transforms = Compose([
                 Lambda(func=resize_op),
