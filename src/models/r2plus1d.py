@@ -101,9 +101,6 @@ class EchoR2Plus1D(nn.Module):
         flat = pool.flatten(1)
         ef_pred = torch.sigmoid(self.fc_ef(flat))
 
-        if return_features:
-            return ef_pred, flat
-        
         # Segmentation Branch
         d1 = self.up1(x4, x3)
         d2 = self.up2(d1, x2)
@@ -115,6 +112,9 @@ class EchoR2Plus1D(nn.Module):
         # Final upsample to match input size if needed
         if seg_pred.shape[2:] != x.shape[2:]:
             seg_pred = nn.functional.interpolate(seg_pred, size=x.shape[2:], mode='trilinear', align_corners=False)
+        
+        if return_features:
+            return (ef_pred, seg_pred), flat
             
         return ef_pred, seg_pred
     
