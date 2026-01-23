@@ -231,13 +231,21 @@ class SafeTTAEngine:
                 self.model.train()
                 self.optimizer.zero_grad()
                 
-                # Re-compute logits for graph
-                # Note: Efficient implementation would reuse graph or check if features detached
-                # For simplicity here, we do a quick re-forward or standard TTA loss
-                # Here uses Entropy Minimization as example
-                logits_train = self.model(x_t)
-                probs = F.softmax(logits_train, dim=1)
-                entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=1).mean()
+                out_train = self.model(x_t)
+                if isinstance(out_train, tuple):
+                    logits_train = out_train[0]
+                else:
+                    logits_train = out_train
+                
+                # Handle Binary Case (B, 1) - explicit entropy calculation
+                if logits_train.shape[1] == 1:
+                    # logits_train are already probabilities from Sigmoid
+                    p = logits_train
+                    # Binary Entropy: -[p*log(p) + (1-p)*log(1-p)]
+                    entropy = -torch.sum(p * torch.log(p + 1e-10) + (1-p) * torch.log(1-p + 1e-10), dim=1).mean()
+                else:
+                    probs = F.softmax(logits_train, dim=1)
+                    entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=1).mean()
                 
                 entropy.backward()
                 self.optimizer.step()
