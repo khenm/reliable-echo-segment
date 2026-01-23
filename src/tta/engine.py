@@ -206,19 +206,8 @@ class SafeTTAEngine:
             features = getattr(self.model, 'last_features', torch.zeros_like(logits))
 
         # 2. Phase 3: Audit
-        # If logits is tuple (e.g., hybrid), use the segmentation part (index 1) for entropy if available, 
-        # as regression (index 0) scalar entropy is less informative for drift detection.
-        # This is a heuristic for R2Plus1D.
-        
-        logits_for_audit = logits
-        if isinstance(logits, (tuple, list)):
-            # Assuming (ef, seg) structure
-            if len(logits) > 1 and logits[1].ndim == 4: # Segmentation map
-                logits_for_audit = logits[1]
-            else:
-                 logits_for_audit = logits[0]
-
-        is_collapsed = self.auditor.update(logits_for_audit, features)
+        # Auditor handles tuple unpacking internally to compute entropy from the most relevant output (e.g. segmentation)
+        is_collapsed = self.auditor.update(logits, features)
         
         final_output = None
         q_used = 1.0
