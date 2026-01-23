@@ -200,11 +200,17 @@ class RegressionCalibrator(BaseConformalCalibrator):
         with torch.no_grad():
             for batch in valid_loader:
                 # Handle varying data formats simply for regression (assuming [0]=input, [1]=target)
-                if isinstance(batch, (list, tuple)):
+                # Handle varying data formats
+                if isinstance(batch, dict):
+                     if "video" in batch: inputs = batch["video"]
+                     elif "image" in batch: inputs = batch["image"]
+                     else: inputs = list(batch.values())[0]
+
+                     if "target" in batch: targets = batch["target"]
+                     elif "ef" in batch: targets = batch["ef"]
+                     else: targets = list(batch.values())[1]
+                elif isinstance(batch, (list, tuple)):
                     inputs, targets = batch[0], batch[1]
-                elif isinstance(batch, dict):
-                     inputs = list(batch.values())[0]
-                     targets = list(batch.values())[1]
                 
                 inputs, targets = inputs.to(device), targets.to(device)
                 
@@ -277,11 +283,17 @@ class SegmentationCalibrator(BaseConformalCalibrator):
             for batch in valid_loader:
                 if curr_samples >= max_samples: break
                 
-                if isinstance(batch, (list, tuple)):
+                if isinstance(batch, dict):
+                     if "video" in batch: inputs = batch["video"]
+                     elif "image" in batch: inputs = batch["image"]
+                     else: inputs = list(batch.values())[0]
+
+                     # For segmentation, we prefer 'label' or 'mask'
+                     if "label" in batch: targets = batch["label"]
+                     elif "mask" in batch: targets = batch["mask"]
+                     else: targets = list(batch.values())[1] # Warning: Might pick up regression target if ordered that way
+                elif isinstance(batch, (list, tuple)):
                     inputs, targets = batch[0], batch[1]
-                elif isinstance(batch, dict):
-                     inputs = list(batch.values())[0]
-                     targets = list(batch.values())[1] # Assuming targets are masks (B, H, W) or (B, 1, H, W)
                 
                 inputs, targets = inputs.to(device), targets.to(device)
                 
