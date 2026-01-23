@@ -1,23 +1,13 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-from typing import List, Tuple, Optional, Any
+from typing import List, Tuple, Optional, Dict, Union, Any
 import logging
+from tqdm import tqdm
 
 from src.registry import register_tta_component
 
 logger = logging.getLogger(__name__)
-
-# Correct import path logic
-try:
-    from src.registry import register_tta_component
-except ImportError:
-    # Fallback if I messed up the thinking, but since I just created it, it should work.
-    # However, for robustness:
-    def register_tta_component(name):
-        def decorator(cls):
-            return cls
-        return decorator
 
 @register_tta_component("conformal_calibrator")
 class ConformalCalibrator:
@@ -25,7 +15,7 @@ class ConformalCalibrator:
     Implements Conformal Prediction for classification (Prediction Sets).
     Uses Adaptive Conformal Inference (ACI) for online adaptation.
     """
-    def __init__(self, alpha: float = 0.05, gamma: float = 0.01, num_classes: int = 10, **kwargs):
+    def __init__(self, alpha: float = 0.05, gamma: float = 0.01, num_classes: int = 10, **kwargs: Any):
         """
         Args:
             alpha (float): Target error rate (e.g., 0.05 for 95% coverage).
@@ -44,27 +34,49 @@ class ConformalCalibrator:
         
         logger.info(f"Initialized ConformalCalibrator(alpha={alpha}, gamma={gamma}, n_classes={num_classes})")
 
-    def calibrate(self, valid_loader: torch.utils.data.DataLoader, model: torch.nn.Module, device: torch.device):
+    def calibrate(self, valid_loader: torch.utils.data.DataLoader, model: torch.nn.Module, device: torch.device) -> None:
         """
         Phase 4a: Offline Calibration (Conformalize the Source).
         Compute non-conformity scores (1 - true_class_prob) on validation data.
+        
+        Args:
+            valid_loader: DataLoader for validation set.
+            model: The model to calibrate.
+            device: Computation device.
         """
         logger.info("Starting Conformal Calibration...")
         model.eval()
         scores_list = []
         
         with torch.no_grad():
-            for batch in valid_loader:
+            pbar = tqdm(valid_loader, desc="Conformal Calibration")
+            for batch in pbar:
                 # Handle varying data loader return formats (inputs, targets) or (inputs, targets, meta)
-                if isinstance(batch, (list, tuple)):
+                if isinstance(batch, dict):
+                    # Try common keys
+                    if "video" in batch:
+                        inputs = batch["video"]
+                    elif "image" in batch:
+                        inputs = batch["image"]
+                    else:
+                        # Fallback: assume first value is input
+                        inputs = list(batch.values())[0]
+
+                    if "target" in batch:
+                        targets = batch["target"]
+                    elif "label" in batch:
+                        targets = batch["label"]
+                    else:
+                        # Fallback: assume second value is target
+                        targets = list(batch.values())[1]
+                elif isinstance(batch, (list, tuple)):
                     inputs, targets = batch[0], batch[1]
                 else:
-                    raise ValueError("DataLoader must return tuple/list with (inputs, targets, ...)")
+                    raise ValueError("DataLoader must return tuple/list or dict with (inputs, targets, ...)")
                 
                 inputs, targets = inputs.to(device), targets.to(device)
                 
                 # Forward pass
-                # Support models returning tuple (logits, features) or just logits
                 out = model(inputs)
                 if isinstance(out, tuple):
                     logits = out[0]
@@ -74,13 +86,9 @@ class ConformalCalibrator:
                 probs = F.softmax(logits, dim=1)
                 
                 # Get probability of the TRUE class
-                # gather: extracts the value at the index of the target
-                # targets shape: (B), unsqueeze -> (B, 1)
-                # gather result: (B, 1), squeeze -> (B)
                 true_class_probs = probs.gather(1, targets.unsqueeze(1)).squeeze()
                 
                 # Score = 1 - probability of true class
-                # (Lower probability = Higher non-conformity)
                 batch_scores = 1.0 - true_class_probs
                 scores_list.append(batch_scores.cpu().numpy())
                 
@@ -91,15 +99,13 @@ class ConformalCalibrator:
         self.cal_scores = np.concatenate(scores_list)
         
         # Calculate initial quantile for the target alpha
-        # We want the score q such that (1-alpha) of samples have score <= q
-        # Standard formulation: q_level = ceil((n+1)(1-alpha)) / n
         n = len(self.cal_scores)
         q_level = np.ceil((n + 1) * (1 - self.target_alpha)) / n
         
         # Clip q_level to [0, 1]
         q_level = min(max(q_level, 0.0), 1.0)
         
-        self.q_hat = np.quantile(self.cal_scores, q_level, method='higher') # 'higher' == interpolation='higher' in newer numpy
+        self.q_hat = np.quantile(self.cal_scores, q_level, method='higher')
         
         logger.info(f"Calibration Complete. N={n}, Initial Quantile (q_hat): {self.q_hat:.4f}")
 
@@ -121,15 +127,12 @@ class ConformalCalibrator:
         
         # 1. Determine Threshold
         if self.q_hat is None:
-             # Fallback if not calibrated
              logger.warning("ConformalCalibrator not calibrated! Using default 0.95 threshold estimate.")
              current_q = 0.95
         else:
              current_q = self.quantile_from_alpha(self.current_alpha)
 
         # 2. Construct Sets
-        # Rule: include class if prob >= (1 - current_q)
-        # Because score <= q <=> 1 - prob <= q <=> prob >= 1 - q
         prob_threshold = 1.0 - current_q
         
         pseudo_labels = torch.argmax(probs, dim=1)
@@ -149,10 +152,6 @@ class ConformalCalibrator:
             
         # 3. Adaptive Conformal Inference (ACI) Update
         if martingale_stable:
-            # Simplified ACI for TTA:
-            # Assume pseudo-label (top-1) is the ground truth
-            # Error = 1 if pseudo_label NOT in set, else 0
-            
             avg_err = 0.0
             for i, p_label in enumerate(pseudo_labels_np):
                 if p_label not in prediction_sets[i]:
