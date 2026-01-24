@@ -148,9 +148,25 @@ class Trainer:
                                      
                              else:
                                  l_seg = self.criterions['seg'](seg_logits, mask_targets.long())
-                                 
+
                              loss += l_seg
                              loss_dict['seg'] = l_seg.item()
+
+                        if 'semi_sup' in self.criterions and mask_targets is not None:
+                            # EchoSemiSupervisedLoss handles masking internally
+                            if frame_mask is not None:
+                                l_semi, comp_dict = self.criterions['semi_sup'](
+                                    seg_logits, 
+                                    mask_targets, 
+                                    labeled_mask=frame_mask
+                                )
+                            else:
+                                l_semi, comp_dict = self.criterions['semi_sup'](seg_logits, mask_targets)
+                            
+                            loss += l_semi
+                            loss_dict['semi_sup'] = l_semi.item()
+                            for k, v in comp_dict.items():
+                                loss_dict[k] = v.item()
 
                 else:
                     imgs = batch["image"].to(self.device)

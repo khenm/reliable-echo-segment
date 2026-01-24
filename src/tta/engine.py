@@ -220,13 +220,25 @@ class SafeTTAEngine:
                 self.model.load_state_dict(self.initial_state)
                 self.auditor.reset_audit()
                 
-                # final_output remains None, main.py should handle it
-                return None, 1.0, True
+                # final_output remains None, main.py should handle it, but return stats for plotting
+                audit_stats = getattr(self.auditor, 'current_trace', {
+                    'martingale': [self.auditor.martingale],
+                    'p_value': [self.auditor.p_value]
+                })
+                return None, 1.0, True, audit_stats
                 
             else:
                 # 3. Phase 4: Conformal Output
                 # Calibrator (including AuditCalibrator) handles tuple logits
-                final_output, q_used = self.calibrator.predict(logits, martingale_stable=True)
+                
+                # Get latest audit score and epsilon
+                audit_score = self.auditor.scores[-1] if self.auditor.scores else None
+                audit_epsilon = self.auditor.epsilon
+
+                final_output, q_used = self.calibrator.predict(logits, 
+                                                               martingale_stable=True,
+                                                               audit_score=audit_score,
+                                                               audit_epsilon=audit_epsilon)
             
         # Explicit clean up to prevent double-graph retention
         del out, logits, features
@@ -235,7 +247,7 @@ class SafeTTAEngine:
 
         # 4. Phase 2: Adaptation (Optional)
         # Adapt only if not collapsed and optimizer is set
-        if adapt and self.optimizer:
+        if adapt and self.optimizer and not is_collapsed:
             self.model.train()
             self.optimizer.zero_grad()
             
@@ -281,4 +293,7 @@ class SafeTTAEngine:
             self.optimizer.step()
             self.model.eval()
 
-        return final_output, q_used, is_collapsed
+        return final_output, q_used, is_collapsed, getattr(self.auditor, 'current_trace', {
+            'martingale': [self.auditor.martingale],
+            'p_value': [self.auditor.p_value]
+        })
