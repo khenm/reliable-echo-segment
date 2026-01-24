@@ -33,10 +33,10 @@ training:
   seed: 42
   
   # Local storage paths
-  save_dir: "/content/drive/MyDrive/Datasets/EchoNet-Dynamic/runs"
-  checkpoint_dir: "/content/drive/MyDrive/Datasets/EchoNet-Dynamic/checkpoints"
-  test_metrics_csv: "/content/drive/MyDrive/Datasets/EchoNet-Dynamic/runs/echonet_metrics.csv"
-  clinical_pairs_csv: "/content/drive/MyDrive/Datasets/EchoNet-Dynamic/runs/echonet_clinical_pairs.csv"
+  save_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs"
+  checkpoint_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/checkpoints"
+  test_metrics_csv: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_metrics.csv"
+  clinical_pairs_csv: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_clinical_pairs.csv"
   resume_path: null
 
 tta:
