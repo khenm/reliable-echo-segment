@@ -223,14 +223,14 @@ class Trainer:
                             if 'ef_reg' in self.criterions:
                                 l_ef = self.criterions['ef_reg'](preds, targets.view(-1, 1))
                                 loss += l_ef
-                                loss_dict['ef'] = l_ef.item()
+                                loss_dict['ef_reg'] = l_ef.item()
 
                             # 3. Consistency Loss (Refinement Loop)
                             if 'consistency' in self.criterions:
                                 # Input: seg_logits (B, C, T, H, W) and preds (B, 1)
                                 l_cons = self.criterions['consistency'](seg_logits, preds)
                                 loss += l_cons
-                                loss_dict['cons'] = l_cons.item()
+                                loss_dict['consistency'] = l_cons.item()
                                 
                             # 4. Temporal Consistency
                             if 'temporal' in self.criterions and self.temporal_gate is not None:
@@ -256,7 +256,7 @@ class Trainer:
                                 
                                 l_temp = self.criterions['temporal'](log_t_flat, log_prev_flat, gate_flat)
                                 loss += l_temp
-                                loss_dict['temp'] = l_temp.item()
+                                loss_dict['temporal'] = l_temp.item()
 
                         elif self.is_dual_stream:
                             # Dual Stream Model
