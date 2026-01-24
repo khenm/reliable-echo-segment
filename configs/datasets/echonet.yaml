@@ -1,6 +1,6 @@
 name: "ECHONET"
-# root_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic"
-root_dir: "datasets"
+root_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic"
+# root_dir: "datasets"
 split_dir: ""
 nifti_dir: ""
 img_size: [112, 112]

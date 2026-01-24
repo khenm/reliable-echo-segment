@@ -300,7 +300,11 @@ def run_train(cfg, device):
              
         # Add Standard Segmentation Loss
         # Weights logic might need adjustment, taking explicit seg weight or default
-        criterions['seg'] = DiceCELoss(to_onehot_y=True, softmax=True)
+        num_classes = cfg['data'].get('num_classes', 1)
+        if num_classes == 1:
+            criterions['seg'] = DiceCELoss(sigmoid=True)
+        else:
+            criterions['seg'] = DiceCELoss(to_onehot_y=True, softmax=True)
         # Add EF Loss (direct regression) if using EF head
         criterions['ef_reg'] = torch.nn.MSELoss() # For ef_head output vs target EF
         
