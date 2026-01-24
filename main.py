@@ -564,13 +564,27 @@ def run_safe_tta(cfg, device):
 
         if isinstance(output, dict):
             # Hybrid
-            reg_res = output.get('regression') # [(low, high), ...]
-            # Flatten predictions (assume batch 1)
-            pred_ef_interval = reg_res[0] if reg_res else (0.0, 0.0)
+            reg_res = output.get('regression')
             
+            # Default values
+            pred_ef_interval = (0.0, 0.0)
+            pred_ef_mean = 0.0
+            
+            if isinstance(reg_res, dict) and 'intervals' in reg_res:
+                # New format: {'intervals': [...], 'predictions': [...]}
+                intervals = reg_res['intervals']
+                predictions = reg_res['predictions']
+                pred_ef_interval = intervals[0] if intervals else (0.0, 0.0)
+                pred_ef_mean = predictions[0] if predictions else 0.0
+            elif isinstance(reg_res, list):
+                # Legacy format or unexpected: List of tuples
+                pred_ef_interval = reg_res[0] if reg_res else (0.0, 0.0)
+                pred_ef_mean = sum(pred_ef_interval) / 2 # Crude fallback
+                
             results.append({
                 "FileName": case,
                 "Actual_EF": target[0].item() if target.numel() > 0 else -1,
+                "Predicted_EF": pred_ef_mean,
                 "Predicted_EF_Low": pred_ef_interval[0],
                 "Predicted_EF_High": pred_ef_interval[1],
                 "Q_Val": q_used,

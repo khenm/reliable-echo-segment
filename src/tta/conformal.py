@@ -249,7 +249,7 @@ class RegressionCalibrator(BaseConformalCalibrator):
         self.q_hat = np.quantile(self.cal_scores, q_level)
         logger.info(f"Calibration Complete. Margin (q_hat): +/- {self.q_hat:.4f}")
 
-    def predict(self, logits: torch.Tensor, martingale_stable: bool = True, audit_score: Optional[float] = None, audit_epsilon: Optional[float] = None) -> Tuple[List[Tuple[float, float]], float]:
+    def predict(self, logits: torch.Tensor, martingale_stable: bool = True, audit_score: Optional[float] = None, audit_epsilon: Optional[float] = None) -> Tuple[Dict[str, Any], float]:
         """Returns [lower_bound, upper_bound] for EF."""
         preds = logits.detach().cpu().numpy().squeeze()
         if preds.ndim == 0: preds = np.array([preds]) # Handle batch size 1 scalar
@@ -273,7 +273,7 @@ class RegressionCalibrator(BaseConformalCalibrator):
             proxy_error = 1.0 if audit_score > audit_epsilon else 0.0
             self._update_alpha(proxy_error)
 
-        return prediction_intervals, current_q
+        return {'intervals': prediction_intervals, 'predictions': preds.tolist()}, current_q
 
     def predict_interval(self, logits, martingale_stable=True, audit_score=None, audit_epsilon=None):
         return self.predict(logits, martingale_stable, audit_score, audit_epsilon)
