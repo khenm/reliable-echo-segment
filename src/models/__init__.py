@@ -1,1 +1,1 @@
-from . import vae_unet, r2plus1d, unet_2d, temporal
+from . import vae_unet, r2plus1d, unet_2d, temporal, dual_stream
