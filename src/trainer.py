@@ -158,7 +158,7 @@ class Trainer:
                                 mt_flat = mask_targets.permute(0, 2, 1, 3, 4).reshape(-1, 1, H, W)
                                 if frame_mask is not None:
                                     fm_flat = frame_mask.view(-1)
-                                    valid_idx = torch.nonzero(fm_flat).squeeze()
+                                    valid_idx = torch.nonzero(fm_flat).reshape(-1)
                                     if valid_idx.numel() > 0:
                                         l_seg = self.criterions['seg'](sl_flat[valid_idx], mt_flat[valid_idx])
                                     else:
@@ -237,7 +237,7 @@ class Trainer:
                                      fm_flat = frame_mask.view(-1) # (B*T)
                                      
                                      # Filter
-                                     valid_indices = torch.nonzero(fm_flat).squeeze()
+                                     valid_indices = torch.nonzero(fm_flat).reshape(-1)
                                      
                                      if valid_indices.numel() > 0:
                                          sl_valid = sl_flat[valid_indices]
