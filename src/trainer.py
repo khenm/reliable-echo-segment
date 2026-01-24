@@ -7,7 +7,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from monai.losses import DiceCELoss
+from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric, HausdorffDistanceMetric, MAEMetric
+from monai.transforms import AsDiscrete
 from tqdm import tqdm
 from src.utils.logging import get_logger
 from src.utils.util_ import load_checkpoint_dict, save_checkpoint, load_full_checkpoint
@@ -67,6 +69,53 @@ class Trainer:
         
         dev_type = device.type if hasattr(device, 'type') else str(device)
         self.scaler = torch.amp.GradScaler(device=dev_type, enabled=(dev_type == 'cuda'))
+
+        # Fix for Binary Segmentation
+        if self.num_classes == 1:
+            self.post_pred = AsDiscrete(threshold=0.5)
+            # Ensure DiceMetric includes background for binary case (index 0 is the class)
+            if 'dice' in self.metrics:
+                self.metrics['dice'] = DiceMetric(include_background=True, reduction="mean")
+        else:
+            self.post_pred = AsDiscrete(argmax=True, to_onehot=self.num_classes)
+
+    def _safe_one_hot_nchw(self, target, num_classes):
+        """
+        Robustly converts target to one-hot (N, C, H, W).
+        Handles invalid indices (>= num_classes or < 0) by creating zero vectors.
+        """
+        # Create blank (N, C, H, W)
+        shape = list(target.shape) # (N, H, W)
+        shape.insert(1, num_classes)
+        out = torch.zeros(shape, device=target.device, dtype=torch.float32)
+        
+        # Valid mask
+        valid_mask = (target >= 0) & (target < num_classes)
+        
+        # We can use scatter_ to fill the ones
+        # target needs to be (N, 1, H, W) for scatter
+        # out needs to be (N, C, H, W)
+        
+        # Expand target dims
+        target_unsqueezed = target.unsqueeze(1).long() # (N, 1, H, W)
+        
+        # Only scatter where valid
+        # To do this safely with scatter, we need to ensure indices are valid or masked.
+        # But scatter writes typically.
+        # Alternative: use F.one_hot on clamped/masked data and then zero out invalid.
+        
+        safe_target = target.clone()
+        safe_target[~valid_mask] = 0 # Temporarily point to 0
+        
+        one_hot = F.one_hot(safe_target.long(), num_classes=num_classes) # (N, H, W, C)
+        one_hot = one_hot.permute(0, 3, 1, 2).float() # (N, C, H, W)
+        
+        # Zero out where it was invalid
+        # valid_mask is (N, H, W), expand to (N, C, H, W)
+        valid_mask_expanded = valid_mask.unsqueeze(1).expand_as(one_hot)
+        one_hot = one_hot * valid_mask_expanded.float()
+        
+        return one_hot
 
     def _load_checkpoint(self, path, load_optimizer=False):
         """
@@ -470,29 +519,38 @@ class Trainer:
                      v_logits_flat, _, _ = self.model(v_img_flat)
                      # v_logits_flat: (B*T, num_classes, H, W)
                      
-                     v_pred_labels = torch.argmax(v_logits_flat, dim=1) # (B*T, H, W)
+                     if self.num_classes == 1:
+                         # Binary Logic
+                         v_pred_labels = (torch.sigmoid(v_logits_flat) > 0.5).int() # (B*T, 1, H, W)
+                         v_gt_labels = v_lab.permute(0, 2, 1, 3, 4).reshape(-1, 1, H, W).int() # (B*T, 1, H, W)
+                         
+                         v_y_pred = v_pred_labels
+                         v_y_true = v_gt_labels
+                     else:
+                         # Multi-class Logic
+                         v_pred_labels = torch.argmax(v_logits_flat, dim=1) # (B*T, H, W)
+                         
+                         # Targets: (B, 1, T, H, W) -> (B*T, H, W)
+                         v_gt_labels = v_lab.permute(0, 2, 1, 3, 4).reshape(-1, H, W).long()
                      
-                     # Targets: (B, 1, T, H, W) -> (B*T, H, W)
-                     v_gt_labels = v_lab.permute(0, 2, 1, 3, 4).reshape(-1, H, W).long()
-                     
+                         v_y_pred = F.one_hot(v_pred_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
+                         v_y_true = self._safe_one_hot_nchw(v_gt_labels, num_classes=self.num_classes)
+
                      if 'dice' in self.metrics:
+                         # For DiceMetric: if include_background=True/False is set in init.
+                         # If binary (num_class=1), inputs are (B, 1, H, W).
+                         
                          if frame_mask is not None:
                              fm_flat = frame_mask.to(self.device).view(-1)
                              valid_idx = torch.nonzero(fm_flat).squeeze()
                              
                              if valid_idx.numel() > 0:
-                                 # Filter FIRST to avoid invalid labels in unlabeled frames causing CUDA asserts in one_hot
-                                 v_pred_valid = v_pred_labels[valid_idx]
-                                 v_gt_valid = v_gt_labels[valid_idx]
+                                 # Filter
+                                 v_y_pred_valid = v_y_pred[valid_idx]
+                                 v_y_true_valid = v_y_true[valid_idx]
                                  
-                                 v_y_pred = F.one_hot(v_pred_valid, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
-                                 v_y_true = F.one_hot(v_gt_valid, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
-                                 
-                                 self.metrics['dice'](v_y_pred, v_y_true)
+                                 self.metrics['dice'](v_y_pred_valid, v_y_true_valid)
                          else:
-                             v_y_pred = F.one_hot(v_pred_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
-                             v_y_true = F.one_hot(v_gt_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
-                             
                              self.metrics['dice'](v_y_pred, v_y_true)
 
                 else:
@@ -500,18 +558,45 @@ class Trainer:
                     v_lab = vb["label"].to(self.device)
 
                     v_logits, _, _ = self.model(v_img)
-                    v_pred_labels = torch.argmax(v_logits, dim=1)
-
-                    if v_lab.ndim == 4 and v_lab.shape[1] == 1:
-                        v_gt_labels = v_lab[:, 0].long()
+                    
+                    if self.num_classes == 1:
+                        # Binary Segmentation Fix
+                        # v_logits: (B, 1, H, W)
+                        # Apply Sigmoid -> Threshold
+                        v_probs = torch.sigmoid(v_logits)
+                        v_pred_list = [self.post_pred(i) for i in v_probs]
+                        
+                        # Targets: (B, 1, H, W)
+                        if v_lab.ndim == 4 and v_lab.shape[1] == 1:
+                            pass
+                        elif v_lab.ndim == 3:
+                            v_lab = v_lab.unsqueeze(1)
+                        else:
+                             # Try to adapt
+                             if v_lab.shape[1] != 1:
+                                  # Maybe (B, H, W)?
+                                  pass
+                             
+                        # v_lab is expected to be 0s and 1s
+                        v_true_list = [i for i in v_lab]
+                        
+                        if 'dice' in self.metrics:
+                             self.metrics['dice'](y_pred=v_pred_list, y=v_true_list)
                     else:
-                        raise RuntimeError(f"Unexpected val GT shape {v_lab.shape}")
-
-                    v_y_pred = F.one_hot(v_pred_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
-                    v_y_true = F.one_hot(v_gt_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
-
-                    if 'dice' in self.metrics:
-                        self.metrics['dice'](v_y_pred, v_y_true)
+                        # Multi-class
+                        v_pred_labels = torch.argmax(v_logits, dim=1)
+    
+                        if v_lab.ndim == 4 and v_lab.shape[1] == 1:
+                            v_gt_labels = v_lab[:, 0].long()
+                        else:
+                            raise RuntimeError(f"Unexpected val GT shape {v_lab.shape}")
+    
+                        v_y_pred = F.one_hot(v_pred_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
+                        # Use the safe one hot here too for consistency, or standard if guaranteed valid
+                        v_y_true = self._safe_one_hot_nchw(v_gt_labels, num_classes=self.num_classes)
+    
+                        if 'dice' in self.metrics:
+                            self.metrics['dice'](v_y_pred, v_y_true)
         
         if self.is_regression or self.is_dual_stream:
             mae = float(self.metrics['mae'].aggregate().cpu()) if 'mae' in self.metrics else 0.0
@@ -583,15 +668,27 @@ class Trainer:
                     cases, views, phases = batch["case"], batch["view"], batch["phase"]
 
                     logits, _, _ = self.model(imgs)
-                    pred_labels = torch.argmax(logits, dim=1)
-
-                    if gts.ndim == 4 and gts.shape[1] == 1:
-                        gt_labels = gts[:, 0].long()
+                    if self.num_classes == 1:
+                        # Binary
+                        v_pred_labels = (torch.sigmoid(logits) > 0.5).int() # (B, 1, H, W)
+                        if gts.ndim == 4 and gts.shape[1] == 1:
+                            v_gt_labels = gts.int()
+                        else:
+                            v_gt_labels = gts.unsqueeze(1).int() # Assume (B, H, W) -> (B, 1, H, W)
+                            
+                        y_pred_all = v_pred_labels.float()
+                        y_true_all = v_gt_labels.float()
                     else:
-                        gt_labels = gts.long()
+                        # Multi-class
+                        pred_labels = torch.argmax(logits, dim=1)
 
-                    y_pred_all = F.one_hot(pred_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
-                    y_true_all = F.one_hot(gt_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
+                        if gts.ndim == 4 and gts.shape[1] == 1:
+                            gt_labels = gts[:, 0].long()
+                        else:
+                            gt_labels = gts.long()
+
+                        y_pred_all = F.one_hot(pred_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
+                        y_true_all = self._safe_one_hot_nchw(gt_labels, num_classes=self.num_classes)
 
                     for i in range(len(imgs)):
                         y_p, y_t = y_pred_all[i:i+1], y_true_all[i:i+1]
