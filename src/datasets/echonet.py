@@ -135,18 +135,22 @@ class EchoNetDataset(Dataset):
             np.ndarray: Binary mask with the polygon filled.
         """
         mask = np.zeros((height, width), dtype=np.uint8)
-        
+    
+        # Drop the first row (the longitudinal axis)
+        points = points.iloc[1:] 
+
         x1 = points["X1"].values
         y1 = points["Y1"].values
         x2 = points["X2"].values
         y2 = points["Y2"].values
         
+        # Traverse down X1/Y1, then UP X2/Y2
         xs = np.concatenate([x1, x2[::-1]])
         ys = np.concatenate([y1, y2[::-1]])
         
         pts = np.stack([xs, ys], axis=1).astype(np.int32)
         cv2.fillPoly(mask, [pts], 1)
-        
+
         return mask
 
     def __getitem__(self, idx, _retry_count=0):

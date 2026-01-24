@@ -177,6 +177,7 @@ class SafeTTAEngine:
 
     def run_calibration(self, val_loader, device):
         """Runs the offline calibration for both Auditor and Conformal Calibrator."""
+        print(f"DEBUG: Engine run_calibration called. Val Len: {len(val_loader)}")
         logger.info("Running Safe-TTA Calibration Phase...")
         self.auditor.calibrate(val_loader, self.model, device)
         self.calibrator.calibrate(val_loader, self.model, device)
@@ -197,7 +198,23 @@ class SafeTTAEngine:
             try:
                 out = self.model(x_t, return_features=True)
                 if isinstance(out, tuple):
-                    logits, features = out
+                    if len(out) == 3:
+                         val1 = out[0]
+                         val2 = out[1]
+                         features = out[2]
+                         
+                         if val1.ndim >= 4: 
+                             # (seg, ef) -> Swap for AuditCalibrator (expects ef, seg)
+                             logits = (val2, val1)
+                         else:
+                             # (ef, seg) -> Keep
+                             logits = (val1, val2)
+                             
+                    elif len(out) == 2:
+                         logits, features = out
+                    else:
+                         logits = out[0]
+                         features = out[-1]
                 else:
                     logits = out
                     features = getattr(self.model, 'features', None)
@@ -234,6 +251,8 @@ class SafeTTAEngine:
                 # Get latest audit score and epsilon
                 audit_score = self.auditor.scores[-1] if self.auditor.scores else None
                 audit_epsilon = self.auditor.epsilon
+                
+                print(f"DEBUG: Engine Predict - AuditScore={audit_score}, Epsilon={audit_epsilon}")
 
                 final_output, q_used = self.calibrator.predict(logits, 
                                                                martingale_stable=True,
@@ -254,30 +273,42 @@ class SafeTTAEngine:
             # Re-forward for gradients
             out_train = self.model(x_t)
             
-            # Adaptation Loss Strategy:
-            # If hybrid (ef, seg), which one to minimize entropy on?
-            # R2Plus1D TTA usually adapts on Segmentation entropy as it's dense.
-            
             loss = 0.0
             if isinstance(out_train, tuple):
-                # Hybrid: Sum entropies? or just Seg?
-                # Let's try minimizing Seg entropy (index 1) as it provides more signal (pixels)
-                # EF (index 0) is single scalar, less gradient?
-                # For safety, let's do both weighted? Or just Seg.
+                logits_seg = None
+                logits_ef = None
                 
-                # Logits train extraction
-                logits_ef = out_train[0]
-                logits_seg = out_train[1]
+                for item in out_train:
+                    if isinstance(item, torch.Tensor):
+                        if item.ndim >= 4:
+                            logits_seg = item
+                        elif item.ndim == 2:
+                            logits_ef = item
+                
+                # Fallback if identification failed but tuple exists (legacy R2Plus1D assumption)
+                if logits_seg is None and logits_ef is None:
+                     logits_ef = out_train[0]
+                     logits_seg = out_train[1]
                 
                 # 1. EF Entropy
-                p_ef = logits_ef
-                ent_ef = -torch.sum(p_ef * torch.log(p_ef + 1e-10) + (1-p_ef) * torch.log(1-p_ef + 1e-10), dim=1).mean()
-                
+                if logits_ef is not None:
+                    p_ef = logits_ef
+                    if p_ef.shape[1] == 1:
+                        p = torch.sigmoid(p_ef)
+                        ent_ef = -(p * torch.log(p + 1e-10) + (1-p) * torch.log(1-p + 1e-10)).mean()
+                        loss += ent_ef
+
                 # 2. Seg Entropy
-                probs_seg = F.softmax(logits_seg, dim=1)
-                ent_seg = -torch.sum(probs_seg * torch.log(probs_seg + 1e-10), dim=1).mean()
-                
-                loss = ent_ef + ent_seg
+                if logits_seg is not None:
+                    probs_seg = F.softmax(logits_seg, dim=1) if logits_seg.shape[1] > 1 else torch.sigmoid(logits_seg)
+                    if logits_seg.shape[1] > 1:
+                         ent_seg = -torch.sum(probs_seg * torch.log(probs_seg + 1e-10), dim=1).mean()
+                    else:
+                         # Binary Seg
+                         p = probs_seg
+                         ent_seg = -(p * torch.log(p + 1e-10) + (1-p) * torch.log(1-p + 1e-10)).mean()
+                    
+                    loss += ent_seg
             else:
                 logits_train = out_train
                 # Handle Binary Case (B, 1) - explicit entropy calculation

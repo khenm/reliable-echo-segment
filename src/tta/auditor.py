@@ -129,7 +129,16 @@ class SelfAuditor:
                 try:
                     out = model(inputs, return_features=True)
                     if isinstance(out, tuple):
-                        logits, features = out
+                        # Handle variable return lengths
+                        if len(out) == 2:
+                            logits, features = out
+                        elif len(out) == 3:
+                            # Assuming (logits, ef/aux, features)
+                            logits, _, features = out
+                        else:
+                            # Fallback: assume first is logits, last is features
+                            logits = out[0]
+                            features = out[-1]
                     else:
                         logits = out
                         features = getattr(model, 'features', None)
@@ -139,10 +148,21 @@ class SelfAuditor:
                      logits = model(inputs)
                      raise ValueError("SelfAuditor requires model to support feature extraction via return_features=True or similar mechanism.")
 
-                # 1. Collect Features for Drift
+                # 1. Handle Feature Shape (B, D, T) -> (B*T, D)
+                if features.ndim == 3:
+                     # (B, D, T) -> (B, T, D) -> (B*T, D)
+                     features = features.permute(0, 2, 1).reshape(-1, features.shape[1])
+                
+                # 2. Handle Logits Shape (B, C, T, H, W) -> (B*T, C, H, W)
+                if logits.ndim == 5:
+                     # (B, C, T, H, W) -> (B, T, C, H, W) -> (B*T, C, H, W)
+                     B, C, T, H, W = logits.shape
+                     logits = logits.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
+
+                # 3. Collect Features
                 features_list.append(features.cpu())
                 
-                # 2. Collect Entropy
+                # 4. Collect Entropy
                 entropy, max_e = self._compute_entropy(logits)
                 entropies_list.append(entropy.cpu())
                 max_ent_sample = max_e
@@ -213,13 +233,47 @@ class SelfAuditor:
             logits_seq = [logits[:, :, t, :, :] for t in range(T)]
             is_temporal = True
             
-            # Features: (B, D) usually. If (B, D, T), unpack.
+            # Features: (B, D, T) usually. If (B, D, T), unpack.
             if isinstance(features, torch.Tensor):
                 if features.ndim == 3: # (B, D, T)
-                    features_seq = [features[:, :, t] for t in range(T)]
+                     features_seq = [features[:, :, t] for t in range(T)]
                 else:
-                    # Repeat global features for each frame
-                    features_seq = [features] * T
+                     features_seq = [features] * T
+
+        elif isinstance(logits, tuple) and len(logits) == 2:
+             # Hybrid Tuple: (EF_Head, Seg_Logits)
+             ef_head, seg_head = logits
+             
+             # Calculate Geometric EF
+             geom_ef, _, _ = self._compute_geometric_ef(seg_head)
+             head_ef = ef_head.item() if ef_head.numel() == 1 else ef_head.mean().item()
+             
+             # Store for trace
+             if 'ef_head' not in self.current_trace: self.current_trace['ef_head'] = []
+             if 'ef_geom' not in self.current_trace: self.current_trace['ef_geom'] = []
+             self.current_trace['ef_head'].append(head_ef)
+             self.current_trace['ef_geom'].append(geom_ef)
+             
+             # Disagreement Check
+             disagreement = abs(head_ef - geom_ef)
+             
+             if disagreement > 0.15: # 15% threshold
+                 logger.warning(f"Auditor: Geometric Breakdown! Head={head_ef:.2f}, Geom={geom_ef:.2f}, Diff={disagreement:.2f}")
+                 self.martingale *= 2.0 # Penalty
+                 
+             # Use Seg Head for entropy
+             logits = seg_head
+             
+             if seg_head.ndim == 5:
+                 T = seg_head.shape[2]
+                 logits_seq = [seg_head[:, :, t, :, :] for t in range(T)]
+                 is_temporal = True
+             
+             if isinstance(features, torch.Tensor):
+                 if features.ndim == 3:
+                     features_seq = [features[:, :, t] for t in range(T)]
+                 else:
+                     features_seq = [features] * T
 
         # Store history for this update call
         self.current_trace = {'martingale': [], 'p_value': []}
@@ -277,5 +331,34 @@ class SelfAuditor:
         self.martingale = 1.0
         self.collapsed = False
         self.p_value = 0.5
-        self.current_trace = {'martingale': [], 'p_value': []}
+        self.current_trace = {'martingale': [], 'p_value': [], 'ef_head': [], 'ef_geom': []}
         logger.info("SelfAuditor: Martingale reset.")
+
+    def _compute_geometric_ef(self, seg_logits):
+        """
+        Computes EF using Simpson's Rule (Method of Disks) from segmentation logits.
+        Assumes standard Apical 4-Chamber view orientation (Apex at top/bottom).
+        Input: (T, H, W) or (1, T, H, W)
+        Returns: EF (0.0-1.0), EDV, ESV
+        """
+        if seg_logits.ndim == 4: # (1, T, H, W)
+            seg_logits = seg_logits.squeeze(0)
+            
+        prob = torch.sigmoid(seg_logits)
+        mask = (prob > 0.5).float() # (T, H, W)
+
+        diameters = mask.sum(dim=2) # (T, H) - sum over Width -> diameter per row
+        
+        # Area of disks: pi * (d/2)^2 = (pi/4) * d^2
+        disk_areas = (torch.pi / 4.0) * (diameters ** 2)
+        
+        volumes = disk_areas.sum(dim=1) # (T,) - Sum over Height -> Volume per frame
+        
+        if volumes.max() <= 1.0:
+            return 0.0, 0.0, 0.0
+            
+        edv = volumes.max()
+        esv = volumes.min()
+        
+        ef = (edv - esv) / (edv + 1e-6)
+        return ef.item(), edv.item(), esv.item()
