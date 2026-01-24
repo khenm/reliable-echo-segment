@@ -476,15 +476,23 @@ class Trainer:
                      v_gt_labels = v_lab.permute(0, 2, 1, 3, 4).reshape(-1, H, W).long()
                      
                      if 'dice' in self.metrics:
-                         v_y_pred = F.one_hot(v_pred_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float() # (B*T, C, H, W)
-                         v_y_true = F.one_hot(v_gt_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
-                         
                          if frame_mask is not None:
                              fm_flat = frame_mask.to(self.device).view(-1)
                              valid_idx = torch.nonzero(fm_flat).squeeze()
+                             
                              if valid_idx.numel() > 0:
-                                 self.metrics['dice'](v_y_pred[valid_idx], v_y_true[valid_idx])
+                                 # Filter FIRST to avoid invalid labels in unlabeled frames causing CUDA asserts in one_hot
+                                 v_pred_valid = v_pred_labels[valid_idx]
+                                 v_gt_valid = v_gt_labels[valid_idx]
+                                 
+                                 v_y_pred = F.one_hot(v_pred_valid, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
+                                 v_y_true = F.one_hot(v_gt_valid, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
+                                 
+                                 self.metrics['dice'](v_y_pred, v_y_true)
                          else:
+                             v_y_pred = F.one_hot(v_pred_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
+                             v_y_true = F.one_hot(v_gt_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
+                             
                              self.metrics['dice'](v_y_pred, v_y_true)
 
                 else:
