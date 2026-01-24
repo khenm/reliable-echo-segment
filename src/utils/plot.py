@@ -1,3 +1,4 @@
+import torch
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -213,6 +214,98 @@ def plot_metrics_summary(df, save_path=None):
         plt.savefig(save_path, bbox_inches='tight', dpi=300)
         print(f"Figure saved to {save_path}")
     return fig
+
+
+def plot_conformal_segmentation(video, core_mask, shadow_mask, target_mask=None, frame_idx=0, save_path=None):
+    """
+    Plots the Conformal Segmentation masks on top of the original image.
+    
+    Args:
+        video (torch.Tensor): Input video tensor (B, C, T, H, W) or (C, T, H, W).
+        core_mask (torch.Tensor): Highly confident mask.
+        shadow_mask (torch.Tensor): Uncertainty zone mask.
+        target_mask (torch.Tensor, optional): Ground truth mask.
+        frame_idx (int): The specific frame to visualize.
+        save_path (str, optional): Path to save the figure.
+    """
+    # 1. Extract the specific frame and convert to numpy
+    # Assuming batch size 1, select the first batch, first channel, specific frame
+    # Check if video is (B, C, T, H, W) or (C, T, H, W)
+    if video.ndim == 5:
+        base_img = video[0, 0, frame_idx].detach().cpu().numpy()
+    else:
+         base_img = video[0, frame_idx].detach().cpu().numpy()
+
+    # Core and Shadow inputs are expected to be tensors, likely (B, C, T, H, W) or similar
+    # We will handle if they are passed as full tensors
+    if core_mask.ndim == 5:
+        core = core_mask[0, 0, frame_idx].detach().cpu().numpy()
+    elif core_mask.ndim == 4:
+         core = core_mask[0, frame_idx].detach().cpu().numpy()
+    else:
+        # Fallback/Assumption
+         core = core_mask.detach().cpu().numpy()
+
+    if shadow_mask.ndim == 5:
+        shadow = shadow_mask[0, 0, frame_idx].detach().cpu().numpy()
+    elif shadow_mask.ndim == 4:
+        shadow = shadow_mask[0, frame_idx].detach().cpu().numpy()
+    else:
+        shadow = shadow_mask.detach().cpu().numpy()
+    
+    gt = None
+    if target_mask is not None:
+        if target_mask.ndim == 5:
+             gt = target_mask[0, 0, frame_idx].detach().cpu().numpy()
+        elif target_mask.ndim == 4:
+             gt = target_mask[0, frame_idx].detach().cpu().numpy()
+        else:
+             gt = target_mask.detach().cpu().numpy()
+
+    # 2. Setup the Plot
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    
+    # --- Subplot 1: Original Image ---
+    axes[0].imshow(base_img, cmap='gray')
+    axes[0].set_title("Original Echo Frame")
+    axes[0].axis('off')
+
+    # --- Subplot 2: Conformal Masks Overlay ---
+    axes[1].imshow(base_img, cmap='gray')
+    
+    # Create Green overlay for Core Mask
+    core_overlay = np.zeros((*core.shape, 4))
+    core_overlay[core == 1] = [0, 1, 0, 0.5] # RGBA: Green with 50% opacity
+    axes[1].imshow(core_overlay)
+    
+    # Create Red overlay for Shadow (Uncertainty) Mask
+    shadow_overlay = np.zeros((*shadow.shape, 4))
+    shadow_overlay[shadow == 1] = [1, 0, 0, 0.5] # RGBA: Red with 50% opacity
+    
+    axes[1].imshow(shadow_overlay)
+    
+    axes[1].set_title("Conformal Segmentation\nGreen: Confident | Red/Yellow: Uncertain")
+    axes[1].axis('off')
+
+    # --- Subplot 3: Ground Truth Comparison (Optional) ---
+    axes[2].imshow(base_img, cmap='gray')
+    if gt is not None:
+        if gt.max() > 0:
+            axes[2].contour(gt, levels=[0.5], colors='yellow', linewidths=1.5)
+        axes[2].imshow(core_overlay)
+
+        axes[2].set_title("Ground Truth (Yellow) vs Core Mask")
+    else:
+        axes[2].set_title("Ground Truth Not Available")
+    axes[2].axis('off')
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, bbox_inches='tight', dpi=300)
+        print(f"Saved: {save_path}")
+        plt.close()
+    else:
+        plt.show()
 
 def plot_clinical_bland_altman(df_ef, save_path=None):
     """
@@ -685,4 +778,48 @@ def plot_clinical_comparison(sample, save_path=None):
         plt.savefig(save_path, bbox_inches='tight', dpi=300)
         print(f"Comparison plot saved to {save_path}")
     
+    return fig
+
+def plot_martingale(martingale_values, p_values, case_name, save_path=None):
+    """
+    Plots the Martingale wealth process and P-values over time.
+    
+    Args:
+        martingale_values (list): List of Martingale values over time steps.
+        p_values (list): List of P-values over time steps.
+        case_name (str): Identifier for the case (video).
+        save_path (str): Path to save the figure.
+    """
+    setup_style()
+    steps = range(len(martingale_values))
+    
+    fig, ax1 = plt.subplots(figsize=(10, 5), dpi=300)
+    
+    # 1. Martingale (Left Axis)
+    color = 'tab:blue'
+    ax1.set_xlabel('Time Step (Frame)')
+    ax1.set_ylabel('Martingale Wealth ($M_t$)', color=color)
+    ax1.plot(steps, martingale_values, color=color, linewidth=2, label='Martingale')
+    ax1.tick_params(axis='y', labelcolor=color)
+    
+    # Add threshold line (assuming threshold around 20 for alpha=0.05, but can be higher)
+    # Just show the curve dynamics.
+    
+    # 2. P-Values (Right Axis)
+    ax2 = ax1.twinx()  # instantiate a second axes that shares the same x-axis
+    color = 'tab:orange'
+    ax2.set_ylabel('P-Values ($p_t$)', color=color)  # we already handled the x-label with ax1
+    ax2.scatter(steps, p_values, color=color, s=10, alpha=0.6, label='P-Values')
+    ax2.set_ylim(-0.05, 1.05)
+    ax2.tick_params(axis='y', labelcolor=color)
+    
+    plt.title(f"Safe-TTA Dynamics: {case_name}")
+    fig.tight_layout()  # otherwise the right y-label is slightly clipped
+    
+    if save_path:
+        plt.savefig(save_path, bbox_inches='tight')
+        print(f"Martingale plot saved to {save_path}")
+        plt.close()
+    else:
+        plt.show()
     return fig

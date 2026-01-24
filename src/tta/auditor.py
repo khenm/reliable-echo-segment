@@ -25,10 +25,12 @@ class SelfAuditor:
         self.martingale = 1.0  # Initial wealth
         self.t = 0
         self.collapsed = False
+        self.p_value = 0.5 # Default neutral p-value
         
         # Calibration Statistics (Populated in Step 1)
         self.mu_source = None  # Mean embedding of source
         self.epsilon = None    # Expected score on validation set
+        self.calibration_scores = [] # Store all calibration scores for p-value calc
         
         # Buffer for running stats (optional, for debugging)
         self.scores = []
@@ -171,6 +173,9 @@ class SelfAuditor:
         # Composite Scores
         scores = self.alpha * norm_entropies + (1 - self.alpha) * drift_scores
         
+        # Store for P-Value Calculation
+        self.calibration_scores = scores.numpy().tolist()
+        
         # Set Epsilon
         self.epsilon = scores.mean().item()
         
@@ -183,47 +188,87 @@ class SelfAuditor:
         """
         Step 2 & 3: Calculate Score and Update Martingale
         Args:
-            logits: Current batch logits
-            features: Current batch features
+            logits: Current batch logits. Can be (1, C, T, H, W) or (B, C).
+            features: Current batch features.
         Returns:
             stop_adaptation (bool): True if model should reset/stop
         """
         if self.collapsed:
             return True
 
-        # --- 1. Calculate Entropy Component ---
-        entropy, max_ent = self._compute_entropy(logits)
-        norm_entropy = entropy / max_ent
+        # Handle Temporal Dimension for Video (T > 1)
+        # Assuming batch size 1 for TTA usually.
+        # If logits is (1, C, T, H, W)
+        
+        logits_seq = [logits]
+        features_seq = [features]
+        
+        is_temporal = False
+        
+        # Unpack if temporal video
+        if isinstance(logits, torch.Tensor) and logits.ndim == 5:
+            # (B, C, T, H, W) -> Unpack T frames
+            # Assume B=1
+            T = logits.shape[2]
+            logits_seq = [logits[:, :, t, :, :] for t in range(T)]
+            is_temporal = True
+            
+            # Features: (B, D) usually. If (B, D, T), unpack.
+            if isinstance(features, torch.Tensor):
+                if features.ndim == 3: # (B, D, T)
+                    features_seq = [features[:, :, t] for t in range(T)]
+                else:
+                    # Repeat global features for each frame
+                    features_seq = [features] * T
 
-        # --- 2. Calculate Drift Component ---
-        # Normalize features
-        feat_norm = F.normalize(features, dim=1)
-        # Cosine distance to source mean
-        drift = 1 - torch.matmul(feat_norm, self.mu_source)
-        
-        # --- 3. Composite Score (s_t) ---
-        # Average over the batch to get a single scalar signal for the time step t
-        batch_score_t = self.alpha * norm_entropy.mean() + (1 - self.alpha) * drift.mean()
-        
-        # --- 4. Martingale Update (The Betting) ---
-        # M_t = M_{t-1} * (1 + lambda * (s_t - epsilon))
-        
-        score_val = batch_score_t.item()
-        self.scores.append(score_val)
-        
-        bet = 1 + self.lambda_val * (score_val - self.epsilon)
-        
-        # Safety clipping: Wealth cannot be negative
-        bet = max(0, bet) 
-        
-        self.martingale *= bet
-        self.t += 1
-        
-        # --- 5. Rejection Rule ---
-        if self.martingale >= self.threshold:
-            self.collapsed = True
-            logger.warning(f"SelfAuditor: Collapse detected at step {self.t}! Martingale={self.martingale:.2f}")
-            return True
+        # Store history for this update call
+        self.current_trace = {'martingale': [], 'p_value': []}
+
+        for i, (log_t, feat_t) in enumerate(zip(logits_seq, features_seq)):
+            # --- 1. Calculate Entropy Component ---
+            entropy, max_ent = self._compute_entropy(log_t)
+            norm_entropy = entropy / max_ent
+    
+            # --- 2. Calculate Drift Component ---
+            # Normalize features
+            feat_norm = F.normalize(feat_t, dim=1)
+            # Cosine distance to source mean
+            drift = 1 - torch.matmul(feat_norm, self.mu_source)
+            
+            # --- 3. Composite Score (s_t) ---
+            # Average over the batch (B=1 usually)
+            batch_score_t = self.alpha * norm_entropy.mean() + (1 - self.alpha) * drift.mean()
+            
+            # --- 4. Martingale Update (The Betting) ---
+            # M_t = M_{t-1} * (1 + lambda * (s_t - epsilon))
+            
+            score_val = batch_score_t.item()
+            self.scores.append(score_val)
+            
+            # Compute P-Value
+            if self.calibration_scores:
+                cal_scores = np.array(self.calibration_scores)
+                p_val = (np.sum(cal_scores >= score_val) + 1) / (len(cal_scores) + 1)
+                self.p_value = p_val
+            else:
+                self.p_value = 0.5
+            
+            bet = 1 + self.lambda_val * (score_val - self.epsilon)
+            
+            # Safety clipping: Wealth cannot be negative
+            bet = max(0, bet) 
+            
+            self.martingale *= bet
+            self.t += 1
+            
+            self.current_trace['martingale'].append(self.martingale)
+            self.current_trace['p_value'].append(self.p_value)
+            
+            # --- 5. Rejection Rule ---
+            if self.martingale >= self.threshold:
+                self.collapsed = True
+                logger.warning(f"SelfAuditor: Collapse detected at step {self.t} (Frame {i})! Martingale={self.martingale:.2f}")
+                return True
             
         return False
 
@@ -231,4 +276,6 @@ class SelfAuditor:
         """Resets the martingale (e.g. after a recovery intervention)"""
         self.martingale = 1.0
         self.collapsed = False
+        self.p_value = 0.5
+        self.current_trace = {'martingale': [], 'p_value': []}
         logger.info("SelfAuditor: Martingale reset.")

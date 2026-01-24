@@ -20,7 +20,9 @@ from src.utils.plot import (
     plot_clinical_bland_altman, 
     plot_reliability_curves, 
     plot_ef_category_roc,
-    plot_clinical_comparison
+    plot_clinical_comparison,
+    plot_conformal_segmentation,
+    plot_martingale
 )
 from src.analysis.latent_profile import LatentProfiler
 from src.tta.engine import TTA_Engine, SafeTTAEngine
@@ -518,10 +520,13 @@ def run_safe_tta(cfg, device):
     
     # 2. Calibration Phase (Offline)
     safe_engine.run_calibration(ld_val, device)
-    
+
     # 3. Test Phase (Online)
     results = []
     logger.info(f"Running Safe-TTA on {len(ld_ts)} videos...")
+    
+    plots_dir = os.path.join(cfg['training']['run_dir'], "safe_tta_plots")
+    os.makedirs(plots_dir, exist_ok=True)
     
     for batch in tqdm(ld_ts, desc="Safe-TTA Inference"):
         safe_engine.reset()
@@ -530,7 +535,23 @@ def run_safe_tta(cfg, device):
         target = batch["target"].to(device)
         case = batch["case"][0] 
         
-        output, q_used, collapsed = safe_engine.predict_step(video)
+        output, q_used, collapsed, audit_stats = safe_engine.predict_step(video)
+        
+        # Plot Martingale Dynamics
+        if isinstance(audit_stats, dict) and 'martingale' in audit_stats:
+            m_vals = audit_stats['martingale']
+            p_vals = audit_stats.get('p_value', [0.5]*len(m_vals))
+            
+            # Ensure they are lists
+            if not isinstance(m_vals, list): m_vals = [m_vals]
+            if not isinstance(p_vals, list): p_vals = [p_vals]
+            
+            plot_martingale(
+                m_vals, 
+                p_vals, 
+                case_name=str(case),
+                save_path=os.path.join(plots_dir, f"martingale_{case}.png")
+            )
         
         # Handle Output Type
         if collapsed:
@@ -555,7 +576,33 @@ def run_safe_tta(cfg, device):
                 "Q_Val": q_used,
                 "Status": "OK"
             })
-            # Segmentation mask saving logic could go here if needed
+            
+            # Segmentation Visualization
+            seg_res = output.get('segmentation')
+            if seg_res is not None:
+                core_mask, shadow_mask = seg_res
+                
+                # Plot the middle frame
+                T_dim = 2 if video.ndim == 5 else 1
+                mid_frame = video.shape[T_dim] // 2 
+                
+                # Ensure case is a string (it might be a tensor if not handled carefully, but usually list of strings)
+                case_str = str(case)
+                
+                save_name = os.path.join(cfg['training']['run_dir'], f"conformal_seg_{case_str}_f{mid_frame}.png")
+                
+                # Use 'label' for GT mask if available (distinct from 'target' which is EF)
+                gt_mask = batch.get("label")
+                if gt_mask is not None: gt_mask = gt_mask.to(device)
+
+                plot_conformal_segmentation(
+                    video=video, 
+                    core_mask=core_mask, 
+                    shadow_mask=shadow_mask, 
+                    target_mask=gt_mask,
+                    frame_idx=mid_frame,
+                    save_path=save_name
+                )
             
         elif isinstance(output, tuple):
              # Segmentation (Core, Shadow)

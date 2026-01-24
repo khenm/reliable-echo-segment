@@ -42,13 +42,15 @@ class BaseConformalCalibrator(ABC):
         pass
 
     @abstractmethod
-    def predict(self, logits: torch.Tensor, martingale_stable: bool = True) -> Tuple[Any, float]:
+    def predict(self, logits: torch.Tensor, martingale_stable: bool = True, audit_score: Optional[float] = None, audit_epsilon: Optional[float] = None) -> Tuple[Any, float]:
         """
         Phase 4b: Online Prediction with ACI.
         
         Args:
             logits (torch.Tensor): Prediction logits.
             martingale_stable (bool): Flag from Auditor. If False, freeze adaptation/ACI.
+            audit_score (float, optional): Current risk score from SelfAuditor.
+            audit_epsilon (float, optional): Expected risk threshold.
         
         Returns:
             prediction (Any): Conformal prediction (Sets, Interval, or Mask).
@@ -67,8 +69,10 @@ class BaseConformalCalibrator(ABC):
 
     def _update_alpha(self, error_rate: float):
         """Standard ACI update rule."""
-        # Update Rule: alpha_{t+1} = alpha_t + gamma * (err - target_alpha)
-        self.current_alpha = self.current_alpha + self.gamma * (error_rate - self.target_alpha)
+        # Update Rule: alpha_{t+1} = alpha_t - gamma * (err - target_alpha)
+        # We subtract because if err > target, we are under-covering, so we need wider intervals.
+        # Wider intervals correspond to higher quantile (1-alpha), which means smaller alpha.
+        self.current_alpha = self.current_alpha - self.gamma * (error_rate - self.target_alpha)
         
         # Clip alpha to sensible range [0.001, 1.0]
         self.current_alpha = np.clip(self.current_alpha, 0.001, 0.999)
@@ -140,7 +144,7 @@ class ClassificationCalibrator(BaseConformalCalibrator):
         self.q_hat = np.quantile(self.cal_scores, q_level, method='higher')
         logger.info(f"Calibration Complete. N={n}, Initial Quantile (q_hat): {self.q_hat:.4f}")
 
-    def predict(self, logits: torch.Tensor, martingale_stable: bool = True) -> Tuple[List[List[int]], float]:
+    def predict(self, logits: torch.Tensor, martingale_stable: bool = True, audit_score: Optional[float] = None, audit_epsilon: Optional[float] = None) -> Tuple[List[List[int]], float]:
         """
         Returns:
             prediction_sets (List[List[int]]): List of class indices for each sample.
@@ -184,8 +188,8 @@ class ClassificationCalibrator(BaseConformalCalibrator):
         return prediction_sets, current_q
     
     # Alias for backward compatibility (if called directly)
-    def predict_interval(self, logits, martingale_stable=True):
-        return self.predict(logits, martingale_stable)
+    def predict_interval(self, logits, martingale_stable=True, audit_score=None, audit_epsilon=None):
+        return self.predict(logits, martingale_stable, audit_score, audit_epsilon)
 
 
 @register_tta_component("regression_calibrator")
@@ -245,7 +249,7 @@ class RegressionCalibrator(BaseConformalCalibrator):
         self.q_hat = np.quantile(self.cal_scores, q_level)
         logger.info(f"Calibration Complete. Margin (q_hat): +/- {self.q_hat:.4f}")
 
-    def predict(self, logits: torch.Tensor, martingale_stable: bool = True) -> Tuple[List[Tuple[float, float]], float]:
+    def predict(self, logits: torch.Tensor, martingale_stable: bool = True, audit_score: Optional[float] = None, audit_epsilon: Optional[float] = None) -> Tuple[List[Tuple[float, float]], float]:
         """Returns [lower_bound, upper_bound] for EF."""
         preds = logits.detach().cpu().numpy().squeeze()
         if preds.ndim == 0: preds = np.array([preds]) # Handle batch size 1 scalar
@@ -254,17 +258,25 @@ class RegressionCalibrator(BaseConformalCalibrator):
         if self.q_hat is None:
             current_q = 0.5 # Fallback
         else:
-            current_q = self.q_hat 
+            # Use dynamic quantile based on ACI alpha
+            current_q = self.quantile_from_alpha(self.current_alpha) 
         
         # Create Intervals
         lower_bounds = np.maximum(0.0, preds - current_q)
         upper_bounds = np.minimum(1.0, preds + current_q) # Assuming normalized target
         
         prediction_intervals = list(zip(lower_bounds, upper_bounds))
+
+        # 3. ACI Update via Auditor Proxy
+        if martingale_stable and audit_score is not None and audit_epsilon is not None:
+            # Using a binary proxy for robustness
+            proxy_error = 1.0 if audit_score > audit_epsilon else 0.0
+            self._update_alpha(proxy_error)
+
         return prediction_intervals, current_q
 
-    def predict_interval(self, logits, martingale_stable=True):
-        return self.predict(logits, martingale_stable)
+    def predict_interval(self, logits, martingale_stable=True, audit_score=None, audit_epsilon=None):
+        return self.predict(logits, martingale_stable, audit_score, audit_epsilon)
 
 
 @register_tta_component("segmentation_calibrator")
@@ -285,8 +297,8 @@ class SegmentationCalibrator(BaseConformalCalibrator):
         scores_list = []
         
         # Limit calibration samples to avoid OOM for segmentation
-        max_samples = 100 
-        curr_samples = 0
+        # max_samples = 100 
+        # curr_samples = 0
         
         with torch.no_grad():
             for batch in valid_loader:
@@ -301,7 +313,7 @@ class SegmentationCalibrator(BaseConformalCalibrator):
                 
                 # 2. Filter out UNLABELED frames using the frame_mask
                 # Flatten the batch and time dimensions: (B*T, 1, H, W)
-                B, C, T, H, W = probs.shape
+                _, C, _, H, W = probs.shape
                 probs_flat = probs.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
                 targets_flat = targets.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
                 frame_mask_flat = frame_mask.view(-1)
@@ -328,7 +340,7 @@ class SegmentationCalibrator(BaseConformalCalibrator):
                     
                 scores_list.append(flat_scores.cpu().numpy())
 
-    def predict(self, logits: torch.Tensor, martingale_stable: bool = True) -> Tuple[Tuple[torch.Tensor, torch.Tensor], float]:
+    def predict(self, logits: torch.Tensor, martingale_stable: bool = True, audit_score: Optional[float] = None, audit_epsilon: Optional[float] = None) -> Tuple[Tuple[torch.Tensor, torch.Tensor], float]:
         """
         Returns:
             (core_mask, shadow_mask): Tensors
@@ -336,10 +348,18 @@ class SegmentationCalibrator(BaseConformalCalibrator):
         """
         probs = torch.sigmoid(logits) # (B, C, H, W)
         
-        if self.q_hat is None:
-             current_q = 0.1 # default
+        # 1. Determine Threshold (Dynamic Feedback Loop)
+        base_q = self.q_hat if self.q_hat is not None else 0.1
+        
+        sensitivity = 0.05
+        if martingale_stable and audit_score is not None:
+            # Dynamic relaxation
+            current_q = base_q * (1.0 + sensitivity * np.log1p(audit_score))
         else:
-             current_q = self.q_hat
+            current_q = 0.99
+
+        # Safety Cap
+        current_q = min(current_q, 0.99)
         
         upper_thresh = 1.0 - current_q
         lower_thresh = current_q
@@ -349,8 +369,8 @@ class SegmentationCalibrator(BaseConformalCalibrator):
         
         return (core_mask, shadow_mask), current_q
 
-    def predict_mask(self, logits, martingale_stable=True):
-        return self.predict(logits, martingale_stable)
+    def predict_mask(self, logits, martingale_stable=True, audit_score=None, audit_epsilon=None):
+        return self.predict(logits, martingale_stable, audit_score, audit_epsilon)
 
 # Alias for backward compatibility
 ConformalCalibrator = ClassificationCalibrator
@@ -388,7 +408,7 @@ class AuditCalibrator(BaseConformalCalibrator):
             
             cal.calibrate(valid_loader, shim_model, device)
             
-    def predict(self, logits: Any, martingale_stable: bool = True) -> Tuple[Dict[str, Any], float]:
+    def predict(self, logits: Any, martingale_stable: bool = True, audit_score: Optional[float] = None, audit_epsilon: Optional[float] = None) -> Tuple[Dict[str, Any], float]:
         """
         Args:
             logits: Tuple (ef_pred, seg_pred)
@@ -401,17 +421,16 @@ class AuditCalibrator(BaseConformalCalibrator):
             raise ValueError("AuditCalibrator expects tuple/list logits.")
             
         # Hardcoded for now based on R2Plus1D dual output: (ef, seg)
-        # TODO: Make this more flexible if needed
         
         q_vals = []
         
         if 'regression' in self.calibrators:
-            res, q = self.calibrators['regression'].predict(logits[0], martingale_stable)
+            res, q = self.calibrators['regression'].predict(logits[0], martingale_stable, audit_score, audit_epsilon)
             results['regression'] = res
             q_vals.append(q)
             
         if 'segmentation' in self.calibrators:
-            res, q = self.calibrators['segmentation'].predict(logits[1], martingale_stable)
+            res, q = self.calibrators['segmentation'].predict(logits[1], martingale_stable, audit_score, audit_epsilon)
             results['segmentation'] = res
             q_vals.append(q)
             
