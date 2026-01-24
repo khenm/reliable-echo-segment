@@ -12,7 +12,8 @@ from src.utils.util_ import seed_everything, get_device, load_checkpoint
 from src.registry import get_dataloaders, build_model
 from src.trainer import Trainer
 from src.utils.logging import get_logger
-from src.losses import KLLoss, DifferentiableEFLoss
+from src.losses import KLLoss, DifferentiableEFLoss, ConsistencyLoss
+from src.models.temporal import TemporalConsistencyLoss
 from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric, MAEMetric
 from src.utils.plot import (
@@ -285,6 +286,24 @@ def run_train(cfg, device):
         criterions['seg'] = DiceCELoss(sigmoid=True, 
                                        lambda_dice=weights.get('dice', 0.7), 
                                        lambda_ce=weights.get('ce', 0.3))
+    elif model_name in ["UNet_2D", "unet_tcm"]:
+        # Hybrid Setup for UNet_2D
+        losses_cfg = cfg.get('losses', {})
+        if losses_cfg.get('consistency', {}).get('enable'):
+            criterions['consistency'] = ConsistencyLoss(
+                pixel_spacing=losses_cfg['consistency'].get('pixel_spacing', 0.3),
+                step_size=losses_cfg['consistency'].get('step_size', 0.3)
+            )
+        
+        if losses_cfg.get('temporal', {}).get('enable'):
+             criterions['temporal'] = TemporalConsistencyLoss()
+             
+        # Add Standard Segmentation Loss
+        # Weights logic might need adjustment, taking explicit seg weight or default
+        criterions['seg'] = DiceCELoss(to_onehot_y=True, softmax=True)
+        # Add EF Loss (direct regression) if using EF head
+        criterions['ef_reg'] = torch.nn.MSELoss() # For ef_head output vs target EF
+        
     else:
         criterions['dice'] = DiceCELoss(to_onehot_y=True, softmax=True)
         kl_weight = weights.get('kl', 1e-4)

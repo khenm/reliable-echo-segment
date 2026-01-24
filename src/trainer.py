@@ -11,6 +11,7 @@ from monai.metrics import DiceMetric, HausdorffDistanceMetric, MAEMetric
 from tqdm import tqdm
 from src.utils.logging import get_logger
 from src.utils.util_ import load_checkpoint_dict, save_checkpoint, load_full_checkpoint
+from src.models.temporal import TemporalGate
 
 logger = get_logger()
 
@@ -47,6 +48,17 @@ class Trainer:
         
         self.model_name = cfg['model'].get('name', 'VAEUNet')
         self.is_regression = (self.model_name.lower() == "r2plus1d")
+        self.is_unet_2d = (self.model_name in ["unet_tcm"])
+        
+        # Initialize Temporal Gate if enabled
+        if self.cfg.get('losses', {}).get('temporal', {}).get('enable'):
+            tc_cfg = self.cfg['losses']['temporal']
+            self.temporal_gate = TemporalGate(
+                threshold=tc_cfg.get('gate_threshold', 0.7),
+                scale=tc_cfg.get('gate_scale', 10.0)
+            ).to(device)
+        else:
+            self.temporal_gate = None
             
         self.opt = torch.optim.AdamW(model.parameters(), 
                                      lr=cfg['training']['lr'], 
@@ -97,7 +109,7 @@ class Trainer:
                 loss = 0.0
                 loss_dict = {}
 
-                if self.is_regression:
+                if self.is_regression or self.is_unet_2d:
                     # Generic handling for Video Dataset (returns 'video', 'target', 'label')
                     imgs = batch.get("video", batch.get("image")).to(self.device)
                     targets = batch["target"].to(self.device)
@@ -110,63 +122,151 @@ class Trainer:
                     if frame_mask is not None:
                         frame_mask = frame_mask.to(self.device)
                     
+                    if mask_targets is not None:
+                        mask_targets = mask_targets.to(self.device)
+                    
+                    if frame_mask is not None:
+                        frame_mask = frame_mask.to(self.device)
+                    
                     with torch.amp.autocast(device_type=dev_type):
-                        preds, seg_logits = self.model(imgs)
-                        
-                        # Calculate losses based on keys
-                        if 'reg' in self.criterions:
-                            l_reg = self.criterions['reg'](preds.view(-1, 1), targets.view(-1, 1))
-                            loss += l_reg
-                            loss_dict['reg'] = l_reg.item()
-
-                        if 'ef' in self.criterions:
-                            # DifferentiableEFLoss expects seg logits and returns (loss, pred_ef)
-                            l_ef, _ = self.criterions['ef'](seg_logits, targets)
-                            loss += l_ef
-                            loss_dict['ef'] = l_ef.item()
-                        
-                        if 'seg' in self.criterions and mask_targets is not None:
-                             if frame_mask is not None:
-                                 # Temporal Indexing: only calc loss on labeled frames
-                                 # seg_logits: (B, 1, T, H, W) -> need to transpose to (B, T, 1, H, W) to flatten T
-                                 B, C, T, H, W = seg_logits.shape
-                                 
-                                 # Reshape to (B*T, ...)
-                                 sl_flat = seg_logits.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
-                                 mt_flat = mask_targets.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
-                                 fm_flat = frame_mask.view(-1) # (B*T)
-                                 
-                                 # Filter
-                                 valid_indices = torch.nonzero(fm_flat).squeeze()
-                                 
-                                 if valid_indices.numel() > 0:
-                                     sl_valid = sl_flat[valid_indices]
-                                     mt_valid = mt_flat[valid_indices]
-                                     l_seg = self.criterions['seg'](sl_valid, mt_valid.long())
-                                 else:
-                                     l_seg = torch.tensor(0.0, device=self.device, requires_grad=True)
-                                     
-                             else:
-                                 l_seg = self.criterions['seg'](seg_logits, mask_targets.long())
-
-                             loss += l_seg
-                             loss_dict['seg'] = l_seg.item()
-
-                        if 'semi_sup' in self.criterions and mask_targets is not None:
-                            # EchoSemiSupervisedLoss handles masking internally
-                            if frame_mask is not None:
-                                l_semi, comp_dict = self.criterions['semi_sup'](
-                                    seg_logits, 
-                                    mask_targets, 
-                                    labeled_mask=frame_mask
-                                )
-                            else:
-                                l_semi, comp_dict = self.criterions['semi_sup'](seg_logits, mask_targets)
+                        if self.is_unet_2d:
+                            # Reshape for 2D processing: (B, C, T, H, W) -> (B*T, C, H, W)
+                            B, C, T, H, W = imgs.shape
+                            imgs_flat = imgs.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
                             
-                            loss += l_semi
-                            loss_dict['semi_sup'] = l_semi.item()
-                            for k, v in comp_dict.items():
-                                loss_dict[k] = v.item()
+                            # Forward pass (2D)
+                            logits_flat, ef_flat, features_flat = self.model(imgs_flat)
+                            
+                            # Reshape back to Video structure
+                            # logits: (B*T, num_classes, H, W) -> (B, T, num_classes, H, W) -> (B, num_classes, T, H, W)
+                            num_classes = logits_flat.shape[1]
+                            seg_logits = logits_flat.view(B, T, num_classes, H, W).permute(0, 2, 1, 3, 4)
+                            
+                            # features: (B*T, D) -> (B, T, D)
+                            features = features_flat.view(B, T, -1)
+                            
+                            # EF: (B*T, 1) -> (B, T, 1) -> Mean over time for Video EF
+                            ef_seq = ef_flat.view(B, T)
+                            preds = ef_seq.mean(dim=1).unsqueeze(1) # (B, 1)
+
+                            # --- Calculate Losses for UNet_2D ---
+                            
+                            # 1. Segmentation Loss (Standard)
+                            if 'seg' in self.criterions and mask_targets is not None:
+                                # Flatten for Dice Loss as usual
+                                sl_flat = seg_logits.permute(0, 2, 1, 3, 4).reshape(-1, num_classes, H, W)
+                                mt_flat = mask_targets.permute(0, 2, 1, 3, 4).reshape(-1, 1, H, W)
+                                if frame_mask is not None:
+                                    fm_flat = frame_mask.view(-1)
+                                    valid_idx = torch.nonzero(fm_flat).squeeze()
+                                    if valid_idx.numel() > 0:
+                                        l_seg = self.criterions['seg'](sl_flat[valid_idx], mt_flat[valid_idx])
+                                    else:
+                                        l_seg = torch.tensor(0.0, device=self.device, requires_grad=True)
+                                else:
+                                    l_seg = self.criterions['seg'](seg_logits, mask_targets)
+                                    
+                                loss += l_seg
+                                loss_dict['seg'] = l_seg.item()
+
+                            # 2. EF Regression Loss (Direct)
+                            if 'ef_reg' in self.criterions:
+                                l_ef = self.criterions['ef_reg'](preds, targets.view(-1, 1))
+                                loss += l_ef
+                                loss_dict['ef'] = l_ef.item()
+
+                            # 3. Consistency Loss (Refinement Loop)
+                            if 'consistency' in self.criterions:
+                                # Input: seg_logits (B, C, T, H, W) and preds (B, 1)
+                                l_cons = self.criterions['consistency'](seg_logits, preds)
+                                loss += l_cons
+                                loss_dict['cons'] = l_cons.item()
+                                
+                            # 4. Temporal Consistency
+                            if 'temporal' in self.criterions and self.temporal_gate is not None:
+                                # Features: (B, T, D)
+                                f_t = features[:, 1:]
+                                f_prev = features[:, :-1]
+                                
+                                # Gate
+                                gate, _ = self.temporal_gate(f_t.reshape(-1, f_t.shape[-1]), f_prev.reshape(-1, f_prev.shape[-1]))
+                                gate = gate.view(B, T-1, 1)
+                                
+                                # Logits for Temporal Loss
+                                # (B, C, T, H, W) -> need (B, T, C, H, W) for slicing or just slice dim 2
+                                log_t = seg_logits[:, :, 1:]
+                                log_prev = seg_logits[:, :, :-1]
+                                
+                                l_temp = self.criterions['temporal'](log_t, log_prev, gate) # Check dims inside criterion? 
+                                # My TemporalConsistencyLoss expects (B, C, H, W).
+                                # Here inputs are (B, C, T-1, H, W).
+                                # Flatten T dimension
+                                log_t_flat = log_t.permute(0, 2, 1, 3, 4).reshape(-1, num_classes, H, W)
+                                log_prev_flat = log_prev.permute(0, 2, 1, 3, 4).reshape(-1, num_classes, H, W)
+                                gate_flat = gate.view(-1, 1)
+                                
+                                l_temp = self.criterions['temporal'](log_t_flat, log_prev_flat, gate_flat)
+                                loss += l_temp
+                                loss_dict['temp'] = l_temp.item()
+
+                        else: 
+                            # R2Plus1D
+                            preds, seg_logits = self.model(imgs)
+                        
+                            # Calculate losses based on keys
+                            if 'reg' in self.criterions:
+                                l_reg = self.criterions['reg'](preds.view(-1, 1), targets.view(-1, 1))
+                                loss += l_reg
+                                loss_dict['reg'] = l_reg.item()
+    
+                            if 'ef' in self.criterions:
+                                # DifferentiableEFLoss expects seg logits and returns (loss, pred_ef)
+                                l_ef, _ = self.criterions['ef'](seg_logits, targets)
+                                loss += l_ef
+                                loss_dict['ef'] = l_ef.item()
+                            
+                            if 'seg' in self.criterions and mask_targets is not None:
+                                 if frame_mask is not None:
+                                     # Temporal Indexing: only calc loss on labeled frames
+                                     # seg_logits: (B, 1, T, H, W) -> need to transpose to (B, T, 1, H, W) to flatten T
+                                     B, C, T, H, W = seg_logits.shape
+                                     
+                                     # Reshape to (B*T, ...)
+                                     sl_flat = seg_logits.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
+                                     mt_flat = mask_targets.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
+                                     fm_flat = frame_mask.view(-1) # (B*T)
+                                     
+                                     # Filter
+                                     valid_indices = torch.nonzero(fm_flat).squeeze()
+                                     
+                                     if valid_indices.numel() > 0:
+                                         sl_valid = sl_flat[valid_indices]
+                                         mt_valid = mt_flat[valid_indices]
+                                         l_seg = self.criterions['seg'](sl_valid, mt_valid.long())
+                                     else:
+                                         l_seg = torch.tensor(0.0, device=self.device, requires_grad=True)
+                                         
+                                 else:
+                                     l_seg = self.criterions['seg'](seg_logits, mask_targets.long())
+    
+                                 loss += l_seg
+                                 loss_dict['seg'] = l_seg.item()
+    
+                            if 'semi_sup' in self.criterions and mask_targets is not None:
+                                # EchoSemiSupervisedLoss handles masking internally
+                                if frame_mask is not None:
+                                    l_semi, comp_dict = self.criterions['semi_sup'](
+                                        seg_logits, 
+                                        mask_targets, 
+                                        labeled_mask=frame_mask
+                                    )
+                                else:
+                                    l_semi, comp_dict = self.criterions['semi_sup'](seg_logits, mask_targets)
+                                
+                                loss += l_semi
+                                loss_dict['semi_sup'] = l_semi.item()
+                                for k, v in comp_dict.items():
+                                    loss_dict[k] = v.item()
 
                 else:
                     imgs = batch["image"].to(self.device)
@@ -313,6 +413,39 @@ class Trainer:
                                     self.metrics['dice'](vl_flat[valid_indices], vt_flat[valid_indices])
                             else:
                                 self.metrics['dice'](v_pred_labels, v_mask_target)
+                elif self.is_unet_2d:
+                     # UNet_2D Validation (Video Input: B, C, T, H, W)
+                     v_img = vb.get("video", vb.get("image")).to(self.device)
+                     # Treat label as (B, 1, T, H, W)
+                     v_lab = vb["label"].to(self.device)
+                     frame_mask = vb.get("frame_mask")
+                     
+                     # Forward (Video) -> (B, num_classes, T, H, W) if reshaped manually or model does it
+                     # Currently model expects (B, C, H, W).
+                     # Reshape: (B, C, T, H, W) -> (B*T, C, H, W)
+                     B, C, T, H, W = v_img.shape
+                     v_img_flat = v_img.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
+                     
+                     v_logits_flat, _, _ = self.model(v_img_flat)
+                     # v_logits_flat: (B*T, num_classes, H, W)
+                     
+                     v_pred_labels = torch.argmax(v_logits_flat, dim=1) # (B*T, H, W)
+                     
+                     # Targets: (B, 1, T, H, W) -> (B*T, H, W)
+                     v_gt_labels = v_lab.permute(0, 2, 1, 3, 4).reshape(-1, H, W).long()
+                     
+                     if 'dice' in self.metrics:
+                         v_y_pred = F.one_hot(v_pred_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float() # (B*T, C, H, W)
+                         v_y_true = F.one_hot(v_gt_labels, num_classes=self.num_classes).permute(0, 3, 1, 2).float()
+                         
+                         if frame_mask is not None:
+                             fm_flat = frame_mask.to(self.device).view(-1)
+                             valid_idx = torch.nonzero(fm_flat).squeeze()
+                             if valid_idx.numel() > 0:
+                                 self.metrics['dice'](v_y_pred[valid_idx], v_y_true[valid_idx])
+                         else:
+                             self.metrics['dice'](v_y_pred, v_y_true)
+
                 else:
                     v_img = vb["image"].to(self.device)
                     v_lab = vb["label"].to(self.device)
