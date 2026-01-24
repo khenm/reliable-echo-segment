@@ -49,6 +49,7 @@ class Trainer:
         self.model_name = cfg['model'].get('name', 'VAEUNet')
         self.is_regression = (self.model_name.lower() == "r2plus1d")
         self.is_unet_2d = (self.model_name in ["unet_tcm"])
+        self.is_dual_stream = (self.model_name == "dual_stream")
         
         # Initialize Temporal Gate if enabled
         if self.cfg.get('losses', {}).get('temporal', {}).get('enable'):
@@ -197,7 +198,6 @@ class Trainer:
                                 log_t = seg_logits[:, :, 1:]
                                 log_prev = seg_logits[:, :, :-1]
                                 
-                                l_temp = self.criterions['temporal'](log_t, log_prev, gate) # Check dims inside criterion? 
                                 # My TemporalConsistencyLoss expects (B, C, H, W).
                                 # Here inputs are (B, C, T-1, H, W).
                                 # Flatten T dimension
@@ -208,6 +208,43 @@ class Trainer:
                                 l_temp = self.criterions['temporal'](log_t_flat, log_prev_flat, gate_flat)
                                 loss += l_temp
                                 loss_dict['temp'] = l_temp.item()
+
+                        elif self.is_dual_stream:
+                            # Dual Stream Model
+                            # Returns: ef_seq, seg_logits, ef_simpson
+                            ef_seq, seg_logits, ef_simpson = self.model(imgs)
+                            
+                            # 1. Segmentation Loss
+                            if 'seg' in self.criterions and mask_targets is not None:
+                                B, C, T, H, W = seg_logits.shape
+                                # Flatten T
+                                sl_flat = seg_logits.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
+                                mt_flat = mask_targets.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
+                                
+                                if frame_mask is not None:
+                                    fm_flat = frame_mask.view(-1)
+                                    valid_idx = torch.nonzero(fm_flat).squeeze()
+                                    if valid_idx.numel() > 0:
+                                        l_seg = self.criterions['seg'](sl_flat[valid_idx], mt_flat[valid_idx])
+                                    else:
+                                        l_seg = torch.tensor(0.0, device=self.device, requires_grad=True)
+                                else:
+                                    l_seg = self.criterions['seg'](sl_flat, mt_flat)
+                                
+                                loss += l_seg
+                                loss_dict['seg'] = l_seg.item()
+                                
+                            # 2. Main EF Loss (Sequence Stream vs GT)
+                            if 'ef' in self.criterions:
+                                l_ef = self.criterions['ef'](ef_seq, targets.view(-1, 1))
+                                loss += l_ef
+                                loss_dict['ef'] = l_ef.item()
+
+                            # 3. Simpson Consistency Loss (Seq vs Simpson)
+                            if 'simpson' in self.criterions:
+                                l_simpson = self.criterions['simpson'](ef_seq, ef_simpson)
+                                loss += l_simpson
+                                loss_dict['simpson'] = l_simpson.item()
 
                         else: 
                             # R2Plus1D
@@ -378,11 +415,15 @@ class Trainer:
         dev_type = self.device.type if hasattr(self.device, 'type') else str(self.device)
         with torch.no_grad(), torch.amp.autocast(device_type=dev_type):
             for vb in tqdm(self.ld_va, desc="Validating", mininterval=2.0, leave=False):
-                if self.is_regression:
+                if self.is_regression or self.is_dual_stream:
                     v_img = vb.get("video", vb.get("image")).to(self.device)
                     v_target = vb["target"].to(self.device)
                     
-                    v_preds, v_seg = self.model(v_img)
+                    if self.is_dual_stream:
+                        # (ef_seq, seg_logits, ef_simpson)
+                        v_preds, v_seg, _ = self.model(v_img)
+                    else:
+                        v_preds, v_seg = self.model(v_img)
                     
                     # MAE Metric
                     if 'mae' in self.metrics:
@@ -464,7 +505,7 @@ class Trainer:
                     if 'dice' in self.metrics:
                         self.metrics['dice'](v_y_pred, v_y_true)
         
-        if self.is_regression:
+        if self.is_regression or self.is_dual_stream:
             mae = float(self.metrics['mae'].aggregate().cpu()) if 'mae' in self.metrics else 0.0
             dice = float(self.metrics['dice'].aggregate().cpu()) if 'dice' in self.metrics and self.metrics['dice'].get_buffer() is not None else 0.0
             # Return tuple: (combined_score, mae, dice)
@@ -486,14 +527,17 @@ class Trainer:
 
         records = []
         
-        if self.is_regression:
+        if self.is_regression or self.is_dual_stream:
              with torch.no_grad():
                 for batch in tqdm(self.ld_ts, desc="Testing (MAE)", mininterval=2.0):
                     imgs = batch.get("video", batch.get("image")).to(self.device)
                     targets = batch["target"].to(self.device)
                     cases = batch["case"]
                     
-                    preds, _ = self.model(imgs)
+                    if self.is_dual_stream:
+                        preds, _, _ = self.model(imgs)
+                    else:
+                        preds, _ = self.model(imgs)
                     
                     # Ensure (B,) shape for simple subtraction/logging
                     # Model output is (B, 1), targets might be (B,) or (B, 1)
@@ -608,7 +652,10 @@ class Trainer:
             cases = batch['case']
             
             with torch.no_grad():
-                ef_pred, seg_pred = self.model(videos)
+                if self.is_dual_stream:
+                    ef_pred, seg_pred, _ = self.model(videos)
+                else:
+                    ef_pred, seg_pred = self.model(videos)
                 
             # Iterate
             limit = min(num_examples, len(videos))

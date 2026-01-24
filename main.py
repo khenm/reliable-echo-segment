@@ -307,7 +307,18 @@ def run_train(cfg, device):
             criterions['seg'] = DiceCELoss(to_onehot_y=True, softmax=True)
         # Add EF Loss (direct regression) if using EF head
         criterions['ef_reg'] = torch.nn.MSELoss() # For ef_head output vs target EF
+
+    elif model_name == "dual_stream":
+        # Dual-Stream Configuration
+        criterions['ef'] = torch.nn.MSELoss()
+        criterions['simpson'] = torch.nn.L1Loss()
         
+        num_classes = cfg['data'].get('num_classes', 1)
+        if num_classes == 1:
+            criterions['seg'] = DiceCELoss(sigmoid=True)
+        else:
+            criterions['seg'] = DiceCELoss(to_onehot_y=True, softmax=True)
+
     else:
         criterions['dice'] = DiceCELoss(to_onehot_y=True, softmax=True)
         kl_weight = weights.get('kl', 1e-4)
