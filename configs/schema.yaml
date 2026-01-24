@@ -3,6 +3,7 @@ project: "Reliable Echo Segmentation"
 available_models:
   - "vae_unet"
   - "r2plus1d"
+  - "unet_tcm"
 
 available_datasets:
   - "camus"

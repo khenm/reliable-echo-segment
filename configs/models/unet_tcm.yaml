@@ -1,0 +1,10 @@
+
+name: "unet_tcm"
+backbone: "resnet34"
+in_channels: 3 # EchoNet is RGB
+pretrained: true
+spatial_dims: 2
+channels: [64, 64, 128, 256, 512]
+strides: [2, 2, 2, 2]
+num_res_units: 2
+clip_length: 32 # Required for EchoNet dataloader
