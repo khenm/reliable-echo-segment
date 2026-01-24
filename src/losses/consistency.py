@@ -88,7 +88,11 @@ class ConsistencyLoss(nn.Module):
             
             # Calculate volume for all frames
             # Flatten to (B*T, H, W)
-            lv_probs_flat = lv_probs.view(-1, h, w)
+            # 1. DETACH the segmentation probabilities so gradients DO NOT flow back to UNet
+            lv_probs_detached = lv_probs.detach()
+
+            # 2. Calculate Geometric EF using the detached probabilities
+            lv_probs_flat = lv_probs_detached.view(-1, h, w)
             volumes = differentiable_volume(lv_probs_flat, self.pixel_spacing, self.step_size)
             volumes = volumes.view(b, t)
             
