@@ -526,9 +526,11 @@ def run_safe_tta(cfg, device):
     model_name = cfg['model'].get('name', 'VAEUNet')
     calibrator = None
     
-    if "r2plus1d" in model_name.lower():
+    is_dual = ("r2plus1d" in model_name.lower()) or (model_name in ["unet_tcm", "dual_stream"])
+    
+    if is_dual:
          # Hybrid (Regression + Segmentation)
-         logger.info("Initializing AuditCalibrator for R2Plus1D (Hybrid)...")
+         logger.info(f"Initializing AuditCalibrator for Dual-Stream Model ({model_name})...")
          RegCal = get_tta_component_class("regression_calibrator")
          SegCal = get_tta_component_class("segmentation_calibrator")
          AuditCal = get_tta_component_class("audit_calibrator")
@@ -537,6 +539,11 @@ def run_safe_tta(cfg, device):
              'regression': RegCal(alpha=0.05),
              'segmentation': SegCal(alpha=0.05)
          })
+    elif model_name == "UNet_2D": # Legacy 2D only
+        # Pure Segmentation
+        logger.info(f"Initializing SegmentationCalibrator for {model_name}...")
+        SegCal = get_tta_component_class("segmentation_calibrator")
+        calibrator = SegCal(alpha=0.05)
     else:
         # Default Classification
         num_classes = cfg['data'].get('num_classes', 10)
@@ -553,7 +560,9 @@ def run_safe_tta(cfg, device):
     safe_engine.model.to(device)
     
     # 2. Calibration Phase (Offline)
+    print("DEBUG: Calling run_calibration...")
     safe_engine.run_calibration(ld_val, device)
+    print("DEBUG: Returned from run_calibration.")
 
     # 3. Test Phase (Online)
     results = []

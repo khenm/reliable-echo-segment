@@ -92,10 +92,11 @@ class UNet2D(nn.Module):
         # Using global pooling on the bottleneck (enc4)
         self.global_pool = nn.AdaptiveAvgPool2d(1)
         self.ef_head = nn.Sequential(
-            nn.Linear(512, 128),
+            nn.Linear(1024, 128),
             nn.ReLU(inplace=True),
             nn.Dropout(0.2), # Dropout to prevent overfitting
-            nn.Linear(128, 1)
+            nn.Linear(128, 1),
+            nn.Sigmoid()
         )
 
     @classmethod
@@ -107,7 +108,7 @@ class UNet2D(nn.Module):
             pretrained=cfg['model'].get('pretrained', True)
         )
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, return_features: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Forward pass.
         
@@ -119,6 +120,14 @@ class UNet2D(nn.Module):
             ef: Predicted EF scalar (B, 1)
             features: Bottleneck features (B, 512) - Used for Temporal Consistency
         """
+        # --- Handle 5D Input (Video) ---
+        is_video = False
+        if x.ndim == 5:
+            is_video = True
+            B, C, T, H, W = x.shape
+            # Flatten: (B, C, T, H, W) -> (B*T, C, H, W)
+            x = x.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
+        
         # --- Encoder ---
         x0 = self.enc0(x)      # (B, 64, H/2, W/2)
         x_pool = self.pool(x0) # (B, 64, H/4, W/4)
@@ -133,9 +142,8 @@ class UNet2D(nn.Module):
         # We flatten the spatial dimensions to get a vector representation
         features = self.global_pool(x4).flatten(1) # (B, 512)
         
-        # EF Prediction
-        ef = self.ef_head(features)
-        
+        # EF Prediction is postponed until we handle video/image layout
+
         # --- Decoder ---
         d4 = self.up1(x4, x3)
         d3 = self.up2(d4, x2)
@@ -143,7 +151,29 @@ class UNet2D(nn.Module):
         d1 = self.up4(d2, x0)
         
         # Final upsample block to match input resolution
+        # Final upsample block to match input resolution
         logits = self.seg_head(d1)
         logits = F.interpolate(logits, scale_factor=2, mode='bilinear', align_corners=True)
+
+        if is_video:
+            # Reshape back to Video structure: (B, C, T, H, W)
+            _, n_cls, h, w = logits.shape
+            logits = logits.view(B, T, n_cls, h, w).permute(0, 2, 1, 3, 4)
+            
+            # Reshape features: (B, D, T)
+            # features was (B*T, D) -> (B, T, D) for pooling
+            features_video = features.view(B, T, -1)
+            
+            # Pool features across time: Mean + Max to capture average and extremes (ED/ES)
+            # (B, D) + (B, D) -> (B, 2*D) i.e. 512+512 = 1024
+            features_pooled = torch.cat([features_video.mean(dim=1), features_video.max(dim=1)[0]], dim=1)
+            
+            # EF Prediction on pooled features
+            ef = self.ef_head(features_pooled)
+        else:
+            # Single frame case: (B, C, H, W)
+            # features is (B, 512)
+            features_pooled = torch.cat([features, features], dim=1) # (B, 1024)
+            ef = self.ef_head(features_pooled)
 
         return logits, ef, features

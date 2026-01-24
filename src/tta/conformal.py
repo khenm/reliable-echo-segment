@@ -65,7 +65,7 @@ class BaseConformalCalibrator(ABC):
             
         q_level = 1.0 - alpha
         q_level = min(max(q_level, 0.0), 1.0)
-        return np.quantile(self.cal_scores, q_level, method='higher')
+        return np.quantile(self.cal_scores, q_level, method='linear')
 
     def _update_alpha(self, error_rate: float):
         """Standard ACI update rule."""
@@ -209,22 +209,34 @@ class RegressionCalibrator(BaseConformalCalibrator):
         with torch.no_grad():
             for batch in valid_loader:
                 # Handle varying data formats simply for regression (assuming [0]=input, [1]=target)
-                # Handle varying data formats
                 if isinstance(batch, dict):
+                     print(f"DEBUG: RegCal Batch Keys: {list(batch.keys())}")
                      if "video" in batch: inputs = batch["video"]
                      elif "image" in batch: inputs = batch["image"]
                      else: inputs = list(batch.values())[0]
 
                      if "target" in batch: targets = batch["target"]
                      elif "ef" in batch: targets = batch["ef"]
-                     else: targets = list(batch.values())[1]
+                     elif "EF" in batch: targets = batch["EF"]
+                     else: 
+                         # Try index 1 of values likely
+                         vals = list(batch.values())
+                         targets = vals[1] if len(vals) > 1 else vals[0]
                 elif isinstance(batch, (list, tuple)):
                     inputs, targets = batch[0], batch[1]
                 
                 inputs, targets = inputs.to(device), targets.to(device)
                 
                 preds = model(inputs)
-                if isinstance(preds, tuple): preds = preds[0]
+                if isinstance(preds, tuple): 
+                    # Smart output extraction if no shim
+                    found = False
+                    for item in preds:
+                        if isinstance(item, torch.Tensor) and item.ndim == 2 and item.shape[1] == 1:
+                            preds = item
+                            found = True
+                            break
+                    if not found: preds = preds[0]
                 
                 # Non-conformity score: Absolute Error
                 batch_residuals = torch.abs(preds.squeeze() - targets.squeeze())
@@ -256,10 +268,12 @@ class RegressionCalibrator(BaseConformalCalibrator):
         
         # Determine Threshold
         if self.q_hat is None:
-            current_q = 0.5 # Fallback
+             current_q = 0.5
+        elif len(self.cal_scores) == 0:
+             current_q = self.q_hat
         else:
-            # Use dynamic quantile based on ACI alpha
-            current_q = self.quantile_from_alpha(self.current_alpha) 
+             # Use dynamic quantile based on ACI alpha
+             current_q = self.quantile_from_alpha(self.current_alpha) 
         
         # Create Intervals
         lower_bounds = np.maximum(0.0, preds - current_q)
@@ -271,7 +285,12 @@ class RegressionCalibrator(BaseConformalCalibrator):
         if martingale_stable and audit_score is not None and audit_epsilon is not None:
             # Using a binary proxy for robustness
             proxy_error = 1.0 if audit_score > audit_epsilon else 0.0
+            
+            logger.info(f"DEBUG: RegCal Predict - AuditScore={audit_score:.4f}, Epsilon={audit_epsilon:.4f}, ProxyErr={proxy_error}")
+            
+            prev_alpha = self.current_alpha
             self._update_alpha(proxy_error)
+            logger.info(f"DEBUG: Alpha Update: {prev_alpha:.4f} -> {self.current_alpha:.4f}")
 
         return {'intervals': prediction_intervals, 'predictions': preds.tolist()}, current_q
 
@@ -307,7 +326,17 @@ class SegmentationCalibrator(BaseConformalCalibrator):
                 frame_mask = batch["frame_mask"].to(device) # Shape: (B, T)
                 
                 logits = model(inputs)
-                if isinstance(logits, tuple): logits = logits[1] # R2Plus1D seg output is index 1
+                if isinstance(logits, tuple): 
+                    # Heuristic: Find first tensor with ndim >= 4 (B, C, T, H, W) or (B, C, H, W)
+                    found = False
+                    for item in logits:
+                        if isinstance(item, torch.Tensor) and item.ndim >= 4:
+                            logits = item
+                            found = True
+                            break
+                    if not found:
+                         # Fallback for R2Plus1D legacy if 5D check failed (maybe 4D?)
+                         logits = logits[1] if len(logits) > 1 else logits[0]
                 
                 probs = torch.sigmoid(logits) # (B, 1, T, H, W)
                 
@@ -387,25 +416,16 @@ class AuditCalibrator(BaseConformalCalibrator):
         logger.info(f"Initialized AuditCalibrator with: {list(calibrators.keys())}")
 
     def calibrate(self, valid_loader, model, device):
-        logger.info("Starting Audit (Hybrid) Calibration...")
+        print("DEBUG: Starting Audit (Hybrid) Calibration...")
         for name, cal in self.calibrators.items():
-            logger.info(f"Calibrating sub-component: {name}")
+            print(f"DEBUG: Calibrating sub-component: {name}")
             # Note: We rely on the sub-calibrator to handle the model's output correctly.
             # However, standard calibrators expect model(x) -> logits.
             # If model returns tuple ((ef, seg), features) or (ef, seg), we might need to wrap/shim the model
             # so the sub-calibrator sees what it expects.
             
-            # Simple shim: Wrap model to return specific output for each calibrator
-            if name == 'regression':
-                # Expects scalar/regression output
-                # Model returns (ef, seg) normally.
-                shim_model = self._create_shim(model, index=0)
-            elif name == 'segmentation':
-                # Expects mask output
-                shim_model = self._create_shim(model, index=1)
-            else:
-                shim_model = model
-            
+            # Smart Shim handles tuple unpacking based on shape
+            shim_model = self._create_smart_shim(model, name)
             cal.calibrate(valid_loader, shim_model, device)
             
     def predict(self, logits: Any, martingale_stable: bool = True, audit_score: Optional[float] = None, audit_epsilon: Optional[float] = None) -> Tuple[Dict[str, Any], float]:
@@ -440,15 +460,39 @@ class AuditCalibrator(BaseConformalCalibrator):
         
         return results, final_q
 
-    def _create_shim(self, model, index):
-        class Shim(torch.nn.Module):
-            def __init__(self, m, idx):
+    def _create_smart_shim(self, model, task_name):
+        class SmartShim(torch.nn.Module):
+            def __init__(self, m, task):
                 super().__init__()
                 self.model = m
-                self.idx = idx
+                self.task = task
             def forward(self, x):
                 out = self.model(x)
                 if isinstance(out, tuple):
-                    return out[self.idx]
+                    # Dynamic Search
+                    seg = None
+                    reg = None
+                    
+                    # Search through tuple items
+                    for item in out:
+                        if isinstance(item, torch.Tensor):
+                            if item.ndim >= 4: 
+                                seg = item
+                            elif item.ndim == 2 and item.shape[1] == 1:
+                                reg = item
+                    
+                    # Also handle nested tuple if any? Assuming flat tuple from model
+                    
+                    if self.task == 'segmentation':
+                        # Fallback to index 0 (UNet) or index 1 (R2Plus1D) if search failed
+                        if seg is not None: return seg
+                        return out[0] if len(out) > 0 else out
+                        
+                    elif self.task == 'regression':
+                         if reg is not None: return reg
+                         # Fallback: Index 1 (UNet: Seg, EF, Feat) -> EF is idx 1
+                         # Index 0 (R2Plus1D: EF, Seg) -> EF is idx 0
+                         # Safe guess: look for float scalar?
+                         return out[1] if len(out) > 1 else out[0]
                 return out
-        return Shim(model, index)
+        return SmartShim(model, task_name)

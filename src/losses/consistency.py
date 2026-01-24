@@ -81,7 +81,7 @@ class ConsistencyLoss(nn.Module):
         
         # If input is (B=1, T, C, H, W)
         if mask_logits.dim() == 5:
-            b, t, c, h, w = mask_logits.shape
+            b, t, _, h, w = mask_logits.shape
             # Reshape for volume calc: (B*T, C, H, W)
             # Take LV channel (usually class 1, but depends on config)
             lv_probs = F.softmax(mask_logits, dim=2)[:, :, 1, :, :] # (B, T, H, W)
@@ -99,7 +99,6 @@ class ConsistencyLoss(nn.Module):
             # Calculate Geometric EF
             # Handle potential div by zero or negative
             ef_geo = (ed_vol - es_vol) / (ed_vol + 1e-6)
-            ef_geo = ef_geo * 100.0 # Percentage
             
             # ef_pred might be (B, 1) or (B, T). If (B, T) we usually take average/max or it's a video-level pred.
             if ef_pred.dim() == 2 and ef_pred.shape[1] == 1:
