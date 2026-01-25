@@ -227,6 +227,13 @@ class Trainer:
 
                             # 3. Consistency Loss (Refinement Loop)
                             if 'consistency' in self.criterions:
+                                # Test 3: Adversarial "Fake EF" Test
+                                debug_cfg = self.cfg.get('losses', {}).get('debug', {})
+                                fake_val = debug_cfg.get('fake_ef_val')
+                                if fake_val is not None:
+                                    # Override EF prediction with constant bad value
+                                    preds = torch.full_like(preds, float(fake_val))
+
                                 # Input: seg_logits (B, C, T, H, W) and preds (B, 1)
                                 l_cons = self.criterions['consistency'](seg_logits, preds)
                                 loss += l_cons
@@ -372,6 +379,25 @@ class Trainer:
                             loss_dict['kl'] = l_kl.item()
                 
                 self.scaler.scale(loss).backward()
+
+                # Test 1: The Gradient Autopsy
+                debug_cfg = self.cfg.get('losses', {}).get('debug', {})
+                if debug_cfg.get('trace_gradients'):
+                    try:
+                         # Unwrap DDP if present
+                         raw_model = self.model.module if hasattr(self.model, 'module') else self.model
+                         # Attempt to access gradients as requested
+                         if hasattr(raw_model, 'unet'):
+                             seg_grad = raw_model.unet.seg_head.weight.grad
+                             ef_grad = raw_model.unet.ef_head[-2].weight.grad
+                             
+                             s_norm = seg_grad.norm().item() if seg_grad is not None else 0.0
+                             e_norm = ef_grad.norm().item() if ef_grad is not None else 0.0
+                             
+                             print(f"Seg Decoder Grad: {s_norm:.4f} | EF Head Grad: {e_norm:.4f}")
+                    except Exception as e:
+                        # Fail silently to avoid crashing run if model structure differs
+                        pass
                 self.scaler.step(self.opt)
                 self.scaler.update()
                 run_loss += loss.item()
