@@ -301,6 +301,8 @@ class EchoNetVideoDataset(Dataset):
         """
         mask = np.zeros((height, width), dtype=np.uint8)
         
+        points = points.iloc[1:] 
+        
         x1 = points["X1"].values
         y1 = points["Y1"].values
         x2 = points["X2"].values
