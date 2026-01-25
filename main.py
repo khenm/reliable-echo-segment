@@ -292,7 +292,8 @@ def run_train(cfg, device):
         if losses_cfg.get('consistency', {}).get('enable'):
             criterions['consistency'] = ConsistencyLoss(
                 pixel_spacing=losses_cfg['consistency'].get('pixel_spacing', 0.3),
-                step_size=losses_cfg['consistency'].get('step_size', 0.3)
+                step_size=losses_cfg['consistency'].get('step_size', 0.3),
+                detach_gradients=losses_cfg['consistency'].get('detach_gradients', True)
             )
         
         if losses_cfg.get('temporal', {}).get('enable'):

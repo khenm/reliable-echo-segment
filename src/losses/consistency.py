@@ -48,10 +48,11 @@ class ConsistencyLoss(nn.Module):
     
     Where EF_geometric is calculated from the predicted masks using Simpson's rule.
     """
-    def __init__(self, pixel_spacing: float = 0.3, step_size: float = 0.3): # Defaults, should be adjustable
+    def __init__(self, pixel_spacing: float = 0.3, step_size: float = 0.3, detach_gradients: bool = True): # Defaults, should be adjustable
         super().__init__()
         self.pixel_spacing = pixel_spacing
         self.step_size = step_size
+        self.detach_gradients = detach_gradients
         
         # Loss function (MSE)
         self.mse = nn.MSELoss()
@@ -88,8 +89,11 @@ class ConsistencyLoss(nn.Module):
             
             # Calculate volume for all frames
             # Flatten to (B*T, H, W)
-            # 1. DETACH the segmentation probabilities so gradients DO NOT flow back to UNet
-            lv_probs_detached = lv_probs.detach()
+            # 1. Conditionally DETACH the segmentation probabilities
+            if self.detach_gradients:
+                lv_probs_detached = lv_probs.detach()
+            else:
+                lv_probs_detached = lv_probs
 
             # 2. Calculate Geometric EF using the detached probabilities
             lv_probs_flat = lv_probs_detached.view(-1, h, w)

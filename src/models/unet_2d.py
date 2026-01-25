@@ -91,12 +91,15 @@ class UNet2D(nn.Module):
         # EF Head (Regression)
         # Using global pooling on the bottleneck (enc4)
         self.global_pool = nn.AdaptiveAvgPool2d(1)
+
+        # Using Temporal Aggregation via GRU
+        self.temporal_agg = nn.GRU(input_size=512, hidden_size=128, batch_first=True)
+        
         self.ef_head = nn.Sequential(
-            nn.Linear(1024, 128),
+            nn.Linear(128, 64),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.2), # Dropout to prevent overfitting
-            nn.Linear(128, 1),
-            nn.Sigmoid()
+            nn.Linear(64, 1),
+            nn.Sigmoid() 
         )
 
     @classmethod
@@ -160,20 +163,19 @@ class UNet2D(nn.Module):
             _, n_cls, h, w = logits.shape
             logits = logits.view(B, T, n_cls, h, w).permute(0, 2, 1, 3, 4)
             
-            # Reshape features: (B, D, T)
-            # features was (B*T, D) -> (B, T, D) for pooling
-            features_video = features.view(B, T, -1)
+            # Reshape features: (B, T, 512)
+            # features was (B*T, D) -> (B, T, D) 
+            features_video = features.view(B, T, -1) # (B, T, 512)
             
-            # Pool features across time: Mean + Max to capture average and extremes (ED/ES)
-            # (B, D) + (B, D) -> (B, 2*D) i.e. 512+512 = 1024
-            features_pooled = torch.cat([features_video.mean(dim=1), features_video.max(dim=1)[0]], dim=1)
+            # Pass through GRU to understand the heartbeat sequence
+            # output: (B, T, 128), hidden: (1, B, 128)
+            _, hidden = self.temporal_agg(features_video) 
             
             # EF Prediction on pooled features
-            ef = self.ef_head(features_pooled)
+            ef = self.ef_head(hidden.squeeze(0)) # (B, 1)
         else:
-            # Single frame case: (B, C, H, W)
-            # features is (B, 512)
-            features_pooled = torch.cat([features, features], dim=1) # (B, 1024)
-            ef = self.ef_head(features_pooled)
+            features_seq = features.unsqueeze(1) # (B, 1, 512)
+            _, hidden = self.temporal_agg(features_seq)
+            ef = self.ef_head(hidden.squeeze(0))
 
         return logits, ef, features
