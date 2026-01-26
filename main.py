@@ -325,12 +325,16 @@ def run_train(cfg, device):
         kl_weight = weights.get('kl', 1e-4)
         criterions['kl'] = KLLoss(weight=kl_weight)
 
+    if model_name == "skeletal_tracker":
+        from src.losses import SkeletalLoss
+        criterions['skeletal'] = SkeletalLoss(smooth_weight=weights.get('smooth', 0.1))
+
     # Define Metrics based on Model Type
     num_classes = cfg['data'].get('num_classes', 1)
     include_bg = (num_classes == 1)
     
     metrics = {}
-    if is_regression:
+    if is_regression or model_name == "skeletal_tracker":
         metrics['mae'] = MAEMetric(reduction="mean")
         metrics['dice'] = DiceMetric(include_background=include_bg, reduction="mean")
     else:

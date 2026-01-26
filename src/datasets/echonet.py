@@ -521,10 +521,15 @@ class EchoNet:
         num_workers = cfg['training'].get('num_workers', 4)
         model_name = cfg['model'].get('name', 'VAEUNet') # Default to VAEUNet
         
-        if model_name.lower() in ["r2plus1d", "unet_tcm"]:
+        if model_name.lower() in ["r2plus1d", "unet_tcm", "skeletal_tracker"]:
             # Video Configuration
             clip_len = cfg['model'].get('clip_length', 32)
-            return_kps = cfg['model'].get('return_keypoints', False)
+            
+            # Force keypoints for skeletal_tracker
+            if model_name.lower() == "skeletal_tracker":
+                return_kps = True
+            else:
+                return_kps = cfg['model'].get('return_keypoints', False)
             
             resize_op = ResizeVideoLabel(img_size, clip_len)
 
