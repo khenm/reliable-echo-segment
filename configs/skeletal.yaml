@@ -1,0 +1,35 @@
+model: "skeletal_tracker"
+
+data:
+  name: "echonet"
+  max_retries: 5
+  subset_size: 100
+
+loss:
+  name: "skeletal_loss"
+  smooth_weight: 0.1
+
+training:
+  epochs: 50
+  batch_size_train: 8
+  batch_size_val: 8
+  num_workers: 0
+  persistent_workers: False
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  patience: 10
+  seed: 42
+  
+  # Local storage paths
+  save_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs"
+  checkpoint_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/checkpoints"
+  test_metrics_csv: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_metrics.csv"
+  clinical_pairs_csv: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_clinical_pairs.csv"
+  resume_path: null
+
+tta:
+  enabled: true
+  lr: 0.0001
+  n_augments: 4
+  steps: 1
+  optimizer: "SGD"

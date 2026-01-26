@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib as mpl
+import os
 from skimage.segmentation import find_boundaries
 from skimage import color
 from sklearn.metrics import roc_curve, roc_auc_score
@@ -801,25 +802,183 @@ def plot_martingale(martingale_values, p_values, case_name, save_path=None):
     ax1.set_ylabel('Martingale Wealth ($M_t$)', color=color)
     ax1.plot(steps, martingale_values, color=color, linewidth=2, label='Martingale')
     ax1.tick_params(axis='y', labelcolor=color)
-    
-    # Add threshold line (assuming threshold around 20 for alpha=0.05, but can be higher)
-    # Just show the curve dynamics.
+    ax1.set_ylim(bottom=0) # Martingale is non-negative
     
     # 2. P-Values (Right Axis)
-    ax2 = ax1.twinx()  # instantiate a second axes that shares the same x-axis
-    color = 'tab:orange'
-    ax2.set_ylabel('P-Values ($p_t$)', color=color)  # we already handled the x-label with ax1
-    ax2.scatter(steps, p_values, color=color, s=10, alpha=0.6, label='P-Values')
-    ax2.set_ylim(-0.05, 1.05)
+    ax2 = ax1.twinx()  
+    color = 'tab:gray'
+    ax2.set_ylabel('P-value', color=color)
+    ax2.plot(steps, p_values, color=color, linestyle='--', alpha=0.6, label='P-value')
     ax2.tick_params(axis='y', labelcolor=color)
+    ax2.set_ylim(0, 1.05)
     
-    plt.title(f"Safe-TTA Dynamics: {case_name}")
-    fig.tight_layout()  # otherwise the right y-label is slightly clipped
+    # Title and Layout
+    plt.title(f"Martingale & P-Value Monitor: {case_name}")
+    fig.tight_layout()
     
     if save_path:
         plt.savefig(save_path, bbox_inches='tight')
-        print(f"Martingale plot saved to {save_path}")
+        print(f"Saved: {save_path}")
         plt.close()
     else:
         plt.show()
+    return fig
+
+def plot_volume_tracing(filename, csv_path="datasets/echonet-dynamic/VolumeTracings.csv", file_list_path="datasets/echonet-dynamic/FileList.csv", save_path=None):
+    """
+    Plots the volume tracing (Simpson's method discs) for a specific video.
+    
+    Data format: First row is Long Axis. Subsequent rows are Short Axis discs.
+    
+    Args:
+        filename (str): The filename of the video to plot (e.g., '0X100009310A3BD7FC.avi').
+        csv_path (str): Path to the VolumeTracings.csv file.
+        file_list_path (str): Path to the FileList.csv file containing clinical metrics.
+        save_path (str): Optional path to save the figure.
+    """
+    # 1. Load Data
+    try:
+        df = pd.read_csv(csv_path)
+    except FileNotFoundError:
+        print(f"Error: CSV file not found at {csv_path}")
+        return
+
+    # Filter for the specific file
+    case_df = df[df["FileName"] == filename]
+    
+    if case_df.empty:
+        print(f"No tracings found for {filename}")
+        return
+
+    frames = case_df["Frame"].unique()
+    num_frames = len(frames)
+    
+    if num_frames == 0:
+        print(f"No frames found for {filename}")
+        return
+        
+    setup_style()
+    
+    # Calculate Volumes for all frames to find ED/ES from data
+    # Method of Disks: V = (pi/4) * sum(d^2) * (L/N)
+    # L = Long Axis Length
+    # N = Number of discs (rows - 1)
+    # d = Disc diameter
+    
+    volumes = {}
+    
+    for frame in frames:
+        frame_data = case_df[case_df["Frame"] == frame]
+        long_axis = frame_data.iloc[0]
+        discs = frame_data.iloc[1:]
+        
+        if not discs.empty:
+            # Length of Long Axis
+            L = np.sqrt((long_axis["X2"] - long_axis["X1"])**2 + (long_axis["Y2"] - long_axis["Y1"])**2)
+            
+            # Number of discs
+            N = len(discs)
+            
+            # Disc diameters
+            d = np.sqrt((discs["X2"] - discs["X1"])**2 + (discs["Y2"] - discs["Y1"])**2)
+            
+            vol = (np.pi / 4.0) * (d**2).sum() * (L / N)
+            volumes[frame] = vol
+        else:
+            volumes[frame] = 0
+            
+    # Identify ED (max) and ES (min) from calculated volumes
+    sorted_vols = sorted(volumes.items(), key=lambda x: x[1], reverse=True)
+    if not sorted_vols:
+        return
+        
+    ed_frame = sorted_vols[0][0] # Max volume
+    es_frame = sorted_vols[-1][0] # Min volume
+    
+    calc_edv = volumes[ed_frame]
+    calc_esv = volumes[es_frame]
+    calc_ef = 100 * (calc_edv - calc_esv) / calc_edv if calc_edv > 0 else 0
+    
+    # Create single plot to stack frames
+    fig, ax = plt.subplots(figsize=(5, 5), dpi=300)
+    
+    colors = {}
+    colors[ed_frame] = "#5dade2" # Blue
+    for f in frames:
+        if f != ed_frame:
+            colors[f] = "black"
+            
+    # Plotting Order: ES (smaller calc vol) first, then ED (larger calc vol)
+    plot_order_frames = sorted(frames, key=lambda f: volumes.get(f, 0))
+            
+    for i, frame in enumerate(plot_order_frames):
+        frame_data = case_df[case_df["Frame"] == frame].reset_index(drop=True)
+        current_color = colors.get(frame, "black")
+        
+        # Ensure proper layering: later frames (ED) on top of earlier frames (ES)
+        base_zorder = 10 + i * 10
+        
+        # 1. Long Axis (Row 0)
+        long_axis = frame_data.iloc[0]
+        ax.plot([long_axis["X1"], long_axis["X2"]], 
+                [long_axis["Y1"], long_axis["Y2"]], 
+                color=current_color, linewidth=3.0, zorder=base_zorder + 1)
+        
+        # 2. Discs (Rows 1 to N)
+        discs = frame_data.iloc[1:]
+        
+        # Plot disc lines
+        for _, row in discs.iterrows():
+            ax.plot([row["X1"], row["X2"]], 
+                    [row["Y1"], row["Y2"]], 
+                    color=current_color, linewidth=3.0, alpha=0.9, zorder=base_zorder)
+            
+    ax.set_aspect('equal')
+    
+    # Standard image coordinates
+    ax.set_ylim(0, 112)
+    ax.set_xlim(0, 112)
+    
+    # Remove top/right spines as per style
+    ax.spines['top'].set_visible(True) 
+    ax.spines['right'].set_visible(True)
+    ax.spines['left'].set_visible(True)
+    ax.spines['bottom'].set_visible(True)
+    
+    # Add Metrics Text
+    text_str = ""
+    # Reference Values
+    if os.path.exists(file_list_path):
+        try:
+            file_df = pd.read_csv(file_list_path)
+            base_name = os.path.basename(filename)
+            if base_name.lower().endswith('.avi'):
+                base_name = base_name[:-4]
+                
+            row = file_df[file_df["FileName"] == base_name]
+            if not row.empty:
+                ref_ef = row.iloc[0]["EF"]
+                ref_edv = row.iloc[0]["EDV"]
+                ref_esv = row.iloc[0]["ESV"]
+                
+                text_str += f"Ref EDV: {ref_edv:.1f} mL\nRef ESV: {ref_esv:.1f} mL\nRef EF:  {ref_ef:.1f} %\n\n"
+        except Exception as e:
+            print(f"Could not load metrics: {e}")
+            
+    # Calculated Values
+    text_str += f"Calc EDV: {calc_edv:.0f} px³\nCalc ESV: {calc_esv:.0f} px³\nCalc EF:  {calc_ef:.1f} %"
+    
+    if text_str:
+        ax.text(0.05, 0.95, text_str, transform=ax.transAxes, 
+                fontsize=9, verticalalignment='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='#cccccc'))
+        
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, bbox_inches='tight')
+        print(f"Saved volume tracing plot to {save_path}")
+    else:
+        plt.show()
+    
     return fig

@@ -1,0 +1,7 @@
+name: "skeletal_tracker"
+backbone: "convnext_tiny"
+num_points: 42
+hidden_dim: 256
+pretrained: true
+clip_length: 32
+return_keypoints: true
