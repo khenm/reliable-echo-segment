@@ -160,7 +160,7 @@ class Trainer:
                 loss = 0.0
                 loss_dict = {}
 
-                if self.is_regression or self.is_unet_2d:
+                if self.is_regression or self.is_unet_2d or self.is_dual_stream:
                     # Generic handling for Video Dataset (returns 'video', 'target', 'label')
                     imgs = batch.get("video", batch.get("image")).to(self.device)
                     targets = batch["target"].to(self.device)
@@ -362,23 +362,6 @@ class Trainer:
                                 for k, v in comp_dict.items():
                                     loss_dict[k] = v.item()
 
-                else:
-                    imgs = batch["image"].to(self.device)
-                    labs = batch["label"].to(self.device)
-                
-                    with torch.amp.autocast(device_type=dev_type):
-                        logits, mu, log_var = self.model(imgs)
-                        
-                        if 'dice' in self.criterions:
-                            l_dice = self.criterions['dice'](logits, labs)
-                            loss += l_dice
-                            loss_dict['dice'] = l_dice.item()
-                        
-                        if 'kl' in self.criterions:
-                            l_kl = self.criterions['kl'](mu, log_var)
-                            loss += l_kl
-                            loss_dict['kl'] = l_kl.item()
-
                 elif self.is_skeletal:
                      # Skeletal Tracker Logic
                      imgs = batch["video"].to(self.device)
@@ -411,6 +394,23 @@ class Trainer:
                              l_ef = self.criterions['ef'](ef, ef_target) # Might need MSE or something
                              loss += l_ef
                              loss_dict['ef'] = l_ef.item()
+                
+                else:
+                    imgs = batch["image"].to(self.device)
+                    labs = batch["label"].to(self.device)
+                
+                    with torch.amp.autocast(device_type=dev_type):
+                        logits, mu, log_var = self.model(imgs)
+                        
+                        if 'dice' in self.criterions:
+                            l_dice = self.criterions['dice'](logits, labs)
+                            loss += l_dice
+                            loss_dict['dice'] = l_dice.item()
+                        
+                        if 'kl' in self.criterions:
+                            l_kl = self.criterions['kl'](mu, log_var)
+                            loss += l_kl
+                            loss_dict['kl'] = l_kl.item()
                 
                 self.scaler.scale(loss).backward()
 
@@ -457,7 +457,7 @@ class Trainer:
                 avg_comp = v / len(self.ld_tr)
                 log_msg += f"{k}={avg_comp:.4f} "
             
-            if self.is_regression:
+            if self.is_regression or self.is_dual_stream or self.is_skeletal:
                 val_score, val_mae, val_dice = val_result
                 log_msg += f"valMAE={val_mae:.4f} valDice={val_dice:.4f}"
             else:
