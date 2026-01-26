@@ -52,6 +52,7 @@ class Trainer:
         self.is_regression = (self.model_name.lower() == "r2plus1d")
         self.is_unet_2d = (self.model_name in ["unet_tcm"])
         self.is_dual_stream = (self.model_name == "dual_stream")
+        self.is_skeletal = (self.model_name == "skeletal_tracker")
         
         # Initialize Temporal Gate if enabled
         if self.cfg.get('losses', {}).get('temporal', {}).get('enable'):
@@ -377,6 +378,39 @@ class Trainer:
                             l_kl = self.criterions['kl'](mu, log_var)
                             loss += l_kl
                             loss_dict['kl'] = l_kl.item()
+
+                elif self.is_skeletal:
+                     # Skeletal Tracker Logic
+                     imgs = batch["video"].to(self.device)
+                     # (B, C, T, H, W)
+                     
+                     targets = batch.get("keypoints")
+                     if targets is not None:
+                         targets = targets.to(self.device)
+                     
+                     frame_mask = batch.get("frame_mask")
+                     if frame_mask is not None:
+                         frame_mask = frame_mask.to(self.device)
+                         
+                     with torch.amp.autocast(device_type=dev_type):
+                         # Forward: kps, volume, ef
+                         pred_kps, vol, ef = self.model(imgs)
+                         
+                         if 'skeletal' in self.criterions and targets is not None:
+                             # Expected: preds, targets, frame_mask
+                             l_skel, loss_comps = self.criterions['skeletal'](pred_kps, targets, frame_mask)
+                             loss += l_skel
+                             loss_dict['skeletal'] = l_skel.item()
+                             for k, v in loss_comps.items():
+                                 loss_dict[k] = v.item()
+                                 
+                         # Optional EF auxiliary loss?
+                         if 'ef' in self.criterions:
+                             # If we have EF targets
+                             ef_target = batch.get("target").to(self.device).view(-1, 1)
+                             l_ef = self.criterions['ef'](ef, ef_target) # Might need MSE or something
+                             loss += l_ef
+                             loss_dict['ef'] = l_ef.item()
                 
                 self.scaler.scale(loss).backward()
 
@@ -579,6 +613,19 @@ class Trainer:
                          else:
                              self.metrics['dice'](v_y_pred, v_y_true)
 
+                elif self.is_skeletal:
+                    v_img = vb.get("video", vb.get("image")).to(self.device)
+                    v_ef_target = vb.get("target").to(self.device)
+                    if v_ef_target.ndim == 1:
+                        v_ef_target = v_ef_target.view(-1, 1)
+                        
+                    with torch.amp.autocast(device_type=dev_type):
+                        # kps, volume, ef
+                        _, _, v_ef_pred = self.model(v_img)
+                        
+                    if 'mae' in self.metrics:
+                        self.metrics['mae'](v_ef_pred, v_ef_target)
+
                 else:
                     v_img = vb["image"].to(self.device)
                     v_lab = vb["label"].to(self.device)
@@ -624,7 +671,7 @@ class Trainer:
                         if 'dice' in self.metrics:
                             self.metrics['dice'](v_y_pred, v_y_true)
         
-        if self.is_regression or self.is_dual_stream:
+        if self.is_regression or self.is_dual_stream or self.is_skeletal:
             mae = float(self.metrics['mae'].aggregate().cpu()) if 'mae' in self.metrics else 0.0
             dice = float(self.metrics['dice'].aggregate().cpu()) if 'dice' in self.metrics and self.metrics['dice'].get_buffer() is not None else 0.0
             # Return tuple: (combined_score, mae, dice)
@@ -646,7 +693,7 @@ class Trainer:
 
         records = []
         
-        if self.is_regression or self.is_dual_stream:
+        if self.is_regression or self.is_dual_stream or self.is_skeletal:
              with torch.no_grad():
                 for batch in tqdm(self.ld_ts, desc="Testing (MAE)", mininterval=2.0):
                     imgs = batch.get("video", batch.get("image")).to(self.device)
@@ -655,6 +702,9 @@ class Trainer:
                     
                     if self.is_dual_stream:
                         preds, _, _ = self.model(imgs)
+                    elif self.is_skeletal:
+                        # kps, volume, ef
+                        _, _, preds = self.model(imgs)
                     else:
                         preds, _ = self.model(imgs)
                     
