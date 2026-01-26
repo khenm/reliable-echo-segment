@@ -227,7 +227,7 @@ class EchoNetVideoDataset(Dataset):
     Dataset class for EchoNet-Dynamic Video Classification/Regression.
     Loads video clips for R(2+1)D model.
     """
-    def __init__(self, root_dir, split="TRAIN", clip_len=32, sampling_rate=1, transform=None):
+    def __init__(self, root_dir, split="TRAIN", clip_len=32, sampling_rate=1, transform=None, return_keypoints=False):
         """
         Args:
             root_dir (str): Path to EchoNet-Dynamic dataset root.
@@ -242,6 +242,7 @@ class EchoNetVideoDataset(Dataset):
         self.clip_len = clip_len
         self.sampling_rate = sampling_rate
         self.transform = transform
+        self.return_keypoints = return_keypoints
         self.max_retries = 5
         
         self.file_list_path = os.path.join(root_dir, "FileList.csv")
@@ -398,6 +399,10 @@ class EchoNetVideoDataset(Dataset):
         # Output shape: (T, H, W) -> will become (1, T, H, W) after transform usually or we handle it manually
         mask_clip = np.zeros((T_clip, H, W), dtype=np.uint8)
         frame_mask = np.zeros((T_clip,), dtype=np.float32)
+        
+        # Keypoints: (T, 42, 2) - Normalized [0, 1]
+        # We fill with -1 or similar for missing frames, effectively 0 with frame_mask=0
+        keypoints_clip = np.zeros((T_clip, 42, 2), dtype=np.float32)
 
         if self.tracings is not None:
              # Find tracings for this file
@@ -409,8 +414,46 @@ class EchoNetVideoDataset(Dataset):
                      # Tracing frame is integer
                      t_subset = file_tracings[file_tracings["Frame"] == current_frame_idx]
                      if not t_subset.empty:
-                         mask_clip[t] = self._generate_mask(t_subset, H, W)
-                         frame_mask[t] = 1.0
+                          mask_clip[t] = self._generate_mask(t_subset, H, W)
+                          frame_mask[t] = 1.0
+                          
+                          if self.return_keypoints:
+                              # Extract keypoints
+                              pts_df = t_subset.iloc[1:] # Drop axis
+                              x1 = pts_df["X1"].values
+                              y1 = pts_df["Y1"].values
+                              x2 = pts_df["X2"].values
+                              y2 = pts_df["Y2"].values
+                              
+                              # Concatenate x1, x2[::-1] as per mask generation
+                              # Shape should be 21 + 21 = 42
+                              # If length matches 21 rows -> 42 points.
+                              # EchoNet tracings usually have 21 interpolation points.
+                              
+                              xs = np.concatenate([x1, x2[::-1]])
+                              ys = np.concatenate([y1, y2[::-1]])
+                              
+                              # Stack (42, 2)
+                              kps = np.stack([xs, ys], axis=1).astype(np.float32)
+                              
+                              # Fix number of points to 42 using interpolation if necessary?
+                              # Usually EchoNet is consistent. Let's assume consistent for now or pad/trim.
+                              if len(kps) != 42:
+                                   # Simple resampling or padding if mismatched (rare in cleaned EchoNet)
+                                   # logic to resample kps to 42 if needed could go here
+                                   # For now, let's just create a fixed size placeholder if mismatch
+                                   if len(kps) > 42:
+                                       kps = kps[:42]
+                                   else:
+                                       # pad with last point
+                                       pad = np.tile(kps[-1:], (42 - len(kps), 1))
+                                       kps = np.concatenate([kps, pad], axis=0)
+
+                              # Normalize
+                              kps[:, 0] /= W
+                              kps[:, 1] /= H
+                              
+                              keypoints_clip[t] = kps
                      
                      current_frame_idx += self.sampling_rate
 
@@ -433,13 +476,18 @@ class EchoNetVideoDataset(Dataset):
         if self.targets is not None:
             target = target / 100.0
             
-        return {
+        output = {
             "video": video, 
             "target": torch.tensor(target, dtype=torch.float32), 
             "label": mask_clip, 
             "case": fname,
             "frame_mask": torch.tensor(frame_mask, dtype=torch.float32)
         }
+        
+        if self.return_keypoints:
+            output["keypoints"] = torch.tensor(keypoints_clip, dtype=torch.float32)
+            
+        return output
 
 class ResizeVideoLabel:
     def __init__(self, size, clip_len):
@@ -476,6 +524,7 @@ class EchoNet:
         if model_name.lower() in ["r2plus1d", "unet_tcm"]:
             # Video Configuration
             clip_len = cfg['model'].get('clip_length', 32)
+            return_kps = cfg['model'].get('return_keypoints', False)
             
             resize_op = ResizeVideoLabel(img_size, clip_len)
 
@@ -489,11 +538,11 @@ class EchoNet:
             ])
 
             max_retries = cfg['data'].get('max_retries', 5)
-            ds_tr = EchoNetVideoDataset(root_dir, split="TRAIN", clip_len=clip_len, transform=train_transforms)
+            ds_tr = EchoNetVideoDataset(root_dir, split="TRAIN", clip_len=clip_len, transform=train_transforms, return_keypoints=return_kps)
             ds_tr.max_retries = max_retries
-            ds_va = EchoNetVideoDataset(root_dir, split="VAL", clip_len=clip_len, transform=val_transforms)
+            ds_va = EchoNetVideoDataset(root_dir, split="VAL", clip_len=clip_len, transform=val_transforms, return_keypoints=return_kps)
             ds_va.max_retries = max_retries
-            ds_ts = EchoNetVideoDataset(root_dir, split="TEST", clip_len=clip_len, transform=val_transforms)
+            ds_ts = EchoNetVideoDataset(root_dir, split="TEST", clip_len=clip_len, transform=val_transforms, return_keypoints=return_kps)
             ds_ts.max_retries = max_retries
 
 
