@@ -7,7 +7,9 @@ data:
 
 loss:
   name: "skeletal_loss"
-  smooth_weight: 0.1
+  weights:
+    smooth: 0.1
+    ef: 1.0
 
 training:
   epochs: 50
@@ -19,7 +21,7 @@ training:
   weight_decay: 1.0e-5
   patience: 10
   seed: 42
-  
+
   # Local storage paths
   save_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs"
   checkpoint_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/checkpoints"

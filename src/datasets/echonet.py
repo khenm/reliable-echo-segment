@@ -245,7 +245,15 @@ class EchoNetVideoDataset(Dataset):
         self.return_keypoints = return_keypoints
         self.max_retries = 5
         
-        self.file_list_path = os.path.join(root_dir, "FileList.csv")
+        # Use filename with frames metadata by default if available, otherwise fallback or config
+        # Ideally passed via config, but hardcoding priority for now based on plan
+        fname_w_frames = "FileListwFrames112.csv"
+        self.file_list_path = os.path.join(root_dir, fname_w_frames)
+        if not os.path.exists(self.file_list_path):
+             # Fallback
+             self.file_list_path = os.path.join(root_dir, "FileList.csv")
+             logger.warning(f"{fname_w_frames} not found, falling back to FileList.csv. Cycle sampling may fail if columns missing.")
+
         self.videos_dir = os.path.join(root_dir, "Videos")
         
         if not os.path.exists(self.file_list_path):
@@ -277,6 +285,17 @@ class EchoNetVideoDataset(Dataset):
         self.file_list = df
         self.samples = df["FileName"].values
         self.targets = df["EF"].values if "EF" in df.columns else None
+        
+        # Create Metadata Lookup for Cycle Sampling
+        # Ensure EDFrame/ESFrame exist
+        self.meta_lookup = {}
+        if "EDFrame" in df.columns and "ESFrame" in df.columns:
+            # Create dict: fname -> {'ED': int, 'ES': int}
+            # Handle potential float/int issues
+            temp_df = df.set_index("FileName")[["EDFrame", "ESFrame"]]
+            self.meta_lookup = temp_df.to_dict('index')
+        else:
+            logger.warning("EDFrame/ESFrame columns missing. Beat-centric sampling disabled.")
 
         self.tracings_path = os.path.join(root_dir, "VolumeTracings.csv")
         self.tracings = None
@@ -322,41 +341,80 @@ class EchoNetVideoDataset(Dataset):
         if not cap.isOpened():
             return None
             
-        frames = []
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fname = os.path.basename(video_path).split('.')[0]
         
+        # Beat-Centric Sampling Logic
         start_frame = 0
-        if total_frames > self.clip_len * self.sampling_rate:
+        cycle_found = False
+        
+        # Define constraints
+        # We want to capture [min(ED, ES), max(ED, ES)]
+        # We pad to self.clip_len (treated as MAX_LEN now)
+        MAX_LEN = self.clip_len
+        
+        if fname in self.meta_lookup:
+            meta = self.meta_lookup[fname]
+            ed = int(meta["EDFrame"])
+            es = int(meta["ESFrame"])
+            
+            lower_bound = min(ed, es)
+            upper_bound = max(ed, es)
+            
+            # Ensure the cycle fits in MAX_LEN? If not, we center it.
+            # cycle_len = upper_bound - lower_bound
+            
             if self.split == "TRAIN":
-                start_frame = np.random.randint(0, total_frames - self.clip_len * self.sampling_rate)
-            else:
-                # For Val/Test, try to center on traces if available
-                fname = os.path.basename(video_path).split('.')[0]
-                if fname in self.file_to_frames:
-                    # Pick median frame of annotations
-                    annotated = sorted(self.file_to_frames[fname])
-                    center_annot = annotated[len(annotated)//2]
-                    
-                    # Try to center the clip around this frame
-                    # clip covers [start, start + len*rate]
-                    half_clip = (self.clip_len * self.sampling_rate) // 2
-                    start_frame = max(0, center_annot - half_clip)
-                    
-                    # Ensure we don't go out of bounds
-                    max_start = total_frames - self.clip_len * self.sampling_rate
-                    start_frame = min(start_frame, max_start)
-                    start_frame = max(0, start_frame) # prevent negative if max_start is negative (short video)
+                # Valid start range:
+                # 1. start <= lower_bound (so we capture the start of cycle)
+                # 2. start + MAX_LEN >= upper_bound (so we capture the end of cycle)
+                # Combined: upper_bound - MAX_LEN <= start <= lower_bound
+                
+                s_min = max(0, upper_bound - MAX_LEN) # Earliest possible start to still catch upper_bound
+                s_max = min(lower_bound, total_frames - MAX_LEN) # Latest possible start to still catch lower_bound and fit in video
+                
+                # If s_min > s_max, it means the cycle is wider than MAX_LEN (unlikely for 96 frames)
+                # OR the cycle is at the very edge of the video prevents 
+                
+                if s_min <= s_max:
+                    start_frame = np.random.randint(s_min, s_max + 1)
+                    cycle_found = True
                 else:
-                    start_frame = (total_frames - self.clip_len * self.sampling_rate) // 2
+                    # Fallback strategies
+                    if (upper_bound - lower_bound) > MAX_LEN:
+                        # Cycle too big, center it
+                        center = (lower_bound + upper_bound) // 2
+                        start_frame = max(0, center - MAX_LEN // 2)
+                    else:
+                        # Edge case logic, just try to encompass as much as possible
+                        # bias towards lower_bound
+                        start_frame = max(0, lower_bound - 5)
+                    
+            else:
+                # Deterministic Center
+                center = (lower_bound + upper_bound) // 2
+                start_frame = max(0, center - MAX_LEN // 2)
+                
+            # Clamp start_frame
+            start_frame = min(start_frame, max(0, total_frames - 1))
+            
+        else:
+            # Fallback to old logic
+            if total_frames > MAX_LEN * self.sampling_rate:
+                if self.split == "TRAIN":
+                    start_frame = np.random.randint(0, total_frames - MAX_LEN * self.sampling_rate)
+                else:
+                    start_frame = (total_frames - MAX_LEN * self.sampling_rate) // 2
         
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
         
-        for i in range(self.clip_len):
+        frames = []
+        # Sample MAX_LEN frames
+        for _ in range(MAX_LEN):
             ret, frame = cap.read()
             if not ret:
                 break
-            # Resize during load to save memory if needed, but transform handles it usually
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) 
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             frames.append(frame)
             
             # Skip frames for sampling rate
@@ -368,13 +426,18 @@ class EchoNetVideoDataset(Dataset):
         if len(frames) == 0:
             return None
             
-        # Pad if not enough frames
-        while len(frames) < self.clip_len:
-            frames.append(frames[-1])
+        actual_len = len(frames)
+        
+        # Pad with Zeros
+        if actual_len < MAX_LEN:
+            pad_needed = MAX_LEN - actual_len
+            # Pad with zeros
+            padding = [np.zeros_like(frames[0])] * pad_needed
+            frames.extend(padding)
             
-        # Stack -> (T, H, W, C)
+        # Stack -> (MAX_LEN, H, W, C)
         video = np.stack(frames, axis=0)
-        return video, start_frame
+        return video, start_frame, actual_len
 
     def __getitem__(self, idx, _retry_count=0):
         max_retries = self.max_retries
@@ -392,13 +455,14 @@ class EchoNetVideoDataset(Dataset):
                 raise RuntimeError(f"Failed to load {max_retries} consecutive video samples starting from idx {idx}")
             return self.__getitem__((idx+1)%len(self), _retry_count + 1)
         
-        video, start_frame = result
+        video, start_frame, actual_len = result
         T_clip, H, W, C = video.shape
 
         # Generate Masks for the clip
         # Output shape: (T, H, W) -> will become (1, T, H, W) after transform usually or we handle it manually
         mask_clip = np.zeros((T_clip, H, W), dtype=np.uint8)
         frame_mask = np.zeros((T_clip,), dtype=np.float32)
+        frame_mask[:actual_len] = 1.0 # Only valid frames are masked as 1
         
         # Keypoints: (T, 42, 2) - Normalized [0, 1]
         # We fill with -1 or similar for missing frames, effectively 0 with frame_mask=0
@@ -481,7 +545,8 @@ class EchoNetVideoDataset(Dataset):
             "target": torch.tensor(target, dtype=torch.float32), 
             "label": mask_clip, 
             "case": fname,
-            "frame_mask": torch.tensor(frame_mask, dtype=torch.float32)
+            "frame_mask": torch.tensor(frame_mask, dtype=torch.float32),
+            "lengths": torch.tensor(actual_len, dtype=torch.long)
         }
         
         if self.return_keypoints:

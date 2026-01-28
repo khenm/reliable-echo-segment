@@ -160,9 +160,10 @@ class SkeletalTracker(nn.Module):
             pretrained=cfg['model'].get('pretrained', True)
         )
 
-    def forward(self, x):
+    def forward(self, x, lengths=None):
         """
         x: (B, C, T, H, W)
+        lengths: (B,) - variable lengths for packing
         """
         if x.ndim == 5:
             B, C, T, H, W = x.shape
@@ -177,8 +178,22 @@ class SkeletalTracker(nn.Module):
         features = features.view(B, T, -1) # (B, T, D)
         
         # Temporal
-        # hidden state initialization defaults to 0
-        hidden_states, _ = self.temporal(features) # (B, T, H)
+        if lengths is not None and T > 1:
+            # Pack
+            # lengths must be on CPU for pack_padded_sequence usually
+            lengths_cpu = lengths.to('cpu')
+            # Enforce sorted = False (PyTorch handles reordering internally if needed since 1.1)
+            packed_input = nn.utils.rnn.pack_padded_sequence(
+                features, lengths_cpu, batch_first=True, enforce_sorted=False
+            )
+            packed_output, _ = self.temporal(packed_input)
+            
+            # Unpack
+            hidden_states, _ = nn.utils.rnn.pad_packed_sequence(
+                packed_output, batch_first=True, total_length=T
+            )
+        else:
+            hidden_states, _ = self.temporal(features) # (B, T, H)
         
         # Heads
         kps_flat = self.keypoint_head(hidden_states) # (B, T, 42*2)
@@ -187,10 +202,26 @@ class SkeletalTracker(nn.Module):
         # Volume
         volume = self.simpson(kps) # (B, T)
         
-        # EF Calculation (approximate from batch max/min)
-        # Note: This is per-sample EF
-        edv, _ = volume.max(dim=1, keepdim=True)
-        esv, _ = volume.min(dim=1, keepdim=True)
+        # EF Calculation (Masked Max/Min)
+        if lengths is not None:
+            # Create mask (B, T)
+            # range (1, T) < lengths (B, 1)
+            range_tensor = torch.arange(T, device=volume.device).unsqueeze(0)
+            mask = range_tensor < lengths.unsqueeze(1) # (B, T) boolean
+            
+            # For Max (EDV): Masked values set to -inf
+            vol_max = volume.clone()
+            vol_max[~mask] = -1e9
+            edv, _ = vol_max.max(dim=1, keepdim=True)
+            
+            # For Min (ESV): Masked values set to +inf
+            vol_min = volume.clone()
+            vol_min[~mask] = 1e9
+            esv, _ = vol_min.min(dim=1, keepdim=True)
+        else:
+            edv, _ = volume.max(dim=1, keepdim=True)
+            esv, _ = volume.min(dim=1, keepdim=True)
+
         ef = (edv - esv) / (edv + 1e-6) # (B, 1)
         
         return kps, volume, ef
