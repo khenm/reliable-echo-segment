@@ -377,7 +377,11 @@ class Trainer:
                          
                      with torch.amp.autocast(device_type=dev_type):
                          # Forward: kps, volume, ef
-                         pred_kps, vol, ef = self.model(imgs)
+                         lengths = batch.get("lengths")
+                         if lengths is not None:
+                             pred_kps, vol, ef = self.model(imgs, lengths=lengths)
+                         else:
+                             pred_kps, vol, ef = self.model(imgs)
                          
                          if 'skeletal' in self.criterions and targets is not None:
                              # Expected: preds, targets, frame_mask
@@ -444,7 +448,7 @@ class Trainer:
                 # Pbar update
                 pbar_postfix = {"loss": f"{loss.item():.4f}"}
                 for k, v in loss_dict.items():
-                    pbar_postfix[k] = f"{v:.4f}"
+                    pbar_postfix[k] = f"{v:.6f}"
                 pbar.set_postfix(pbar_postfix)
 
             val_result = self._validate()
@@ -455,7 +459,7 @@ class Trainer:
             
             for k, v in epoch_loss_components.items():
                 avg_comp = v / len(self.ld_tr)
-                log_msg += f"{k}={avg_comp:.4f} "
+                log_msg += f"{k}={avg_comp:.6f} "
             
             if self.is_regression or self.is_dual_stream or self.is_skeletal:
                 val_score, val_mae, val_dice = val_result

@@ -328,6 +328,9 @@ def run_train(cfg, device):
     if model_name == "skeletal_tracker":
         from src.losses import SkeletalLoss
         criterions['skeletal'] = SkeletalLoss(smooth_weight=weights.get('smooth', 0.1))
+        
+        if weights.get('ef', 0.0) > 0:
+            criterions['ef'] = torch.nn.MSELoss()
 
     # Define Metrics based on Model Type
     num_classes = cfg['data'].get('num_classes', 1)
