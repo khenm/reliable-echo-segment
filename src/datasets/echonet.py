@@ -358,48 +358,39 @@ class EchoNetVideoDataset(Dataset):
             ed = int(meta["EDFrame"])
             es = int(meta["ESFrame"])
             
-            lower_bound = min(ed, es)
-            upper_bound = max(ed, es)
+            # 1.5x Cycle Logic
+            cycle_dist = abs(ed - es)
             
-            # Ensure the cycle fits in MAX_LEN? If not, we center it.
-            # cycle_len = upper_bound - lower_bound
+            # User request: "length = 1.5 ed and es"
+            # We interpret this as 1.5 * cycle_dist centered around midpoint
+            target_len = int(1.5 * cycle_dist)
             
-            if self.split == "TRAIN":
-                # Valid start range:
-                # 1. start <= lower_bound (so we capture the start of cycle)
-                # 2. start + MAX_LEN >= upper_bound (so we capture the end of cycle)
-                # Combined: upper_bound - MAX_LEN <= start <= lower_bound
+            # Clamp target_len to MAX_LEN (clip_len) to avoid buffer overflow
+            # And clamp to at least some minimum (e.g. cycle_dist)
+            target_len = min(MAX_LEN, max(target_len, cycle_dist))
+            
+            # Determine Window Center
+            midpoint = (ed + es) / 2
+            
+            # Calculate Start Frame
+            start_frame = int(midpoint - target_len / 2)
+            
+            # Ensure valid bounds
+            # 1. Start >= 0
+            # 2. End (start + target_len) <= total_frames
+            
+            # Bias shifts if out of bounds
+            if start_frame < 0:
+                start_frame = 0
+            elif start_frame + target_len > total_frames:
+                start_frame = max(0, total_frames - target_len)
                 
-                s_min = max(0, upper_bound - MAX_LEN) # Earliest possible start to still catch upper_bound
-                s_max = min(lower_bound, total_frames - MAX_LEN) # Latest possible start to still catch lower_bound and fit in video
-                
-                # If s_min > s_max, it means the cycle is wider than MAX_LEN (unlikely for 96 frames)
-                # OR the cycle is at the very edge of the video prevents 
-                
-                if s_min <= s_max:
-                    start_frame = np.random.randint(s_min, s_max + 1)
-                    cycle_found = True
-                else:
-                    # Fallback strategies
-                    if (upper_bound - lower_bound) > MAX_LEN:
-                        # Cycle too big, center it
-                        center = (lower_bound + upper_bound) // 2
-                        start_frame = max(0, center - MAX_LEN // 2)
-                    else:
-                        # Edge case logic, just try to encompass as much as possible
-                        # bias towards lower_bound
-                        start_frame = max(0, lower_bound - 5)
-                    
-            else:
-                # Deterministic Center
-                center = (lower_bound + upper_bound) // 2
-                start_frame = max(0, center - MAX_LEN // 2)
-                
-            # Clamp start_frame
-            start_frame = min(start_frame, max(0, total_frames - 1))
+            # Frames to read is target_len (unless video is too short)
+            frames_to_read = target_len
             
         else:
-            # Fallback to old logic
+            # Fallback to old logic or full clip
+            frames_to_read = MAX_LEN
             if total_frames > MAX_LEN * self.sampling_rate:
                 if self.split == "TRAIN":
                     start_frame = np.random.randint(0, total_frames - MAX_LEN * self.sampling_rate)
@@ -409,13 +400,15 @@ class EchoNetVideoDataset(Dataset):
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
         
         frames = []
-        # Sample MAX_LEN frames
-        for _ in range(MAX_LEN):
+        # Load up to `frames_to_read` frames
+        count = 0
+        while count < frames_to_read:
             ret, frame = cap.read()
             if not ret:
                 break
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             frames.append(frame)
+            count += 1
             
             # Skip frames for sampling rate
             for _ in range(self.sampling_rate - 1):
@@ -428,11 +421,13 @@ class EchoNetVideoDataset(Dataset):
             
         actual_len = len(frames)
         
-        # Pad with Zeros
+        # Pad with Zeros up to MAX_LEN (112)
+        # This is CRITICAL: tensor size must be fixed (MAX_LEN), but actual_len tells model where to stop.
         if actual_len < MAX_LEN:
             pad_needed = MAX_LEN - actual_len
             # Pad with zeros
-            padding = [np.zeros_like(frames[0])] * pad_needed
+            if actual_len > 0:
+                padding = [np.zeros_like(frames[0])] * pad_needed
             frames.extend(padding)
             
         # Stack -> (MAX_LEN, H, W, C)

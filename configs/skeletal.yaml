@@ -1,9 +1,10 @@
-model: "skeletal_tracker"
+model:
+  name: "skeletal_tracker"
+  clip_length: 112
 
 data:
   name: "echonet"
   max_retries: 5
-  subset_size: 100
 
 loss:
   name: "skeletal_loss"
