@@ -207,7 +207,7 @@ class SkeletalTracker(nn.Module):
             # Create mask (B, T)
             # range (1, T) < lengths (B, 1)
             range_tensor = torch.arange(T, device=volume.device).unsqueeze(0)
-            mask = range_tensor < lengths.unsqueeze(1) # (B, T) boolean
+            mask = range_tensor < lengths.to(volume.device).unsqueeze(1) # (B, T) boolean
             
             # For Max (EDV): Masked values set to -inf
             vol_max = volume.clone()
