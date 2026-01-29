@@ -469,6 +469,9 @@ class EchoNetVideoDataset(Dataset):
                  # Reconstruction of frame indices to match clip
                  current_frame_idx = start_frame
                  for t in range(T_clip):
+                     if t >= actual_len:
+                         break
+                         
                      # Tracing frame is integer
                      t_subset = file_tracings[file_tracings["Frame"] == current_frame_idx]
                      if not t_subset.empty:
