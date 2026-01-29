@@ -148,6 +148,27 @@ def run_init(cfg, args_resume):
     log_file = os.path.join(run_dir, ".log") # Hidden log file as requested
     _ = get_logger(log_file=log_file)
     
+    # Initialize WandB
+    if cfg.get('wandb', {}).get('enable', True):
+        import wandb
+        project_name = cfg.get('wandb', {}).get('project', 'reliable-echo-segment')
+        
+        # Determine strict name for the run
+        if cfg['model'].get('name'):
+            run_name = f"{cfg['model']['name']}_{timestamp}"
+        else:
+            run_name = f"run_{timestamp}"
+            
+        wandb.init(
+            project=project_name,
+            config=cfg,
+            name=run_name,
+            dir=run_dir, # Store metadata in the workspace
+            resume="allow",
+            id=cfg['training'].get('run_id') # Use timestamp as ID for ease
+        )
+
+    
     # 2. Dump Configuration (Immutable Snapshot)
     with open(os.path.join(run_dir, "config.yaml"), 'w') as f:
         yaml.dump(cfg, f)
@@ -267,6 +288,12 @@ def run_train(cfg, device):
     logger.info("Starting Training...")
     loaders = get_dataloaders(cfg)
     model = build_model(cfg, device)
+    
+    # Watch model gradients if WandB is enabled
+    if cfg.get('wandb', {}).get('enable', True):
+        import wandb
+        if wandb.run is not None:
+            wandb.watch(model, log="gradients", log_freq=100)
     
     # Define Criterions based on Model Type
     model_name = cfg['model'].get('name', 'VAEUNet')
