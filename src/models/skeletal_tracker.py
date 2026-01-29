@@ -3,225 +3,210 @@ import torch.nn as nn
 import timm
 from src.registry import register_model
 
-class PointSimpsonCalculator(nn.Module):
+class AreaLengthVolumeCalculator(nn.Module):
     """
-    Computes Left Ventricle (LV) Volume using Method of Disks (Simpson's Rule) on coordinate points.
-    Assumes points are normalized [0, 1].
+    Computes Volume using the Area-Length method.
+    V = (8 * Area^2) / (3 * pi * Length)
+    This is less sensitive to pixel calibration noise than summation.
     """
-    def __init__(self, num_slices=20):
+    def __init__(self):
         super().__init__()
-        self.num_slices = num_slices
 
-    def forward(self, points):
+    def forward(self, lengths, widths):
         """
         Args:
-            points: (B, T, 42, 2)
-        Returns:
-            volume: (B, T)
+            lengths: (B, T) - Length of the Long Axis
+            widths: (B, T, 20) - Widths of the ventricle at 20 slices
         """
-        B, T, N, _ = points.shape
-        points = points.view(B * T, N, 2) # (BT, 42, 2)
+        # 1. Calculate Area (Riemann Sum of widths)
+        # Assuming slices are equally spaced along the length
+        # slice_height = Length / 20
+        slice_height = lengths / widths.shape[2] 
         
-        # Apex is average of 20 and 21
-        apex = (points[:, 20, :] + points[:, 21, :]) / 2.0 # (BT, 2)
+        # Area = Sum(width_i * slice_height)
+        total_width = torch.sum(widths, dim=2) # (B, T)
+        area = total_width * slice_height # (B, T)
         
-        # Base is average of 0 and 41
-        base = (points[:, 0, :] + points[:, 41, :]) / 2.0 # (BT, 2)
+        # 2. Area-Length Formula
+        # V = (8 * A^2) / (3 * pi * L)
+        # Add epsilon to L to prevent div by zero
+        volume = (8.0 * (area ** 2)) / (3.0 * 3.14159 * (lengths + 1e-6))
         
-        # Long Axis Vector (Base to Apex)
-        long_axis = apex - base # (BT, 2)
-        length = torch.norm(long_axis, dim=1) # (BT,)
-        
-        
-        # Avoid div by zero
-        safe_len = torch.clamp(length, min=1e-6)
-        u_x = long_axis[:, 0] / safe_len
-        u_y = long_axis[:, 1] / safe_len
-        
-        # Rotate points to frame where Base is (0,0) and Apex is (0, L)
-        # Shift to base
-        p_centered = points - base.unsqueeze(1) # (BT, 42, 2)
-        
-        # Rotation matrix components
-        # cos_t = u_y, sin_t = -u_x (Implicitly used below)
-        pos_axis = p_centered[:, :, 0] * u_x.unsqueeze(1) + p_centered[:, :, 1] * u_y.unsqueeze(1) # (BT, 42)
-        dist_axis = -p_centered[:, :, 0] * u_y.unsqueeze(1) + p_centered[:, :, 1] * u_x.unsqueeze(1) # (BT, 42)
-        
-        # Now we have gathered (y, x) coords in the rectified system.
-        # Left side (0-20): dist_axis should be negative?
-        # Right side (21-41): dist_axis should be positive?
-        # We take abs(dist_axis) as radius.
-        
-        radii = torch.abs(dist_axis)
-        
-        # Slice heights logic replaced by target_h
-        # slice_heights = ... (Unused)
-        # volumes = ... (Unused)
-        
-        
-        # We will use a fixed number of slices relative to L (0 to 1 scale).
-        target_h = torch.linspace(0.05, 0.95, self.num_slices, device=points.device).unsqueeze(0).repeat(B*T, 1) # (BT, 20)
-        
-        # Separate sides
-        n_side = 21
-        side1_h = pos_axis[:, :n_side] / safe_len.unsqueeze(1) # (BT, 21) normalized 0-1
-        side1_r = radii[:, :n_side]
-        
-        # side2_h = pos_axis[:, 21:][:, ::-1] / safe_len.unsqueeze(1) 
-        # use torch.flip for safety
-        side2_h = torch.flip(pos_axis[:, 21:], dims=[1]) / safe_len.unsqueeze(1)
-        side2_r = torch.flip(radii[:, 21:], dims=[1])
-        
-        # vector_interp function
-        r1 = self.batch_interp(side1_h, side1_r, target_h) # (BT, 20)
-        r2 = self.batch_interp(side2_h, side2_r, target_h) # (BT, 20)
-        
-        diameter = r1 + r2
-        disk_areas = (3.14159 / 4.0) * (diameter ** 2)
-        
-        # Sum areas * slice_thickness
-        # slice_thickness = Length / num_slices
-        total_vol = torch.sum(disk_areas, dim=1) * (length / self.num_slices)
-        
-        return total_vol.view(B, T)
-
-    def batch_interp(self, x, y, x_target):
-        """
-        Differentiable linear interpolation for batches.
-        x: (B, N) sorted ascending (mostly)
-        y: (B, N) values
-        x_target: (B, M) query points
-        """
-        _, N = x.shape
-        # M = x_target.shape[1]
-        x, sort_idx = torch.sort(x, dim=1)
-        # gather y
-        y = torch.gather(y, 1, sort_idx)
-        
-        # Find indices
-        # torch.searchsorted needs flat input or same specific shape? 
-        # It supports batched since PyTorch 1.7
-        idx = torch.searchsorted(x, x_target) # (B, M)
-        
-        # Clamp
-        idx_low = torch.clamp(idx - 1, min=0, max=N-2)
-        idx_high = idx_low + 1
-        
-        # Gather x and y
-        x_low = torch.gather(x, 1, idx_low)
-        x_high = torch.gather(x, 1, idx_high)
-        y_low = torch.gather(y, 1, idx_low)
-        y_high = torch.gather(y, 1, idx_high)
-        
-        # Interpolate
-        w = (x_target - x_low) / (x_high - x_low + 1e-6)
-        w = torch.clamp(w, 0.0, 1.0)
-        
-        y_interp = y_low + w * (y_high - y_low)
-        return y_interp
+        return volume
 
 @register_model("skeletal_tracker")
 class SkeletalTracker(nn.Module):
+    @classmethod
+    def from_config(cls, cfg):
+        model_cfg = cfg.get('model', {})
+        return cls(
+            backbone=model_cfg.get('backbone', 'convnext_tiny'),
+            num_points=model_cfg.get('num_points', 42),
+            hidden_dim=model_cfg.get('hidden_dim', 256),
+            pretrained=model_cfg.get('pretrained', True)
+        )
+
     def __init__(self, backbone='convnext_tiny', num_points=42, hidden_dim=256, pretrained=True):
         super().__init__()
         
         # 1. Spatial Encoder
-        if 'convnext' in backbone or 'resnet' in backbone:
-            self.encoder = timm.create_model(backbone, pretrained=pretrained, num_classes=0)
-            self.feature_dim = self.encoder.num_features
-        else:
-            raise ValueError(f"Backbone {backbone} not supported.")
-            
+        self.encoder = timm.create_model(backbone, pretrained=pretrained, num_classes=0)
+        self.feature_dim = self.encoder.num_features
+        
         # 2. Temporal Tracker
         self.temporal = nn.GRU(
             input_size=self.feature_dim,
             hidden_size=hidden_dim,
             num_layers=2,
-            batch_first=True,
-            bidirectional=False # Online tracking usually causal? Re-read: "Temporal dynamics". "Martingales in real-time" -> Causal (unidirectional).
+            batch_first=True
         )
         
-        # 3. Heads
-        self.keypoint_head = nn.Sequential(
+        # 3. Heads (The Tweak: Topology-Preserving)
+        # Head A: The Axis (Base Center (x,y), Apex (x,y)) -> 4 outputs
+        self.head_axis = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, num_points * 2),
-            nn.Sigmoid() # Normalize to 0-1
+            nn.Linear(hidden_dim, 4), 
+            nn.Sigmoid() # Normalized 0-1
         )
         
-        self.simpson = PointSimpsonCalculator()
-        
-    @classmethod
-    def from_config(cls, cfg):
-        return cls(
-            backbone=cfg['model'].get('backbone', 'convnext_tiny'),
-            num_points=cfg['model'].get('num_points', 42),
-            hidden_dim=cfg['model'].get('hidden_dim', 256),
-            pretrained=cfg['model'].get('pretrained', True)
+        # Head B: The Widths (10 slices * 2 sides = 20 widths)
+        # We predict the *radius* from the axis to the wall
+        self.head_widths = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 20),
+            nn.Sigmoid() 
         )
-
+        
+        self.calculator = AreaLengthVolumeCalculator()
+        
     def forward(self, x, lengths=None):
-        """
-        x: (B, C, T, H, W)
-        lengths: (B,) - variable lengths for packing
-        """
-        if x.ndim == 5:
-            B, C, T, H, W = x.shape
-            x = x.transpose(1, 2).reshape(B * T, C, H, W)
-        else:
-            # Handle 4D input (B, C, H, W) treated as T=1
-            B, C, H, W = x.shape
-            T = 1
+        B, C, T, H, W = x.shape
         
-        # Encoder
-        features = self.encoder(x) # (BT, D)
-        features = features.view(B, T, -1) # (B, T, D)
+        # 1. Encode
+        x_flat = x.transpose(1, 2).reshape(B * T, C, H, W)
+        features = self.encoder(x_flat) 
+        features = features.view(B, T, -1) 
         
-        # Temporal
-        if lengths is not None and T > 1:
-            # Pack
-            # lengths must be on CPU for pack_padded_sequence usually
-            lengths_cpu = lengths.to('cpu')
-            # Enforce sorted = False (PyTorch handles reordering internally if needed since 1.1)
-            packed_input = nn.utils.rnn.pack_padded_sequence(
+        # 2. Track
+        if lengths is not None:
+            lengths_cpu = lengths.to('cpu').int()
+            packed_feat = nn.utils.rnn.pack_padded_sequence(
                 features, lengths_cpu, batch_first=True, enforce_sorted=False
             )
-            packed_output, _ = self.temporal(packed_input)
-            
-            # Unpack
+            packed_out, _ = self.temporal(packed_feat)
             hidden_states, _ = nn.utils.rnn.pad_packed_sequence(
-                packed_output, batch_first=True, total_length=T
+                packed_out, batch_first=True, total_length=T
             )
         else:
-            hidden_states, _ = self.temporal(features) # (B, T, H)
+            hidden_states, _ = self.temporal(features)
+            
+        # 3. Predict Geometry
+        # Axis: (B, T, 4) -> [BaseX, BaseY, ApexX, ApexY]
+        axis = self.head_axis(hidden_states)
+        base = axis[:, :, :2]
+        apex = axis[:, :, 2:]
         
-        # Heads
-        kps_flat = self.keypoint_head(hidden_states) # (B, T, 42*2)
-        kps = kps_flat.view(B, T, 42, 2)
+        # Widths: (B, T, 20)
+        # These are perpendicular distances from axis to wall
+        radii = self.head_widths(hidden_states) 
         
-        # Volume
-        volume = self.simpson(kps) # (B, T)
+        # 4. Calculate Physics
+        # Long Axis Length
+        long_axis_vec = apex - base
+        L_t = torch.norm(long_axis_vec, dim=2) # (B, T)
         
-        # EF Calculation (Masked Max/Min)
+        # Volume (Area-Length Method)
+        # Note: We combine left/right radii into total slice widths
+        # Assuming radii output is [r_l1, ... r_l10, r_r1, ... r_r10]
+        # We pair them: w_1 = r_l1 + r_r1
+        left_radii = radii[:, :, :10]
+        right_radii = radii[:, :, 10:]
+        slice_widths = left_radii + right_radii # (B, T, 10)
+        
+        volume = self.calculator(L_t, slice_widths) # (B, T)
+        
+        # 5. Reconstruct 42 Points (For Visualization & Loss)
+        # We mathematically plot the points so we can still use your SkeletalLoss!
+        kps = self._reconstruct_points(base, apex, left_radii, right_radii)
+        
+        # 6. EF Calculation (Masked)
         if lengths is not None:
-            # Create mask (B, T)
-            # range (1, T) < lengths (B, 1)
-            range_tensor = torch.arange(T, device=volume.device).unsqueeze(0)
-            mask = range_tensor < lengths.to(volume.device).unsqueeze(1) # (B, T) boolean
+            range_tensor = torch.arange(T, device=x.device).unsqueeze(0)
+            mask = range_tensor < lengths.unsqueeze(1)
             
-            # For Max (EDV): Masked values set to -inf
             vol_max = volume.clone()
-            vol_max[~mask] = -1e9
-            edv, _ = vol_max.max(dim=1, keepdim=True)
-            
-            # For Min (ESV): Masked values set to +inf
             vol_min = volume.clone()
+            vol_max[~mask] = -1e9
             vol_min[~mask] = 1e9
+            
+            edv, _ = vol_max.max(dim=1, keepdim=True)
             esv, _ = vol_min.min(dim=1, keepdim=True)
         else:
             edv, _ = volume.max(dim=1, keepdim=True)
             esv, _ = volume.min(dim=1, keepdim=True)
 
-        ef = (edv - esv) / (edv + 1e-6) # (B, 1)
+        ef = (edv - esv) / (edv + 1e-6)
         
         return kps, volume, ef
+
+    def _reconstruct_points(self, base, apex, left_radii, right_radii):
+        """
+        Reconstructs the 42 (x,y) coordinates from Axis + Radii.
+        This allows us to still supervise with the ground truth points.
+        """
+        B, T, _ = base.shape
+        
+        # Direction Vector
+        v = apex - base # (B, T, 2)
+        length = torch.norm(v, dim=2, keepdim=True) + 1e-6
+        u = v / length # Unit vector pointing up
+        
+        # Perpendicular Vector (Rotate -90 deg)
+        # (x, y) -> (y, -x)
+        u_perp = torch.stack([u[:, :, 1], -u[:, :, 0]], dim=2) # (B, T, 2)
+        
+        # Generate 10 slice positions along the axis (0.05 to 0.95)
+        # We have 10 radii per side
+        num_slices = 10
+        t_vals = torch.linspace(0.05, 0.95, num_slices, device=base.device)
+        
+        left_radii_20 = torch.nn.functional.interpolate(left_radii.view(B*T, 1, 10), size=20, mode='linear', align_corners=True).view(B, T, 20)
+        right_radii_20 = torch.nn.functional.interpolate(right_radii.view(B*T, 1, 10), size=20, mode='linear', align_corners=True).view(B, T, 20)
+        
+        t_vals_20 = torch.linspace(0.05, 0.95, 20, device=base.device).view(1, 1, 20, 1)
+        
+        # Calculate centers of slices
+        # Center_i = Base + t_i * (Apex - Base)
+        # (B, T, 1, 2) + (1, 1, 20, 1) * (B, T, 1, 2) -> (B, T, 20, 2)
+        centers = base.unsqueeze(2) + t_vals_20 * v.unsqueeze(2)
+        
+        # Calculate Left Points: Center + Radius * Perp
+        # (B, T, 20, 2) + (B, T, 20, 1) * (B, T, 1, 2)
+        p_left = centers + left_radii_20.unsqueeze(3) * u_perp.unsqueeze(2)
+        
+        # Calculate Right Points: Center - Radius * Perp
+        p_right = centers - right_radii_20.unsqueeze(3) * u_perp.unsqueeze(2)
+        
+        # Apex (Index 20, 21): Just use the Apex coordinate
+        p_apex = apex.unsqueeze(2) # (B, T, 1, 2)
+        
+        # Base (Index 0, 41): Just use Base coordinate? 
+        # Ideally, we should predict base width. But using Base Center is fine for now.
+        p_base = base.unsqueeze(2)
+        
+        
+        # Let's construct:
+        kps_list = [p_base] # 0
+        kps_list.append(p_left) # 1..20
+        kps_list.append(p_apex) # 21 (Use apex for both 20/21 junction?)
+        
+        # This reconstruction effectively "projects" the learned shape onto the 42-point skeleton.
+        pts_left = torch.cat([p_left, p_apex], dim=2) # 21 points
+        pts_right = torch.cat([p_apex, torch.flip(p_right, [2])], dim=2) # 21 points
+        
+        # This gives 42 points.
+        kps = torch.cat([pts_left, pts_right], dim=2)
+        
+        return kps

@@ -14,6 +14,7 @@ from tqdm import tqdm
 from src.utils.logging import get_logger
 from src.utils.util_ import load_checkpoint_dict, save_checkpoint, load_full_checkpoint
 from src.models.temporal import TemporalGate
+import wandb
 
 logger = get_logger()
 
@@ -433,6 +434,14 @@ class Trainer:
                              e_norm = ef_grad.norm().item() if ef_grad is not None else 0.0
                              
                              print(f"Seg Decoder Grad: {s_norm:.4f} | EF Head Grad: {e_norm:.4f}")
+                             
+                             if wandb.run is not None:
+                                 wandb.log({
+                                     "grad/seg_head_norm": s_norm, 
+                                     "grad/ef_head_norm": e_norm,
+                                     "epoch": ep
+                                 }, commit=False) # commit=False to merge with batch log
+
                     except Exception as e:
                         # Fail silently to avoid crashing run if model structure differs
                         pass
@@ -444,6 +453,13 @@ class Trainer:
                 for k, v in loss_dict.items():
                     if k in epoch_loss_components:
                          epoch_loss_components[k] += v
+                
+                # WandB Batch Logging
+                if wandb.run is not None:
+                    log_dict = {"train/loss": loss.item(), "epoch": ep}
+                    for k, v in loss_dict.items():
+                        log_dict[f"train/{k}"] = v
+                    wandb.log(log_dict)
                 
                 # Pbar update
                 pbar_postfix = {"loss": f"{loss.item():.4f}"}
@@ -469,6 +485,22 @@ class Trainer:
                 log_msg += f"valDice={val_score:.4f}"
             
             logger.info(log_msg)
+
+            if wandb.run is not None:
+                val_log = {"epoch": ep, "train/avg_loss": avg_run_loss}
+                for k, v in epoch_loss_components.items():
+                     val_log[f"train/avg_{k}"] = v / len(self.ld_tr)
+
+                if self.is_regression or self.is_dual_stream or self.is_skeletal:
+                    val_log.update({
+                        "val/mae": val_mae,
+                        "val/dice": val_dice,
+                        "val/score": val_score
+                    })
+                else:
+                    val_log["val/dice"] = val_score
+                
+                wandb.log(val_log)
 
             if val_score > best_metric:
                 best_metric = val_score
