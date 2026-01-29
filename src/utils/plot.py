@@ -982,3 +982,59 @@ def plot_volume_tracing(filename, csv_path="datasets/echonet-dynamic/VolumeTraci
         plt.show()
     
     return fig
+
+def plot_volume_debug(volume_curve, ed_frame, es_frame, ef_gt, save_path=None):
+    """
+    Plots the normalized Volume curve with GT EF points for forensic debugging.
+    
+    Args:
+        volume_curve (np.array): Volume values over time (T,).
+        ed_frame (int): Index of ED frame (Max Vol).
+        es_frame (int): Index of ES frame (Min Vol).
+        ef_gt (float): Ground truth EF (0.0 to 1.0, or 0-100).
+        save_path (str): Path to save the plot.
+    """
+    setup_style()
+    
+    # Normalize Volume so Peak = 1.0
+    max_vol = volume_curve.max() + 1e-9
+    norm_vol = volume_curve / max_vol
+    
+    T = len(norm_vol)
+    t_vals = np.arange(T)
+    
+    fig, ax = plt.subplots(figsize=(6, 4), dpi=300)
+    
+    # Line 1: Predicted Volume Curve (Blue)
+    ax.plot(t_vals, norm_vol, color='#1f77b4', linewidth=2, label='Predicted Volume')
+    
+    # Line 2: GT Points (Red)
+    # Point 1: At ED frame, value 1.0
+    # Point 2: At ES frame, value 1.0 - EF_gt (assuming normalized ED is 1.0)
+    
+    # Handle scaler vs percent
+    if ef_gt > 1.0:
+        ef_gt /= 100.0
+        
+    gt_ed_val = 1.0
+    gt_es_val = 1.0 - ef_gt
+    
+    ax.scatter([ed_frame], [gt_ed_val], color='red', s=50, zorder=5, label='GT Reference')
+    ax.scatter([es_frame], [gt_es_val], color='red', s=50, zorder=5)
+    
+    # Draw visuals
+    ax.plot([ed_frame, es_frame], [gt_ed_val, gt_es_val], 'r--', alpha=0.5)
+    
+    ax.set_xlabel("Frame Index")
+    ax.set_ylabel("Normalized Volume (AU)")
+    ax.set_title("Volume Curve Forensic Analysis")
+    ax.set_ylim(0, 1.1)
+    ax.legend()
+    
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, bbox_inches='tight')
+        print(f"Debug Plot Saved: {save_path}")
+        plt.close()
+    else:
+        plt.show()

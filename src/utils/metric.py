@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 from sklearn.metrics import roc_curve, roc_auc_score
 
 def compute_dice_coefficient(gt, pr, label_idx=1):
@@ -156,3 +157,34 @@ def get_roc_auc_low_ef(y_ref, y_pred_val, threshold=45.0):
     fpr, tpr, _ = roc_curve(y_true_bin, scores)
     auc = roc_auc_score(y_true_bin, scores)
     return fpr, tpr, auc
+class SkeletalError:
+    """
+    Computes the Mean Euclidean Distance (Pixel Error) for skeletal keypoints.
+    """
+    def __init__(self):
+        self.reset()
+        
+    def reset(self):
+        self.total_dist = 0.0
+        self.count = 0
+        
+    def __call__(self, preds, targets):
+        """
+        Args:
+            preds (torch.Tensor): Predicted keypoints (B, T, N, 2).
+            targets (torch.Tensor): Ground truth keypoints (B, T, N, 2).
+        """
+        # Calculate Euclidean distance per point
+        # diff: (B, T, N, 2)
+        diff = preds - targets
+        
+        # dist: (B, T, N)
+        dist = torch.norm(diff, dim=-1)
+        
+        self.total_dist += dist.sum().item()
+        self.count += dist.numel()
+        
+    def aggregate(self):
+        if self.count == 0:
+            return 0.0
+        return self.total_dist / self.count

@@ -91,7 +91,7 @@ def load_model_weights(model, checkpoint, strict=True):
     model.load_state_dict(state_dict, strict=strict)
     return state_dict
 
-def load_full_checkpoint(ckpt_path, model, optimizer=None, device='cpu', load_rng=False):
+def load_full_checkpoint(ckpt_path, model, optimizer=None, device='cpu', load_rng=False, strict=True):
     """
     Loads a full checkpoint including model state, optimizer state, epoch, and RNG states.
     
@@ -101,6 +101,7 @@ def load_full_checkpoint(ckpt_path, model, optimizer=None, device='cpu', load_rn
         optimizer (torch.optim.Optimizer, optional): Optimizer to load state into.
         device (torch.device | str): Device to load checkpoint onto.
         load_rng (bool): Whether to restore RNG states.
+        strict (bool): Whether to enforce strict key matching.
         
     Returns:
         tuple: (start_epoch, best_metric)
@@ -132,7 +133,7 @@ def load_full_checkpoint(ckpt_path, model, optimizer=None, device='cpu', load_rn
 
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
         # New format
-        model.load_state_dict(checkpoint["model_state_dict"])
+        model.load_state_dict(checkpoint["model_state_dict"], strict=strict)
         
         if optimizer is not None:
             if "optimizer_state_dict" in checkpoint:
