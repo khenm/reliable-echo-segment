@@ -25,6 +25,7 @@ from src.utils.plot import (
     plot_conformal_segmentation,
     plot_martingale
 )
+from src.utils.metric import SkeletalError
 from src.analysis.latent_profile import LatentProfiler
 from src.tta.engine import TTA_Engine, SafeTTAEngine
 from src.tta.auditor import SelfAuditor
@@ -367,6 +368,8 @@ def run_train(cfg, device):
     if is_regression or model_name == "skeletal_tracker":
         metrics['mae'] = MAEMetric(reduction="mean")
         metrics['dice'] = DiceMetric(include_background=include_bg, reduction="mean")
+        if model_name == "skeletal_tracker":
+            metrics['skeletal'] = SkeletalError()
     else:
         metrics['dice'] = DiceMetric(include_background=include_bg, reduction="mean")
 

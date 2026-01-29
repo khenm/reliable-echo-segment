@@ -457,7 +457,6 @@ class EchoNetVideoDataset(Dataset):
         # Output shape: (T, H, W) -> will become (1, T, H, W) after transform usually or we handle it manually
         mask_clip = np.zeros((T_clip, H, W), dtype=np.uint8)
         frame_mask = np.zeros((T_clip,), dtype=np.float32)
-        frame_mask[:actual_len] = 1.0 # Only valid frames are masked as 1
         
         # Keypoints: (T, 42, 2) - Normalized [0, 1]
         # We fill with -1 or similar for missing frames, effectively 0 with frame_mask=0

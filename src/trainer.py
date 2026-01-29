@@ -14,6 +14,7 @@ from tqdm import tqdm
 from src.utils.logging import get_logger
 from src.utils.util_ import load_checkpoint_dict, save_checkpoint, load_full_checkpoint
 from src.models.temporal import TemporalGate
+from src.utils.plot import plot_volume_debug
 import wandb
 
 logger = get_logger()
@@ -127,7 +128,8 @@ class Trainer:
         return load_full_checkpoint(path, self.model, 
                                     optimizer=self.opt if load_optimizer else None, 
                                     device=self.device, 
-                                    load_rng=load_optimizer)
+                                    load_rng=load_optimizer,
+                                    strict=False)
 
     def train(self):
         """
@@ -143,7 +145,7 @@ class Trainer:
         
         start_epoch = 1
         if self.cfg['training'].get('resume_path'):
-            start_epoch, best_metric = self._load_checkpoint(self.cfg['training']['resume_path'], load_optimizer=True)
+            start_epoch, best_metric = self._load_checkpoint(self.cfg['training']['resume_path'], load_optimizer=False)
 
         for ep in range(start_epoch, epochs + 1):
             self.model.train()
@@ -479,8 +481,12 @@ class Trainer:
                 log_msg += f"{k}={avg_comp:.6f} "
             
             if self.is_regression or self.is_dual_stream or self.is_skeletal:
-                val_score, val_mae, val_dice = val_result
-                log_msg += f"valMAE={val_mae:.4f} valDice={val_dice:.4f}"
+                if len(val_result) == 4:
+                    val_score, val_mae, val_dice, val_skel = val_result
+                    log_msg += f"valMAE={val_mae:.4f} valDice={val_dice:.4f} valSkel={val_skel:.4f}"
+                else:
+                    val_score, val_mae, val_dice = val_result
+                    log_msg += f"valMAE={val_mae:.4f} valDice={val_dice:.4f}"
             else:
                 val_score = val_result
                 log_msg += f"valDice={val_score:.4f}"
@@ -498,6 +504,8 @@ class Trainer:
                         "val/dice": val_dice,
                         "val/score": val_score
                     })
+                    if len(val_result) == 4:
+                         val_log["val/skeletal"] = val_skel
                 else:
                     val_log["val/dice"] = val_score
                 
@@ -658,10 +666,35 @@ class Trainer:
                         
                     with torch.amp.autocast(device_type=dev_type):
                         # kps, volume, ef
-                        _, _, v_ef_pred = self.model(v_img)
+                        # kps, volume, ef
+                        v_kps_pred, v_vol_pred, v_ef_pred = self.model(v_img)
+
+                        # DEBUG: Plot First Case Volume Curve
+                        if not hasattr(self, '_debug_plotted'):
+                             # Select first in batch
+                             vol_curve = v_vol_pred[0].detach().cpu().float().numpy() # (T,)
+                             gt_ef = v_ef_target[0].item()
+                             
+                             # Find ED (Max) and ES (Min)
+                             ed_idx = np.argmax(vol_curve)
+                             es_idx = np.argmin(vol_curve)
+                             
+                             save_path = os.path.join(self.run_dir, "plot_volume_debug.png")
+                             try:
+                                 plot_volume_debug(vol_curve, ed_idx, es_idx, gt_ef, save_path=save_path)
+                                 self._debug_plotted = True
+                             except Exception as e:
+                                 logger.warning(f"Failed to plot volume debug: {e}")
                         
                     if 'mae' in self.metrics:
                         self.metrics['mae'](v_ef_pred, v_ef_target)
+                        
+                    if 'skeletal' in self.metrics:
+                        # Get GT keypoints
+                        v_kps_target = vb.get("keypoints")
+                        if v_kps_target is not None:
+                            v_kps_target = v_kps_target.to(self.device)
+                            self.metrics['skeletal'](v_kps_pred, v_kps_target)
 
                 else:
                     v_img = vb["image"].to(self.device)
@@ -713,6 +746,9 @@ class Trainer:
             dice = float(self.metrics['dice'].aggregate().cpu()) if 'dice' in self.metrics and self.metrics['dice'].get_buffer() is not None else 0.0
             # Return tuple: (combined_score, mae, dice)
             # Use negative MAE as score since lower MAE is better
+            if self.is_skeletal and 'skeletal' in self.metrics:
+                skel = float(self.metrics['skeletal'].aggregate())
+                return (-mae, mae, dice, skel)
             return (-mae, mae, dice)
         else:
             return float(self.metrics['dice'].aggregate().cpu()) if 'dice' in self.metrics else 0.0
