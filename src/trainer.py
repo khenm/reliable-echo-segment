@@ -692,9 +692,19 @@ class Trainer:
                     if 'skeletal' in self.metrics:
                         # Get GT keypoints
                         v_kps_target = vb.get("keypoints")
-                        if v_kps_target is not None:
+                        v_frame_mask = vb.get("frame_mask")
+                        
+                        if v_kps_target is not None and v_frame_mask is not None:
                             v_kps_target = v_kps_target.to(self.device)
-                            self.metrics['skeletal'](v_kps_pred, v_kps_target)
+                            v_frame_mask = v_frame_mask.to(self.device)
+                            
+                            valid_mask = v_frame_mask.bool() # (B, T)
+                            if valid_mask.any():
+                                # Select valid frames (flattens the batch and time dims)
+                                valid_preds = v_kps_pred[valid_mask] # (N_valid, 42, 2)
+                                valid_targets = v_kps_target[valid_mask] # (N_valid, 42, 2)
+                                
+                                self.metrics['skeletal'](valid_preds, valid_targets)
 
                 else:
                     v_img = vb["image"].to(self.device)
