@@ -13,4 +13,5 @@ reportlab
 pandas
 pyyaml
 scikit-learn
-filelock>=3.15wandb
+filelock>=3.15
+wandb
