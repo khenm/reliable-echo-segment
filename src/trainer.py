@@ -380,6 +380,7 @@ class Trainer:
                          # Forward: kps, volume, ef
                          lengths = batch.get("lengths")
                          if lengths is not None:
+                             lengths = lengths.to(self.device)
                              pred_kps, vol, ef = self.model(imgs, lengths=lengths)
                          else:
                              pred_kps, vol, ef = self.model(imgs)
