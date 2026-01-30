@@ -34,7 +34,7 @@ class WeakSegLoss(nn.Module):
         self.smooth_weight = smooth_weight
         self.contrast_weight = contrast_weight
 
-        self.dice_func = DiceCELoss(sigmoid=True, reduction='none')
+        self.dice_func = DiceCELoss(sigmoid=True, reduction='mean')
         self.mse = nn.MSELoss()
         self.geo_loss = GeometricSmoothLoss()
 
@@ -85,12 +85,22 @@ class WeakSegLoss(nn.Module):
         target_masks: torch.Tensor,
         frame_mask: torch.Tensor
     ) -> torch.Tensor:
-        loss_dice_raw = self.dice_func(pred_logits, target_masks)
-        if loss_dice_raw.dim() > 2:
-            loss_dice_raw = loss_dice_raw.mean(dim=[2, 3, 4])
+        B, T = pred_logits.shape[:2]
+        total_loss = 0.0
+        num_labeled = 0
 
-        num_labeled = frame_mask.sum() + 1e-6
-        return (loss_dice_raw * frame_mask).sum() / num_labeled
+        for b in range(B):
+            for t in range(T):
+                if frame_mask[b, t] > 0.5:
+                    pred_frame = pred_logits[b, t:t+1]
+                    target_frame = target_masks[b, t:t+1]
+                    total_loss = total_loss + self.dice_func(pred_frame, target_frame)
+                    num_labeled += 1
+
+        if num_labeled == 0:
+            return torch.tensor(0.0, device=pred_logits.device)
+
+        return total_loss / num_labeled
 
     def _compute_contrast_loss(
         self,
