@@ -583,14 +583,14 @@ class EchoNet:
         num_workers = cfg['training'].get('num_workers', 4)
         model_name = cfg['model'].get('name', 'VAEUNet') # Default to VAEUNet
         
-        if model_name.lower() in ["r2plus1d", "unet_tcm", "skeletal_tracker", "segment_tracker"]:
+        if model_name.lower() in ["r2plus1d", "unet_tcm", "skeletal_tracker", "segment_tracker", "temporal_segment_tracker"]:
             # Video Configuration
             clip_len = cfg['model'].get('clip_length', 32)
             
             # Force keypoints for skeletal_tracker, disable for segmentation
             if model_name.lower() == "skeletal_tracker":
                 return_kps = True
-            elif model_name.lower() == "segment_tracker":
+            elif model_name.lower() in ["segment_tracker", "temporal_segment_tracker"]:
                 return_kps = False
             else:
                 return_kps = cfg['model'].get('return_keypoints', False)

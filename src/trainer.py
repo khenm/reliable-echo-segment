@@ -50,7 +50,7 @@ class Trainer:
         self.is_unet_2d = (self.model_name in ["unet_tcm"])
         self.is_dual_stream = (self.model_name == "dual_stream")
         self.is_skeletal = (self.model_name == "skeletal_tracker")
-        self.is_segmentation = (self.model_name == "segment_tracker")
+        self.is_segmentation = (self.model_name in ["segment_tracker", "temporal_segment_tracker"])
 
     def _setup_optimization(self):
         # Temporal Gate
@@ -206,9 +206,16 @@ class Trainer:
             if frame_mask is not None:
                 frame_mask = frame_mask.to(self.device)
 
-            l_seg, c_dict = self.criterions['segmentation'](
-                mask_logits, target_masks, ef, ef_target, frame_mask
-            )
+            # Check if loss function accepts frames (TemporalWeakSegLoss)
+            loss_fn = self.criterions['segmentation']
+            if hasattr(loss_fn, 'cycle_loss'):
+                l_seg, c_dict = loss_fn(
+                    mask_logits, target_masks, ef, ef_target, frame_mask, imgs
+                )
+            else:
+                l_seg, c_dict = loss_fn(
+                    mask_logits, target_masks, ef, ef_target, frame_mask
+                )
             loss += l_seg
             comps['segmentation'] = l_seg.item()
             comps.update({k: v.item() for k, v in c_dict.items()})

@@ -1,0 +1,8 @@
+name: "temporal_segment_tracker"
+clip_length: 112
+backbone: "convnext_tiny"
+hidden_dim: 256
+output_size: 112
+shift_fraction: 0.125
+use_convlstm: true
+pretrained: true
