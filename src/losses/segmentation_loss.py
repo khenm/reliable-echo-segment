@@ -7,20 +7,26 @@ from src.utils.logging import get_logger
 logger = get_logger()
 
 
-@register_loss("SegmentationLoss")
-class SegmentationLoss(nn.Module):
+@register_loss("WeaklySupervisedSegLoss")
+class WeaklySupervisedSegLoss(nn.Module):
     """
-    Phased Loss for Temporal Segmentation.
+    Weakly Supervised Loss for Temporal Segmentation.
 
-    Phase 1 (Geometry, epochs 1-50): High dice_weight, zero smooth_weight
-        - Dice+CE forces mask overlap with GT, prevents sphere collapse
-    Phase 2 (Dynamics, epochs 51-100): Add smooth_weight
-        - Temporal smoothness penalizes mask flicker between frames
+    Components:
+        1. Dice+CE (Strong): Applied to labeled frames only (via frame_mask)
+        2. EF Regression (Weak): Backprops through entire volume curve
+        3. Temporal Smoothness (Unsupervised): Prevents frame jitter
+
+    The EF loss enables supervision on ALL frames through the differentiable
+    volume calculation path, even when only ED/ES frames have ground-truth masks.
     """
-    def __init__(self, dice_weight=1.0, smooth_weight=0.0, phase_switch_epoch=50):
+    def __init__(self, dice_weight=1.0, ef_weight=1.0, smooth_weight=0.5, phase_switch_epoch=50):
         super().__init__()
         self.dice_ce = DiceCELoss(sigmoid=True, squared_pred=True, reduction='mean')
+        self.mse = nn.MSELoss()
+
         self.dice_weight = dice_weight
+        self.ef_weight = ef_weight
         self.smooth_weight = smooth_weight
         self.phase_switch_epoch = phase_switch_epoch
         self.current_epoch = 0
@@ -28,12 +34,14 @@ class SegmentationLoss(nn.Module):
     def set_epoch(self, epoch):
         self.current_epoch = epoch
 
-    def forward(self, pred_logits, target_masks, frame_mask=None):
+    def forward(self, pred_logits, target_masks, pred_ef, target_ef, frame_mask=None):
         """
         Args:
             pred_logits: (B, 1, T, H, W) - Raw logits from decoder
             target_masks: (B, 1, T, H, W) - Ground truth binary masks
-            frame_mask: (B, T) - Optional mask for valid frames
+            pred_ef: (B, 1) - EF calculated from predicted masks
+            target_ef: (B, 1) - Clinical EF ground truth
+            frame_mask: (B, T) - Optional mask for valid frames (1=labeled, 0=unlabeled)
         Returns:
             total_loss: Scalar
             components: Dict of loss components
@@ -48,9 +56,8 @@ class SegmentationLoss(nn.Module):
                 align_corners=False
             ).view(B, C, T, *target_masks.shape[-2:])
 
+        # 1. Strong Supervision (Dice+CE) - ONLY on labeled frames
         if frame_mask is not None:
-            frame_mask_expanded = frame_mask.view(B, 1, T, 1, 1).expand_as(pred_logits)
-
             valid_count = frame_mask.sum()
             if valid_count == 0:
                 loss_dice = torch.tensor(0.0, device=pred_logits.device, requires_grad=True)
@@ -68,6 +75,10 @@ class SegmentationLoss(nn.Module):
         else:
             loss_dice = self.dice_ce(pred_logits, target_masks)
 
+        # 2. Weak Supervision (EF Regression) - Backprops to ALL frames
+        loss_ef = self.mse(pred_ef, target_ef)
+
+        # 3. Unsupervised (Temporal Smoothness) - Phased activation
         effective_smooth_weight = self.smooth_weight
         if self.current_epoch < self.phase_switch_epoch:
             effective_smooth_weight = 0.0
@@ -84,9 +95,15 @@ class SegmentationLoss(nn.Module):
             else:
                 loss_smooth = diff.abs().mean()
 
-        total_loss = (self.dice_weight * loss_dice) + (effective_smooth_weight * loss_smooth)
+        total_loss = (
+            self.dice_weight * loss_dice +
+            self.ef_weight * loss_ef +
+            effective_smooth_weight * loss_smooth
+        )
 
         return total_loss, {
             "loss_dice": loss_dice,
+            "loss_ef": loss_ef,
             "loss_smooth": loss_smooth,
         }
+

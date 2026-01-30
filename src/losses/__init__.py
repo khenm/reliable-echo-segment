@@ -1,6 +1,6 @@
 from .consistency import ConsistencyLoss
 from .ef import DifferentiableEFLoss
-from .segmentation_loss import SegmentationLoss
+from .segmentation_loss import WeaklySupervisedSegLoss
 from .semi_supervised import EchoSemiSupervisedLoss
 from .skeletal_loss import SkeletalLoss
 from .topology_loss import TopologyLoss
@@ -10,9 +10,8 @@ __all__ = [
     'ConsistencyLoss',
     'DifferentiableEFLoss',
     'EchoSemiSupervisedLoss',
-    'SegmentationLoss',
+    'WeaklySupervisedSegLoss',
     'SkeletalLoss',
     'TopologyLoss',
     'KLLoss'
 ]
-
