@@ -403,18 +403,28 @@ class Trainer:
     # --- Utils ---
     
     def _save_checkpoint(self, ep, metric, is_best=False):
+        rng_state = {
+            "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "numpy": np.random.get_state(),
+            "python": random.getstate()
+        }
         state = {
             'epoch': ep,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.opt.state_dict(),
+            'scaler_state_dict': self.scaler.state_dict(),
+            'rng_state': rng_state,
             'best_metric': metric
         }
         if is_best:
             save_checkpoint(self.vault_path, state)
+            logger.info(f"Saved Best Checkpoint: {self.vault_path}")
         save_checkpoint(self.ckpt_path, state)
+        logger.info(f"Saved Last Checkpoint: {self.ckpt_path}")
 
     def _load_checkpoint(self, path):
-         return load_full_checkpoint(path, self.model, optimizer=self.opt, device=self.device)
+        return load_full_checkpoint(path, self.model, optimizer=self.opt, scaler=self.scaler, device=self.device, load_rng=True)
 
     def _log_epoch(self, ep, loss, comps, val_res):
         msg = f"E{ep:03d} loss={loss:.4f} " + " ".join([f"{k}={v:.4f}" for k, v in comps.items()])

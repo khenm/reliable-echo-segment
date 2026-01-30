@@ -91,14 +91,15 @@ def load_model_weights(model, checkpoint, strict=True):
     model.load_state_dict(state_dict, strict=strict)
     return state_dict
 
-def load_full_checkpoint(ckpt_path, model, optimizer=None, device='cpu', load_rng=False, strict=True):
+def load_full_checkpoint(ckpt_path, model, optimizer=None, scaler=None, device='cpu', load_rng=False, strict=True):
     """
-    Loads a full checkpoint including model state, optimizer state, epoch, and RNG states.
+    Loads a full checkpoint including model state, optimizer state, scaler state, epoch, and RNG states.
     
     Args:
         ckpt_path (str): Path to the checkpoint file.
         model (torch.nn.Module): The model to load.
         optimizer (torch.optim.Optimizer, optional): Optimizer to load state into.
+        scaler (torch.amp.GradScaler, optional): Scaler to load state into.
         device (torch.device | str): Device to load checkpoint onto.
         load_rng (bool): Whether to restore RNG states.
         strict (bool): Whether to enforce strict key matching.
@@ -124,7 +125,7 @@ def load_full_checkpoint(ckpt_path, model, optimizer=None, device='cpu', load_rn
             torch.set_rng_state(rng_state["torch"])
             # Only restore cuda rng if available and state exists
             if torch.cuda.is_available() and "cuda" in rng_state and rng_state["cuda"] is not None:
-                torch.cuda.set_rng_state(rng_state["cuda"])
+                torch.cuda.set_rng_state_all(rng_state["cuda"])
             np.random.set_state(rng_state["numpy"])
             random.setstate(rng_state["python"])
             print("Restored RNG states")
@@ -140,6 +141,12 @@ def load_full_checkpoint(ckpt_path, model, optimizer=None, device='cpu', load_rn
                 optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             else:
                 print("Warning: Optimizer state not found in checkpoint.")
+
+        if scaler is not None:
+            if "scaler_state_dict" in checkpoint:
+                scaler.load_state_dict(checkpoint["scaler_state_dict"])
+            else:
+                print("Warning: Scaler state not found in checkpoint.")
                 
         if load_rng and "rng_state" in checkpoint:
             restore_rng(checkpoint["rng_state"])
