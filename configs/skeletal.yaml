@@ -11,6 +11,7 @@ loss:
   weights:
     smooth: 0.1
     ef: 1.0
+    topology: 1.0
 
 training:
   epochs: 50
