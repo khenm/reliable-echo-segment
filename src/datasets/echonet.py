@@ -590,7 +590,7 @@ class EchoNet:
             # Force keypoints for skeletal_tracker, disable for segmentation
             if model_name.lower() == "skeletal_tracker":
                 return_kps = True
-            elif model_name.lower() == "echo_segment_tracker":
+            elif model_name.lower() == "segment_tracker":
                 return_kps = False
             else:
                 return_kps = cfg['model'].get('return_keypoints', False)
