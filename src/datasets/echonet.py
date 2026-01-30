@@ -583,7 +583,7 @@ class EchoNet:
         num_workers = cfg['training'].get('num_workers', 4)
         model_name = cfg['model'].get('name', 'VAEUNet') # Default to VAEUNet
         
-        if model_name.lower() in ["r2plus1d", "unet_tcm", "skeletal_tracker", "echo_segment_tracker"]:
+        if model_name.lower() in ["r2plus1d", "unet_tcm", "skeletal_tracker", "segment_tracker"]:
             # Video Configuration
             clip_len = cfg['model'].get('clip_length', 32)
             
