@@ -39,12 +39,12 @@ class SkeletalLoss(nn.Module):
         if self.skeletal_weight <= 0:
             return torch.tensor(0.0, device=preds.device)
             
-        loss_mse = self.mse(preds, targets).mean(dim=(2, 3))
+        loss_mse = self.mse(preds, targets).mean(dim=(2, 3)) # (B, T, 21, 2)
         
         if frame_mask is not None:
-             loss_sup = (loss_mse * frame_mask).sum()
-             num_labeled = frame_mask.sum() + 1e-6
-             return loss_sup / num_labeled
+            loss_sup = (loss_mse * frame_mask).sum()
+            num_labeled = frame_mask.sum() + 1e-6
+            return loss_sup / num_labeled
         
         return loss_mse.mean()
 

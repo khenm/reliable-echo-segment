@@ -100,14 +100,15 @@ class Trainer:
             
             # Checkpointing
             score = val_result if not isinstance(val_result, tuple) else val_result[0]
+            is_best = False
             if score > best_metric:
                 best_metric = score
                 wait = 0
-                self._save_checkpoint(ep, best_metric, is_best=True)
+                is_best = True
             else:
                 wait += 1
             
-            self._save_checkpoint(ep, best_metric, is_best=False)
+            self._save_checkpoint(ep, best_metric, is_best=is_best)
             
             if wait >= patience:
                 logger.info("⏹ Early stop")
