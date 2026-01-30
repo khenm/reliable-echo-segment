@@ -297,7 +297,7 @@ def _get_criterions(cfg):
     elif model_name == "segment_tracker":
         phase_switch = cfg.get('loss', {}).get('phase_switch_epoch', 50)
         criterions['segmentation'] = build_loss(
-            "WeaklySupervisedSegLoss",
+            "WeakSegLoss",
             dice_weight=weights.get('dice', 1.0),
             ef_weight=weights.get('ef', 1.0),
             smooth_weight=weights.get('smooth', 0.5),
@@ -371,10 +371,10 @@ def run_eval(cfg, device):
 def run_tta(cfg, device):
     logger.info("Starting Test-Time Adaptation (TTA)...")
     
-    original_bs = cfg['training'].get('batch_size_train')
-    cfg['training']['batch_size_train'] = 1
+    original_bs = cfg['training'].get('batch_size')
+    cfg['training']['batch_size'] = 1
     loaders = get_dataloaders(cfg)
-    cfg['training']['batch_size_train'] = original_bs
+    cfg['training']['batch_size'] = original_bs
     _, _, ld_ts = loaders
     
     model = _load_model_for_inference(cfg, device)
@@ -477,10 +477,10 @@ def _get_calibrator(cfg):
 def run_safe_tta(cfg, device):
     logger.info("Starting Safe-TTA...")
     
-    original_bs = cfg['training'].get('batch_size_train')
-    cfg['training']['batch_size_train'] = 1
+    original_bs = cfg['training'].get('batch_size')
+    cfg['training']['batch_size'] = 1
     loaders = get_dataloaders(cfg)
-    cfg['training']['batch_size_train'] = original_bs
+    cfg['training']['batch_size'] = original_bs
     
     _, ld_val, ld_ts = loaders
     

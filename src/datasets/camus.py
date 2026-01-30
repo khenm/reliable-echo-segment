@@ -93,13 +93,13 @@ class CamusDataset:
         ds_va = CacheDataset(val_files, tf_val, 1.0, num_workers=num_workers)
         ds_ts = CacheDataset(test_files, tf_val, 1.0, num_workers=num_workers)
 
-        ld_tr = DataLoader(ds_tr, batch_size=cfg['training']['batch_size_train'], shuffle=True, 
+        ld_tr = DataLoader(ds_tr, batch_size=cfg['training'].get('batch_size', 8), shuffle=True, 
                            num_workers=num_workers, pin_memory=True, collate_fn=list_data_collate,
                            persistent_workers=persistent_workers)
-        ld_va = DataLoader(ds_va, batch_size=cfg['training']['batch_size_val'], shuffle=False, 
+        ld_va = DataLoader(ds_va, batch_size=cfg['training'].get('batch_size', 8), shuffle=False, 
                            num_workers=num_workers, pin_memory=True, collate_fn=list_data_collate,
                            persistent_workers=persistent_workers)
-        ld_ts = DataLoader(ds_ts, batch_size=cfg['training']['batch_size_val'], shuffle=False, 
+        ld_ts = DataLoader(ds_ts, batch_size=cfg['training'].get('batch_size', 8), shuffle=False, 
                            num_workers=num_workers, pin_memory=True, collate_fn=list_data_collate,
                            persistent_workers=persistent_workers)
 

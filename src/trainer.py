@@ -62,7 +62,14 @@ class Trainer:
             ).to(self.device)
         else:
             self.temporal_gate = None
-            
+
+        # Gradient Accumulation
+        micro_batch = self.cfg['training'].get('batch_size', 8)
+        effective_train = self.cfg['training'].get('train_batch_size', micro_batch)
+        self.accum_steps = max(1, effective_train // micro_batch)
+        if self.accum_steps > 1:
+            logger.info(f"Gradient Accumulation: {self.accum_steps} steps (effective batch size: {effective_train})")
+
         self.opt = torch.optim.AdamW(
             self.model.parameters(), 
             lr=self.cfg['training']['lr'], 
@@ -121,15 +128,21 @@ class Trainer:
         loss_components = {key: 0.0 for key in self.criterions.keys()}
         
         pbar = tqdm(self.ld_tr, desc=f"Epoch {ep}/{max_ep}", mininterval=2.0)
+        self.opt.zero_grad(set_to_none=True)
         
-        for batch in pbar:
-            self.opt.zero_grad(set_to_none=True)
+        for batch_idx, batch in enumerate(pbar):
             loss, batch_comps = self._process_batch(batch)
             
-            self.scaler.scale(loss).backward()
-            self._debug_gradients(ep)
-            self.scaler.step(self.opt)
-            self.scaler.update()
+            # Scale loss for gradient accumulation
+            scaled_loss = loss / self.accum_steps
+            self.scaler.scale(scaled_loss).backward()
+            
+            # Step optimizer every accum_steps
+            if (batch_idx + 1) % self.accum_steps == 0:
+                self._debug_gradients(ep)
+                self.scaler.step(self.opt)
+                self.scaler.update()
+                self.opt.zero_grad(set_to_none=True)
             
             run_loss += loss.item()
             for k, v in batch_comps.items():
@@ -143,6 +156,13 @@ class Trainer:
 
             if wandb.run is not None:
                 wandb.log({"train/loss": loss.item(), **{f"train/{k}": v for k, v in batch_comps.items()}})
+
+        # Handle remaining gradients if total batches not divisible by accum_steps
+        if len(self.ld_tr) % self.accum_steps != 0:
+            self._debug_gradients(ep)
+            self.scaler.step(self.opt)
+            self.scaler.update()
+            self.opt.zero_grad(set_to_none=True)
 
         avg_loss = run_loss / len(self.ld_tr)
         avg_comps = {k: v / len(self.ld_tr) for k, v in loss_components.items()}
