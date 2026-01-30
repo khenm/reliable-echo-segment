@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from .topology_loss import TopologyLoss
 
 class SkeletalLoss(nn.Module):
     """
@@ -8,11 +9,13 @@ class SkeletalLoss(nn.Module):
     Components:
     1. Supervised: MSE between predicted and true points (only on labeled frames).
     2. Unsupervised: Smoothness constraint (MSE between P_t and P_{t-1}).
+    3. Unsupervised: Topology constraint (Spring & Collapse prevention).
     """
-    def __init__(self, smooth_weight=0.1):
+    def __init__(self, smooth_weight=0.1, topology_weight=1.0):
         super().__init__()
         self.mse = nn.MSELoss(reduction='none')
         self.smooth_weight = smooth_weight
+        self.topology_loss = TopologyLoss(weight=topology_weight)
 
     def forward(self, preds, targets, frame_mask=None):
         """
@@ -44,10 +47,14 @@ class SkeletalLoss(nn.Module):
             loss_smooth = (diffs ** 2).mean() 
         else:
             loss_smooth = torch.tensor(0.0, device=preds.device)
+            
+        # 3. Topology Loss (Structure)
+        loss_topo = self.topology_loss(preds)
         
-        total_loss = loss_sup + self.smooth_weight * loss_smooth
+        total_loss = loss_sup + self.smooth_weight * loss_smooth + loss_topo
         
         return total_loss, {
             "loss_sup": loss_sup,
-            "loss_smooth": loss_smooth
+            "loss_smooth": loss_smooth,
+            "loss_topo": loss_topo
         }

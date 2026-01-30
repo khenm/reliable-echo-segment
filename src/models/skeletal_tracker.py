@@ -27,6 +27,40 @@ class AreaLengthVolumeCalculator(nn.Module):
         volume = (8.0 * (area ** 2)) / (3.0 * 3.14159 * (length + 1e-6))
         return volume
 
+class SoftArgmax2D(nn.Module):
+    """
+    Differentiable Soft-Argmax to convert Heatmaps -> Coordinates.
+    """
+    def __init__(self, height=56, width=56, normalized_coordinates=True):
+        super().__init__()
+        self.height = height
+        self.width = width
+        self.normalized_coordinates = normalized_coordinates
+        
+        # Create meshgrid buffers
+        pos_x, pos_y = torch.meshgrid(
+            torch.linspace(0, 1, height),
+            torch.linspace(0, 1, width),
+            indexing='ij'
+        )
+        # (1, 1, H, W)
+        self.register_buffer('pos_x', pos_x.unsqueeze(0).unsqueeze(0).clone()) 
+        self.register_buffer('pos_y', pos_y.unsqueeze(0).unsqueeze(0).clone())
+
+    def forward(self, heatmaps):
+        # heatmaps: (B, T, K, H, W)
+        B, T, K, H, W = heatmaps.shape
+        # Flatten spatial dims: (B, T, K, H*W)
+        heatmaps = heatmaps.view(B, T, K, -1)
+        heatmaps = F.softmax(heatmaps, dim=-1)
+        heatmaps = heatmaps.view(B, T, K, H, W)
+        
+        # We want the output to be (x, y) order.
+        expected_y = torch.sum(heatmaps * self.pos_x, dim=[3, 4]) # Sum over H, W
+        expected_x = torch.sum(heatmaps * self.pos_y, dim=[3, 4])
+        
+        return torch.stack([expected_x, expected_y], dim=-1) # (B, T, K, 2)
+
 @register_model("skeletal_tracker")
 class SkeletalTracker(nn.Module):
     @classmethod
@@ -66,15 +100,18 @@ class SkeletalTracker(nn.Module):
             batch_first=True
         )
         
-        # 4. Heads (Axis + Widths)
-        self.head_axis = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, 4), nn.Sigmoid() 
+        self.pre_deconv = nn.Linear(hidden_dim, 64 * 7 * 7)
+        
+        self.heatmap_head = nn.Sequential(
+            nn.ConvTranspose2d(64, 64, kernel_size=4, stride=2, padding=1), # 7x7 -> 14x14
+            nn.BatchNorm2d(64), nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1), # 14x14 -> 28x28
+            nn.BatchNorm2d(32), nn.ReLU(),
+            nn.ConvTranspose2d(32, num_points, kernel_size=4, stride=2, padding=1), # 28x28 -> 56x56
+            # No Sigmoid/Softmax here! SoftArgmax takes raw logits.
         )
-        self.head_widths = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, 20), nn.Sigmoid() 
-        )
+        
+        self.soft_argmax = SoftArgmax2D(height=56, width=56)
         
         self.calculator = AreaLengthVolumeCalculator()
         
@@ -101,16 +138,20 @@ class SkeletalTracker(nn.Module):
         else:
             hidden_states, _ = self.temporal(features)
             
-        # 4. Predict Geometry
-        axis = self.head_axis(hidden_states)
-        base, apex = axis[:, :, :2], axis[:, :, 2:]
-        radii = self.head_widths(hidden_states)
+        # 4. Predict Heatmaps -> Coordinates
+        # Reshape for Deconv: (B*T, D) -> (B*T, 64, 7, 7)
+        spatial_seed = self.pre_deconv(hidden_states.reshape(B*T, -1))
+        spatial_seed = spatial_seed.view(B*T, 64, 7, 7)
         
-        # 5. Volume & EF
-        long_axis = torch.norm(apex - base, dim=2)
-        slice_widths = radii[:, :, :10] + radii[:, :, 10:]
-        # Upsample widths to 20 slices for calculation precision
-        slice_widths = F.interpolate(slice_widths.view(B*T, 1, 10), size=20, mode='linear', align_corners=True).view(B, T, 20)
+        heatmaps = self.heatmap_head(spatial_seed) # (B*T, K, 56, 56)
+        
+        # Reshape to (B, T, K, H, W) for SoftArgmax
+        heatmaps = heatmaps.view(B, T, -1, 56, 56)
+        
+        # Get Coordinates (B, T, K, 2) in [-1, 1] range
+        kps = self.soft_argmax(heatmaps)
+        
+        long_axis, slice_widths = self._derive_volume_metrics(kps)
         
         volume = self.calculator(long_axis, slice_widths)
         
@@ -129,31 +170,24 @@ class SkeletalTracker(nn.Module):
 
         ef = (edv - esv) / (edv + 1e-6)
         
-        # Reconstruct points for visualization/supervision
-        # (Assuming _reconstruct_points logic exists from previous snippet)
-        kps = self._reconstruct_points(base, apex, radii[:,:,:10], radii[:,:,10:])
-        
         return kps, volume, ef
 
-    def _reconstruct_points(self, base, apex, left, right):
-        # ... (Identical to previous implementation) ...
-        # (Re-paste the reconstruction logic here if needed)
-        # Simplified for brevity:
-        B, T, _ = base.shape
-        v = apex - base
-        length = torch.norm(v, dim=2, keepdim=True) + 1e-6
-        u = v / length
-        u_perp = torch.stack([u[:,:,1], -u[:,:,0]], dim=2)
+    def _derive_volume_metrics(self, kps):
+        """
+        Derives Long Axis Length and Slice Widths from the 42 keypoints.
+        """
+        base = kps[:, :, 0]
+        apex = kps[:, :, 21]
         
-        # Upsample 10 -> 20
-        l_20 = F.interpolate(left.view(B*T, 1, 10), size=20, mode='linear', align_corners=True).view(B, T, 20, 1)
-        r_20 = F.interpolate(right.view(B*T, 1, 10), size=20, mode='linear', align_corners=True).view(B, T, 20, 1)
+        # Long Axis Length
+        long_axis = torch.norm(apex - base, dim=2) # (B, T)
         
-        t_vals = torch.linspace(0.05, 0.95, 20, device=base.device).view(1, 1, 20, 1)
-        centers = base.unsqueeze(2) + t_vals * v.unsqueeze(2)
+        left_pts = kps[:, :, 1:21]
+        right_pts = kps[:, :, 22:42] 
+        # Flip right points to match left (so 41 aligns with 1)
+        right_pts_flipped = torch.flip(right_pts, dims=[2])
         
-        p_left = centers + l_20 * u_perp.unsqueeze(2)
-        p_right = centers - r_20 * u_perp.unsqueeze(2)
+        # Calculate distance between corresponding points
+        slice_widths = torch.norm(left_pts - right_pts_flipped, dim=-1) # (B, T, 20)
         
-        kps = torch.cat([base.unsqueeze(2), p_left, apex.unsqueeze(2), torch.flip(p_right, [2])], dim=2)
-        return kps
+        return long_axis, slice_widths
