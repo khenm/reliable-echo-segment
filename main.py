@@ -295,13 +295,12 @@ def _get_criterions(cfg):
             criterions['ef'] = torch.nn.MSELoss()
 
     elif model_name == "segment_tracker":
-        phase_switch = cfg.get('loss', {}).get('phase_switch_epoch', 50)
         criterions['segmentation'] = build_loss(
             "WeakSegLoss",
             dice_weight=weights.get('dice', 1.0),
-            ef_weight=weights.get('ef', 1.0),
-            smooth_weight=weights.get('smooth', 0.5),
-            phase_switch_epoch=phase_switch
+            ef_weight=weights.get('ef', 10.0),
+            smooth_weight=weights.get('smooth', 1.0),
+            contrast_weight=weights.get('contrast', 0.1)
         )
     
     else:

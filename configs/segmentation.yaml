@@ -10,8 +10,7 @@ loss:
   weights:
     dice: 1.0
     ef: 1.0
-    smooth: 0.5
-  phase_switch_epoch: 20
+    smooth: 0.2
 
 training:
   epochs: 100
