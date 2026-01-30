@@ -579,7 +579,7 @@ class EchoNet:
         """
         root_dir = cfg['data']['root_dir']
         img_size = tuple(cfg['data']['img_size'])
-        batch_size = cfg['training']['batch_size_train']
+        batch_size = cfg['training'].get('batch_size', 8)
         num_workers = cfg['training'].get('num_workers', 4)
         model_name = cfg['model'].get('name', 'VAEUNet') # Default to VAEUNet
         
