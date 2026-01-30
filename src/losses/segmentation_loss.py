@@ -62,8 +62,7 @@ class WeakSegLoss(nn.Module):
         loss_ef = self.mse(pred_ef, target_ef)
 
         probs = torch.sigmoid(pred_logits)
-        probs_t = probs.permute(0, 2, 1, 3, 4)  # (B, C, T, H, W) -> (B, T, C, H, W)
-        loss_smooth = self.geo_loss(probs_t)
+        loss_smooth = self.geo_loss(probs)
         loss_contrast = self._compute_contrast_loss(probs, target_ef)
 
         total_loss = (
@@ -111,6 +110,10 @@ class WeakSegLoss(nn.Module):
         if self.contrast_weight <= 0:
             return torch.tensor(0.0, device=probs.device)
 
-        mask_variance = probs.var(dim=1).mean()
+        T = probs.shape[1]
+        if T <= 1:
+            return torch.tensor(0.0, device=probs.device)
+
+        mask_variance = probs.var(dim=1, correction=0).mean()
         should_move = (target_ef > 0.40).float()
         return -1.0 * mask_variance * should_move.mean()

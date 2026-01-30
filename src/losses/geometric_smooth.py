@@ -29,7 +29,7 @@ class GeometricSmoothLoss(nn.Module):
         y_coords = torch.linspace(0, 1, H, device=masks.device).view(1, 1, H, 1)
         x_coords = torch.linspace(0, 1, W, device=masks.device).view(1, 1, 1, W)
 
-        area = masks.sum(dim=(2, 3))
+        area = masks.sum(dim=(2, 3)) / (H * W)
         safe_area = area + 1e-6
 
         y_cent = (masks * y_coords).sum(dim=(2, 3)) / safe_area
