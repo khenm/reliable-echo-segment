@@ -85,28 +85,29 @@ class WeakSegLoss(nn.Module):
         target_masks: torch.Tensor,
         frame_mask: torch.Tensor
     ) -> torch.Tensor:
-        B, T = pred_logits.shape[:2]
-        total_loss = 0.0
-        num_labeled = 0
+        """Vectorized implementation: flattens (B, T) -> (N) for GPU parallelization."""
+        B, T, C, H, W = pred_logits.shape
 
-        for b in range(B):
-            for t in range(T):
-                if frame_mask[b, t] > 0.5:
-                    pred_frame = pred_logits[b, t:t+1]
-                    target_frame = target_masks[b, t:t+1]
-                    total_loss = total_loss + self.dice_func(pred_frame, target_frame)
-                    num_labeled += 1
+        pred_flat = pred_logits.view(-1, C, H, W)
+        target_flat = target_masks.view(-1, C, H, W)
+        mask_flat = frame_mask.view(-1)
 
-        if num_labeled == 0:
+        valid_indices = mask_flat > 0.5
+
+        if valid_indices.sum() == 0:
             return torch.tensor(0.0, device=pred_logits.device)
 
-        return total_loss / num_labeled
+        return self.dice_func(
+            pred_flat[valid_indices],
+            target_flat[valid_indices]
+        )
 
     def _compute_contrast_loss(
         self,
         probs: torch.Tensor,
         target_ef: torch.Tensor
     ) -> torch.Tensor:
+        """Decoupled batch logic: calculates loss per-sample, then averages."""
         if self.contrast_weight <= 0:
             return torch.tensor(0.0, device=probs.device)
 
@@ -114,6 +115,8 @@ class WeakSegLoss(nn.Module):
         if T <= 1:
             return torch.tensor(0.0, device=probs.device)
 
-        mask_variance = probs.var(dim=1, correction=0).mean()
+        var_per_sample = probs.var(dim=1, correction=0).mean(dim=(1, 2, 3))
         should_move = (target_ef > 0.40).float()
-        return -1.0 * mask_variance * should_move.mean()
+        loss_per_sample = -1.0 * var_per_sample * should_move
+
+        return loss_per_sample.mean()
