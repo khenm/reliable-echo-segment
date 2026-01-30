@@ -1,0 +1,6 @@
+name: "segment_tracker"
+clip_length: 112
+hidden_dim: 256
+output_size: 112
+backbone: "convnext_tiny"
+pretrained: true

@@ -293,6 +293,19 @@ def _get_criterions(cfg):
         
         if weights.get('ef', 0.0) > 0:
             criterions['ef'] = torch.nn.MSELoss()
+
+    elif model_name == "segment_tracker":
+        phase_switch = cfg.get('loss', {}).get('phase_switch_epoch', 50)
+        criterions['segmentation'] = build_loss(
+            "SegmentationLoss",
+            dice_weight=weights.get('dice', 1.0),
+            smooth_weight=weights.get('smooth', 0.5),
+            phase_switch_epoch=phase_switch
+        )
+        
+        if weights.get('ef', 0.0) > 0:
+            criterions['ef'] = torch.nn.MSELoss()
+    
     else:
         criterions['dice'] = DiceCELoss(to_onehot_y=True, softmax=True)
         kl_weight = weights.get('kl', 1e-4)
@@ -312,6 +325,9 @@ def _get_metrics(cfg):
         metrics['dice'] = DiceMetric(include_background=include_bg, reduction="mean")
         if model_name == "skeletal_tracker":
             metrics['skeletal'] = SkeletalError()
+    elif model_name == "segment_tracker":
+        metrics['mae'] = MAEMetric(reduction="mean")
+        metrics['dice'] = DiceMetric(include_background=True, reduction="mean")
     else:
         metrics['dice'] = DiceMetric(include_background=include_bg, reduction="mean")
     return metrics
