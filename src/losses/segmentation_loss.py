@@ -62,7 +62,8 @@ class WeakSegLoss(nn.Module):
         loss_ef = self.mse(pred_ef, target_ef)
 
         probs = torch.sigmoid(pred_logits)
-        loss_smooth = self.geo_loss(probs)
+        probs_t = probs.permute(0, 2, 1, 3, 4)  # (B, C, T, H, W) -> (B, T, C, H, W)
+        loss_smooth = self.geo_loss(probs_t)
         loss_contrast = self._compute_contrast_loss(probs, target_ef)
 
         total_loss = (
