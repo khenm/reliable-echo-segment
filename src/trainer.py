@@ -179,22 +179,19 @@ class Trainer:
 
         target_masks = batch.get("label")
         frame_mask = batch.get("frame_mask")
+        ef_target = batch.get("target").to(self.device).view(-1, 1)
 
         if 'segmentation' in self.criterions and target_masks is not None:
             target_masks = target_masks.to(self.device)
             if frame_mask is not None:
                 frame_mask = frame_mask.to(self.device)
 
-            l_seg, c_dict = self.criterions['segmentation'](mask_logits, target_masks, frame_mask)
+            l_seg, c_dict = self.criterions['segmentation'](
+                mask_logits, target_masks, ef, ef_target, frame_mask
+            )
             loss += l_seg
             comps['segmentation'] = l_seg.item()
             comps.update({k: v.item() for k, v in c_dict.items()})
-
-        if 'ef' in self.criterions:
-            ef_target = batch.get("target").to(self.device).view(-1, 1)
-            l_ef = self.criterions['ef'](ef, ef_target)
-            loss += l_ef
-            comps['ef'] = l_ef.item()
 
         return loss, comps
 
@@ -514,11 +511,33 @@ class Trainer:
     def _log_epoch(self, ep, loss, comps, val_res):
         msg = f"E{ep:03d} loss={loss:.4f} " + " ".join([f"{k}={v:.4f}" for k, v in comps.items()])
         if isinstance(val_res, tuple):
-             # score, mae, dice, [skel]
-             msg += f" valMAE={val_res[1]:.4f}"
+            # Segmentation: (dice, mae, dice) or Skeletal: (-mae, mae, dice, skel)
+            if self.is_segmentation:
+                msg += f" valDice={val_res[0]:.4f} valMAE={val_res[1]:.4f}"
+            elif len(val_res) >= 4:
+                msg += f" valMAE={val_res[1]:.4f} valDice={val_res[2]:.4f} valSkel={val_res[3]:.4f}"
+            else:
+                msg += f" valMAE={val_res[1]:.4f} valDice={val_res[2]:.4f}"
         else:
-             msg += f" valDice={val_res:.4f}"
+            msg += f" valDice={val_res:.4f}"
         logger.info(msg)
+        
+        if wandb.run is not None:
+            log_dict = {"val/loss": loss}
+            if isinstance(val_res, tuple):
+                if self.is_segmentation:
+                    log_dict["val/dice"] = val_res[0]
+                    log_dict["val/mae"] = val_res[1]
+                elif len(val_res) >= 4:
+                    log_dict["val/mae"] = val_res[1]
+                    log_dict["val/dice"] = val_res[2]
+                    log_dict["val/skeletal"] = val_res[3]
+                else:
+                    log_dict["val/mae"] = val_res[1]
+                    log_dict["val/dice"] = val_res[2]
+            else:
+                log_dict["val/dice"] = val_res
+            wandb.log(log_dict)
 
     def _debug_gradients(self, ep):
         # Optional gradient tracing
