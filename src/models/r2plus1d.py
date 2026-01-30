@@ -16,9 +16,11 @@ class UpBlock3D(nn.Module):
         )
 
     def forward(self, x, skip):
-        # x: (B, C, T, H, W)
-        # skip: (B, C_skip, T_skip, H_skip, W_skip)
-        
+        """
+        Args:
+            x: (B, C, T, H, W)
+            skip: (B, C_skip, T_skip, H_skip, W_skip)
+        """
         # Upsample x to match skip size
         if x.shape[2:] != skip.shape[2:]:
             x = nn.functional.interpolate(x, size=skip.shape[2:], mode='trilinear', align_corners=False)
@@ -42,32 +44,24 @@ class EchoR2Plus1D(nn.Module):
         
         # Encoder Stages
         self.stem = base.stem
-        self.layer1 = base.layer1 # 64
-        self.layer2 = base.layer2 # 128
-        self.layer3 = base.layer3 # 256
-        self.layer4 = base.layer4 # 512
+        self.layer1 = base.layer1
+        self.layer2 = base.layer2
+        self.layer3 = base.layer3
+        self.layer4 = base.layer4
         self.avgpool = base.avgpool
         
         # Regression Head (EF)
-        # Original fc in_features=512
         in_features = base.fc.in_features
         self.fc_ef = nn.Linear(in_features, 1)
         
-        # Initialize EF head
         nn.init.normal_(self.fc_ef.weight, 0, 0.01)
         nn.init.constant_(self.fc_ef.bias, 0)
         
         # Segmentation Decoder
-        # Layer 4 out: 512 channels
-        # Layer 3 out: 256 channels
-        # Layer 2 out: 128 channels
-        # Layer 1 out: 64 channels
-        # Stem out: 64 channels
-        
         self.up1 = UpBlock3D(512, 256, 256)
         self.up2 = UpBlock3D(256, 128, 128)
         self.up3 = UpBlock3D(128, 64, 64)
-        self.up4 = UpBlock3D(64, 64, 32) # Skip from stem (64)
+        self.up4 = UpBlock3D(64, 64, 32)
         
         self.final_conv = nn.Conv3d(32, num_classes, kernel_size=1)
 
@@ -90,11 +84,11 @@ class EchoR2Plus1D(nn.Module):
                 If return_features=True: (ef_pred, features) where features is (B, 512)
         """
         # Encoder
-        x0 = self.stem(x)      # 64
-        x1 = self.layer1(x0)   # 64
-        x2 = self.layer2(x1)   # 128
-        x3 = self.layer3(x2)   # 256
-        x4 = self.layer4(x3)   # 512
+        x0 = self.stem(x)      
+        x1 = self.layer1(x0)   
+        x2 = self.layer2(x1)   
+        x3 = self.layer3(x2)   
+        x4 = self.layer4(x3)   
         
         # Regression Branch
         pool = self.avgpool(x4)
@@ -109,7 +103,6 @@ class EchoR2Plus1D(nn.Module):
         
         seg_pred = self.final_conv(d4)
         
-        # Final upsample to match input size if needed
         if seg_pred.shape[2:] != x.shape[2:]:
             seg_pred = nn.functional.interpolate(seg_pred, size=x.shape[2:], mode='trilinear', align_corners=False)
         
@@ -128,6 +121,5 @@ class EchoR2Plus1D(nn.Module):
                     nn.init.constant_(module.weight, 1)
                     nn.init.constant_(module.bias, 0)
         
-        # Initialize final conv with small weights to output near 0 (0.5 probability) initially
         nn.init.xavier_uniform_(self.final_conv.weight)
         nn.init.constant_(self.final_conv.bias, 0)

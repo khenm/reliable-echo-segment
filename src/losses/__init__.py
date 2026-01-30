@@ -1,5 +1,15 @@
-from .consistency import ConsistencyLoss, differentiable_volume
-from .vae import KLLoss
+from .consistency import ConsistencyLoss
 from .ef import DifferentiableEFLoss
 from .semi_supervised import EchoSemiSupervisedLoss
 from .skeletal_loss import SkeletalLoss
+from .topology_loss import TopologyLoss
+from .vae import KLLoss
+
+__all__ = [
+    'ConsistencyLoss',
+    'DifferentiableEFLoss',
+    'EchoSemiSupervisedLoss',
+    'SkeletalLoss',
+    'TopologyLoss',
+    'KLLoss'
+]

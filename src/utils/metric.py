@@ -157,6 +157,8 @@ def get_roc_auc_low_ef(y_ref, y_pred_val, threshold=45.0):
     fpr, tpr, _ = roc_curve(y_true_bin, scores)
     auc = roc_auc_score(y_true_bin, scores)
     return fpr, tpr, auc
+
+
 class SkeletalError:
     """
     Computes the Mean Euclidean Distance (Pixel Error) for skeletal keypoints.
