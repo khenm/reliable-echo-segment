@@ -50,6 +50,7 @@ class Trainer:
         self.is_unet_2d = (self.model_name in ["unet_tcm"])
         self.is_dual_stream = (self.model_name == "dual_stream")
         self.is_skeletal = (self.model_name == "skeletal_tracker")
+        self.is_segmentation = (self.model_name == "segment_tracker")
 
     def _setup_optimization(self):
         # Temporal Gate
@@ -150,7 +151,9 @@ class Trainer:
     def _process_batch(self, batch):
         dev_type = self.device.type if hasattr(self.device, 'type') else str(self.device)
         with torch.amp.autocast(device_type=dev_type):
-            if self.is_skeletal:
+            if self.is_segmentation:
+                return self._train_segmentation(batch)
+            elif self.is_skeletal:
                 return self._train_skeletal(batch)
             elif self.is_dual_stream:
                 return self._train_dual(batch)
@@ -162,6 +165,38 @@ class Trainer:
                 return self._train_seg_vae(batch)
 
     # --- Model Specific Training Steps ---
+
+    def _train_segmentation(self, batch):
+        imgs = batch["video"].to(self.device)
+        lengths = batch.get("lengths")
+        if lengths is not None:
+            lengths = lengths.to(self.device)
+
+        mask_logits, vol, ef = self.model(imgs, lengths=lengths)
+
+        loss = 0.0
+        comps = {}
+
+        target_masks = batch.get("label")
+        frame_mask = batch.get("frame_mask")
+
+        if 'segmentation' in self.criterions and target_masks is not None:
+            target_masks = target_masks.to(self.device)
+            if frame_mask is not None:
+                frame_mask = frame_mask.to(self.device)
+
+            l_seg, c_dict = self.criterions['segmentation'](mask_logits, target_masks, frame_mask)
+            loss += l_seg
+            comps['segmentation'] = l_seg.item()
+            comps.update({k: v.item() for k, v in c_dict.items()})
+
+        if 'ef' in self.criterions:
+            ef_target = batch.get("target").to(self.device).view(-1, 1)
+            l_ef = self.criterions['ef'](ef, ef_target)
+            loss += l_ef
+            comps['ef'] = l_ef.item()
+
+        return loss, comps
 
     def _train_skeletal(self, batch):
         imgs = batch["video"].to(self.device)
@@ -320,7 +355,9 @@ class Trainer:
         dev_type = self.device.type if hasattr(self.device, 'type') else str(self.device)
         with torch.no_grad(), torch.amp.autocast(device_type=dev_type):
             for batch in tqdm(self.ld_va, desc="Validating", mininterval=2.0, leave=False):
-                if self.is_skeletal:
+                if self.is_segmentation:
+                    self._val_segmentation(batch)
+                elif self.is_skeletal:
                     self._val_skeletal(batch)
                 elif self.is_unet_2d:
                     self._val_unet_2d(batch)
@@ -331,17 +368,63 @@ class Trainer:
                     
         return self._aggregate_metrics()
 
-    def _val_skeletal(self, batch):
+    def _val_segmentation(self, batch):
         imgs = batch["video"].to(self.device)
         lengths = batch.get("lengths")
-        if lengths is not None: lengths = lengths.to(self.device)
-        
-        preds, vol, ef = self.model(imgs, lengths=lengths) if lengths is not None else self.model(imgs)
-        
+        if lengths is not None:
+            lengths = lengths.to(self.device)
+
+        mask_logits, vol, ef = self.model(imgs, lengths=lengths)
+
         if 'mae' in self.metrics:
             targets = batch["target"].to(self.device).view(-1, 1)
             self.metrics['mae'](ef, targets)
-            
+
+        if 'dice' in self.metrics:
+            target_masks = batch.get("label")
+            frame_mask = batch.get("frame_mask")
+            if target_masks is not None:
+                target_masks = target_masks.to(self.device)
+                B, C, T, H, W = mask_logits.shape
+
+                pred_probs = torch.sigmoid(mask_logits)
+                if pred_probs.shape[-2:] != target_masks.shape[-2:]:
+                    pred_probs = F.interpolate(
+                        pred_probs.view(B, C * T, H, W),
+                        size=target_masks.shape[-2:],
+                        mode='bilinear',
+                        align_corners=False
+                    ).view(B, C, T, *target_masks.shape[-2:])
+
+                pred_binary = (pred_probs > 0.5).int()
+                target_binary = target_masks.int()
+
+                if frame_mask is not None:
+                    frame_mask = frame_mask.to(self.device)
+                    mask_flat = frame_mask.view(B * T)
+                    valid_idx = torch.nonzero(mask_flat).squeeze(-1)
+
+                    if valid_idx.numel() > 0:
+                        pred_flat = pred_binary.permute(0, 2, 1, 3, 4).reshape(B * T, C, *pred_binary.shape[-2:])
+                        target_flat = target_binary.permute(0, 2, 1, 3, 4).reshape(B * T, C, *target_binary.shape[-2:])
+                        self.metrics['dice'](pred_flat[valid_idx], target_flat[valid_idx])
+                else:
+                    pred_flat = pred_binary.permute(0, 2, 1, 3, 4).reshape(B * T, C, *pred_binary.shape[-2:])
+                    target_flat = target_binary.permute(0, 2, 1, 3, 4).reshape(B * T, C, *target_binary.shape[-2:])
+                    self.metrics['dice'](pred_flat, target_flat)
+
+    def _val_skeletal(self, batch):
+        imgs = batch["video"].to(self.device)
+        lengths = batch.get("lengths")
+        if lengths is not None:
+            lengths = lengths.to(self.device)
+
+        preds, vol, ef = self.model(imgs, lengths=lengths) if lengths is not None else self.model(imgs)
+
+        if 'mae' in self.metrics:
+            targets = batch["target"].to(self.device).view(-1, 1)
+            self.metrics['mae'](ef, targets)
+
         if 'skeletal' in self.metrics:
             kps_gt = batch.get("keypoints")
             mask = batch.get("frame_mask")
@@ -386,20 +469,22 @@ class Trainer:
 
     def _aggregate_metrics(self):
         mae = float(self.metrics['mae'].aggregate().cpu()) if 'mae' in self.metrics else 0.0
-        
+
         dice = 0.0
         if 'dice' in self.metrics:
             buffer = self.metrics['dice'].get_buffer()
             if buffer is not None and len(buffer) > 0:
                 dice = float(self.metrics['dice'].aggregate().cpu())
-        
-        if self.is_skeletal and 'skeletal' in self.metrics:
+
+        if self.is_segmentation:
+            return (dice, mae, dice)
+        elif self.is_skeletal and 'skeletal' in self.metrics:
             skel = float(self.metrics['skeletal'].aggregate())
             return (-mae, mae, dice, skel)
         elif self.is_regression or self.is_dual_stream:
             return (-mae, mae, dice)
         else:
-            return dice # Standard Dice
+            return dice
 
     # --- Utils ---
     
@@ -422,7 +507,6 @@ class Trainer:
             save_checkpoint(self.vault_path, state)
             logger.info(f"Saved Best Checkpoint: {self.vault_path}")
         save_checkpoint(self.ckpt_path, state)
-        logger.info(f"Saved Last Checkpoint: {self.ckpt_path}")
 
     def _load_checkpoint(self, path):
         return load_full_checkpoint(path, self.model, optimizer=self.opt, scaler=self.scaler, device=self.device, load_rng=True)

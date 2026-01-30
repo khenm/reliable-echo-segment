@@ -1,0 +1,34 @@
+model: "segment_tracker"
+
+data:
+  name: "echonet"
+  max_retries: 5
+
+loss:
+  name: "segmentation_loss"
+  weights:
+    dice: 1.0
+    ef: 1.0
+    smooth: 0.5
+  phase_switch_epoch: 50
+
+training:
+  epochs: 100
+  batch_size_train: 4
+  batch_size_val: 4
+  num_workers: 0
+  persistent_workers: False
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  patience: 20
+  seed: 42
+
+  # Local storage paths
+  save_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs"
+  checkpoint_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/checkpoints"
+  test_metrics_csv: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_metrics.csv"
+  clinical_pairs_csv: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/echonet_clinical_pairs.csv"
+  resume_path: null
+
+tta:
+  enabled: false
