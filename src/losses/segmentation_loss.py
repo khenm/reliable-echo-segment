@@ -86,11 +86,15 @@ class WeakSegLoss(nn.Module):
         frame_mask: torch.Tensor
     ) -> torch.Tensor:
         """Vectorized implementation: flattens (B, T) -> (N) for GPU parallelization."""
+        if pred_logits.shape[1] == 1 and pred_logits.shape[2] > 1:
+            pred_logits = pred_logits.permute(0, 2, 1, 3, 4)
+            target_masks = target_masks.permute(0, 2, 1, 3, 4)
+
         B, T, C, H, W = pred_logits.shape
 
-        pred_flat = pred_logits.view(-1, C, H, W)
-        target_flat = target_masks.view(-1, C, H, W)
-        mask_flat = frame_mask.view(-1)
+        pred_flat = pred_logits.reshape(-1, C, H, W)
+        target_flat = target_masks.reshape(-1, C, H, W)
+        mask_flat = frame_mask.reshape(-1)
 
         valid_indices = mask_flat > 0.5
 
