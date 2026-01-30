@@ -10,7 +10,6 @@ class GeometricSmoothLoss(nn.Module):
     Enforces 2nd-Order Smoothness (Minimizes Acceleration).
     Allows linear motion (expansion/contraction) but punishes jitter.
     """
-
     def __init__(self, centroid_weight: float = 1.0, area_weight: float = 1.0):
         super().__init__()
         self.centroid_weight = centroid_weight
@@ -19,12 +18,23 @@ class GeometricSmoothLoss(nn.Module):
     def forward(self, masks: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            masks: (B, T, 1, H, W) - Probability masks
+            masks: (B, T, 1, H, W) or (B, 1, T, H, W) - Probability masks
         Returns:
             Scalar loss value
         """
+        if masks.dim() != 5:
+            logger.warning(f"GeometricSmoothLoss expected 5D tensor, got {masks.dim()}D")
+            return torch.tensor(0.0, device=masks.device)
+
+        if masks.shape[1] == 1 and masks.shape[2] > 1:
+            masks = masks.permute(0, 2, 1, 3, 4)
+
         B, T, C, H, W = masks.shape
-        masks = masks.view(B, T, H, W)
+
+        if T < 3:
+            return torch.tensor(0.0, device=masks.device)
+
+        masks = masks.squeeze(2)
 
         y_coords = torch.linspace(0, 1, H, device=masks.device).view(1, 1, H, 1)
         x_coords = torch.linspace(0, 1, W, device=masks.device).view(1, 1, 1, W)
