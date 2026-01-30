@@ -1,7 +1,8 @@
-from typing import Dict, Type, Any
+from typing import Dict, Type, Any, Optional
 
 _MODELS: Dict[str, Type[Any]] = {}
 _DATASETS: Dict[str, Type[Any]] = {}
+_LOSSES: Dict[str, Type[Any]] = {}
 _TTA_COMPONENTS: Dict[str, Type[Any]] = {}
 
 def register_model(name: str):
@@ -19,6 +20,15 @@ def register_dataset(name: str):
     """
     def decorator(cls: Type[Any]):
         _DATASETS[name] = cls
+        return cls
+    return decorator
+
+def register_loss(name: str):
+    """
+    Decorator to register a loss class.
+    """
+    def decorator(cls: Type[Any]):
+        _LOSSES[name] = cls
         return cls
     return decorator
 
@@ -40,6 +50,11 @@ def get_dataset_class(name: str) -> Type[Any]:
     if name not in _DATASETS:
         raise KeyError(f"Dataset '{name}' not found in registry. Available: {list(_DATASETS.keys())}")
     return _DATASETS[name]
+
+def get_loss_class(name: str) -> Type[Any]:
+    if name not in _LOSSES:
+        raise KeyError(f"Loss '{name}' not found in registry. Available: {list(_LOSSES.keys())}")
+    return _LOSSES[name]
 
 def get_tta_component_class(name: str) -> Type[Any]:
     if name not in _TTA_COMPONENTS:
@@ -69,3 +84,10 @@ def get_dataloaders(cfg: Dict[str, Any]) -> Any:
         return dataset_cls.get_dataloaders(cfg)
     else:
          raise NotImplementedError(f"Dataset '{data_name}' does not implement 'get_dataloaders'.")
+
+def build_loss(name: str, **kwargs) -> Any:
+    """
+    Instantiates a loss function from the registry.
+    """
+    loss_cls = get_loss_class(name)
+    return loss_cls(**kwargs)

@@ -22,24 +22,9 @@ class VAEUNet(nn.Module):
         act="PRELU",
         norm="INSTANCE",
     ):
-        """
-        Initializes the VAE-U-Net model.
-
-        Args:
-            spatial_dims (int): Number of spatial dimensions (e.g., 2 for 2D, 3 for 3D).
-            in_channels (int): Number of input channels.
-            out_channels (int): Number of output classes/channels.
-            channels (tuple): Sequence of channel counts for each encoder level.
-            strides (tuple): Sequence of stride values for downsampling at each encoder level.
-            num_res_units (int): Number of residual units per block.
-            latent_dim (int): Dimensionality of the latent space (z).
-            act (str): Activation function name.
-            norm (str): Normalization type.
-        """
         super().__init__()
         self.spatial_dims = spatial_dims
         
-        # Encoder
         self.blocks = nn.ModuleList()
         self.ups = nn.ModuleList()
         self.downs = nn.ModuleList()
@@ -117,7 +102,6 @@ class VAEUNet(nn.Module):
         up_strides = strides[::-1]
         
         for i, (out_c, stride) in enumerate(zip(up_channels, up_strides)):
-            # UpSample
             self.ups.append(
                 UpSample(
                     spatial_dims,
@@ -178,13 +162,6 @@ class VAEUNet(nn.Module):
     def reparameterize(self, mu, logvar):
         """
         Performs the reparameterization trick to sample z from the latent distribution.
-
-        Args:
-            mu (torch.Tensor): Mean of the latent Gaussian.
-            logvar (torch.Tensor): Log variance of the latent Gaussian.
-
-        Returns:
-            torch.Tensor: Sampled latent vector z.
         """
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
@@ -193,27 +170,17 @@ class VAEUNet(nn.Module):
     def forward(self, x):
         """
         Forward pass of the VAE-U-Net.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
         Returns:
             tuple: (logits, mu, logvar)
-                - logits (torch.Tensor): Segmentation output.
-                - mu (torch.Tensor): Latent mean.
-                - logvar (torch.Tensor): Latent log variance.
         """
         skips = []
         
-        # Encoder
         for down in self.downs:
             x = down(x)
             skips.append(x)
         
-        # Bottleneck
         x = self.bottleneck_conv(x)
         
-        # VAE
         B, C, H, W = x.shape
         x_flat = self.global_avg(x).view(B, -1)
         
@@ -232,7 +199,6 @@ class VAEUNet(nn.Module):
         # Replace bottleneck feature with VAE feature
         x = z_feat
         
-        # Decoder
         skips_to_use = skips[:-1][::-1]
         
         for i in range(len(self.ups)):

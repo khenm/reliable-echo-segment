@@ -2,7 +2,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from src.registry import register_model
 
 class TemporalGate(nn.Module):
     """
@@ -27,14 +26,11 @@ class TemporalGate(nn.Module):
         Returns:
             w_temp: (B, 1) Gating weight.
         """
-        # Normalize features
         f_t_norm = F.normalize(features_t, p=2, dim=1)
         f_prev_norm = F.normalize(features_t_minus_1, p=2, dim=1)
         
-        # Cosine similarity
-        similarity = (f_t_norm * f_prev_norm).sum(dim=1, keepdim=True) # (B, 1)
+        similarity = (f_t_norm * f_prev_norm).sum(dim=1, keepdim=True)
         
-        # Gating
         # Shifted sigmoid: 1 / (1 + exp(-scale * (sim - threshold)))
         gate = torch.sigmoid(self.scale * (similarity - self.threshold))
         
@@ -64,9 +60,8 @@ class TemporalConsistencyLoss(nn.Module):
         Returns:
             Scalar loss (mean over batch).
         """
-        loss = self.loss_fn(pred_t, pred_t_minus_1) # (B, C, H, W)
+        loss = self.loss_fn(pred_t, pred_t_minus_1)
         
-        # Reduce to (B, )
         loss = loss.view(loss.size(0), -1).mean(dim=1)
         
         if gate is not None:

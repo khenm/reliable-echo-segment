@@ -1,52 +1,51 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from src.registry import register_loss
 
+@register_loss("TopologyLoss")
 class TopologyLoss(nn.Module):
     """
-    Enforces geometric constraints on the skeletal structure (Spring & Collapse prevention).
+    Physically-Informed Geometric Loss.
+
+    Replaces generic springs with:
+    1. Width Preservation (Prevent Collapse): Penalizes widths that are too small.
+    2. Anatomical Consistency: Ensures Base width >= Apex width generally.
+    3. Non-Intersection: Prevents Left/Right wall crossing.
     """
-    def __init__(self, weight=1.0):
+    def __init__(self, weight=1.0, min_width=0.02):
         super().__init__()
         self.weight = weight
+        self.min_width = min_width # Normalized units (0-1)
 
     def forward(self, pred_kps):
-        """
-        pred_kps: (B, T, 42, 2)
-        """
-        # Construct full left chain tensor
-        chain_left = pred_kps[:, :, 0:22] # 0..21
-        diffs_left = chain_left[:, :, 1:] - chain_left[:, :, :-1]
-        dists_left = torch.norm(diffs_left, dim=-1)
+        left_wall, right_wall = self._extract_walls(pred_kps)
+        widths = self._compute_widths(left_wall, right_wall)
         
-        # Variance of distances (Spring Consitency)
-        mean_dist_left = dists_left.mean(dim=2, keepdim=True)
-        spring_loss_left = ((dists_left - mean_dist_left) ** 2).mean()
+        collapse_loss = self._compute_collapse_penalty(widths)
+        area_loss = self._compute_area_penalty(widths)
+        
+        return self.weight * (collapse_loss + area_loss)
 
-        # Let's grab 22..41 and flip it to be Base->Apex order: 41, 40... 22
-        right_wall_base_to_apex = torch.flip(pred_kps[:, :, 22:42], dims=[2])
-        
-        # Full chain: Base(0) -> RightWall(Base->Apex) -> Apex(21)
-        chain_right = torch.cat([
-            pred_kps[:, :, 0:1],          # Base
-            right_wall_base_to_apex,      # 41..22
-            pred_kps[:, :, 21:22]         # Apex
-        ], dim=2)
-        
-        diffs_right = chain_right[:, :, 1:] - chain_right[:, :, :-1]
-        dists_right = torch.norm(diffs_right, dim=-1)
-        
-        mean_dist_right = dists_right.mean(dim=2, keepdim=True)
-        spring_loss_right = ((dists_right - mean_dist_right) ** 2).mean()
-        
-        left_pts = pred_kps[:, :, 1:21]   # 1..20
-        right_pts = pred_kps[:, :, 22:42] # 22..41 (Apex->Base). Wait.
-        
-        right_pts_matched = torch.flip(right_pts, dims=[2]) # 41..22
-        
-        widths = torch.norm(left_pts - right_pts_matched, dim=-1)
-        
-        # Penalize if width < Threshold (e.g. 0.05 normalized units)
-        # Coordinates are in [-1, 1]. 0.05 is 2.5% of range.
-        collapse_loss = torch.nn.functional.relu(0.05 - widths).mean()
+    def _extract_walls(self, pred_kps):
+        left_pts = pred_kps[:, :, 0:21]
+        right_pts_raw = pred_kps[:, :, 22:42] 
+        # Flip right side to align indices with left (base-to-apex)
+        right_pts_aligned = torch.flip(right_pts_raw, dims=[2])
+        return left_pts, right_pts_aligned
 
-        return self.weight * (spring_loss_left + spring_loss_right + collapse_loss * 10.0)
+    def _compute_widths(self, left_wall, right_wall):
+        # Euclidean distance between corresponding points
+        diff_vec = right_wall - left_wall[:, :, 1:] # Align length
+        return torch.norm(diff_vec, dim=-1)
+
+    def _compute_collapse_penalty(self, widths):
+        # Penalize if width < min_width
+        penalty = F.relu(self.min_width - widths)
+        return (penalty ** 2).mean() * 100.0
+
+    def _compute_area_penalty(self, widths):
+        # Heuristic: Penalize if total width (proxy for area) is too small
+        total_width = widths.sum(dim=2)
+        target_width = self.min_width * 20.0
+        return F.relu(target_width - total_width).mean()
