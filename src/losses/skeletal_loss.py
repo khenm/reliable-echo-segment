@@ -42,9 +42,9 @@ class SkeletalLoss(nn.Module):
         loss_mse = self.mse(preds, targets).mean(dim=(2, 3))
         
         if frame_mask is not None:
-             loss_sup = (loss_mse * frame_mask).sum()
-             num_labeled = frame_mask.sum() + 1e-6
-             return loss_sup / num_labeled
+            loss_sup = (loss_mse * frame_mask).sum()
+            num_labeled = frame_mask.sum() + 1e-6
+            return loss_sup / num_labeled
         
         return loss_mse.mean()
 
