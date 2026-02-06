@@ -15,7 +15,7 @@ from src.trainer import Trainer
 from src.utils.logging import get_logger
 from src.models.temporal import TemporalConsistencyLoss
 from monai.losses import DiceCELoss
-from monai.metrics import DiceMetric, MAEMetric, RMSEMetric
+from monai.metrics import DiceMetric
 from src.utils.plot import (
     plot_metrics_summary, 
     plot_clinical_bland_altman, 
@@ -25,7 +25,7 @@ from src.utils.plot import (
     plot_conformal_segmentation,
     plot_martingale
 )
-from src.utils.metric import SkeletalError, R2Score
+from src.utils.metric import SkeletalError, R2Score, MAE, RMSE
 from src.analysis.latent_profile import LatentProfiler
 from src.tta.engine import TTA_Engine, SafeTTAEngine
 from src.tta.auditor import SelfAuditor
@@ -328,15 +328,15 @@ def _get_metrics(cfg):
     
     metrics = {}
     if is_regression or model_name == "skeletal_tracker":
-        metrics['mae'] = MAEMetric(reduction="mean")
-        metrics['rmse'] = RMSEMetric(reduction="mean")
+        metrics['mae'] = MAE(reduction="mean")
+        metrics['rmse'] = RMSE(reduction="mean")
         metrics['r2'] = R2Score()
         metrics['dice'] = DiceMetric(include_background=include_bg, reduction="mean")
         if model_name == "skeletal_tracker":
             metrics['skeletal'] = SkeletalError()
     elif model_name in ["segment_tracker", "temporal_segment_tracker"]:
-        metrics['mae'] = MAEMetric(reduction="mean")
-        metrics['rmse'] = RMSEMetric(reduction="mean")
+        metrics['mae'] = MAE(reduction="mean")
+        metrics['rmse'] = RMSE(reduction="mean")
         metrics['r2'] = R2Score()
         metrics['dice'] = DiceMetric(include_background=True, reduction="mean")
     else:
