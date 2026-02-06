@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from sklearn.metrics import roc_curve, roc_auc_score, r2_score
+from sklearn.metrics import roc_curve, roc_auc_score, r2_score, mean_absolute_error, mean_squared_error
 
 def compute_dice_coefficient(gt, pr, label_idx=1):
     """
@@ -221,3 +221,55 @@ class R2Score:
         if not self.preds:
             return 0.0
         return r2_score(self.targets, self.preds)
+
+class MAE:
+    """
+    Computes Mean Absolute Error.
+    """
+    def __init__(self, reduction="mean"):
+        self.reduction = reduction
+        self.reset()
+        
+    def reset(self):
+        self.preds = []
+        self.targets = []
+        
+    def __call__(self, preds, targets):
+        if isinstance(preds, torch.Tensor):
+            preds = preds.detach().cpu().numpy()
+        if isinstance(targets, torch.Tensor):
+            targets = targets.detach().cpu().numpy()
+            
+        self.preds.extend(preds.reshape(-1).tolist())
+        self.targets.extend(targets.reshape(-1).tolist())
+        
+    def aggregate(self):
+        if not self.preds:
+            return 0.0
+        return mean_absolute_error(self.targets, self.preds)
+
+class RMSE:
+    """
+    Computes Root Mean Squared Error.
+    """
+    def __init__(self, reduction="mean"):
+        self.reduction = reduction
+        self.reset()
+        
+    def reset(self):
+        self.preds = []
+        self.targets = []
+        
+    def __call__(self, preds, targets):
+        if isinstance(preds, torch.Tensor):
+            preds = preds.detach().cpu().numpy()
+        if isinstance(targets, torch.Tensor):
+            targets = targets.detach().cpu().numpy()
+            
+        self.preds.extend(preds.reshape(-1).tolist())
+        self.targets.extend(targets.reshape(-1).tolist())
+        
+    def aggregate(self):
+        if not self.preds:
+            return 0.0
+        return np.sqrt(mean_squared_error(self.targets, self.preds))
