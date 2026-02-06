@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from sklearn.metrics import roc_curve, roc_auc_score
+from sklearn.metrics import roc_curve, roc_auc_score, r2_score
 
 def compute_dice_coefficient(gt, pr, label_idx=1):
     """
@@ -190,3 +190,34 @@ class SkeletalError:
         if self.count == 0:
             return 0.0
         return self.total_dist / self.count
+
+class R2Score:
+    """
+    Computes the Coefficient of Determination (R^2 Score).
+    Uses sklearn.metrics.r2_score internally.
+    """
+    def __init__(self):
+        self.reset()
+        
+    def reset(self):
+        self.preds = []
+        self.targets = []
+        
+    def __call__(self, preds, targets):
+        """
+        Args:
+            preds (torch.Tensor or np.ndarray): Predicted values.
+            targets (torch.Tensor or np.ndarray): Ground truth values.
+        """
+        if isinstance(preds, torch.Tensor):
+            preds = preds.detach().cpu().numpy()
+        if isinstance(targets, torch.Tensor):
+            targets = targets.detach().cpu().numpy()
+            
+        self.preds.extend(preds.reshape(-1).tolist())
+        self.targets.extend(targets.reshape(-1).tolist())
+        
+    def aggregate(self):
+        if not self.preds:
+            return 0.0
+        return r2_score(self.targets, self.preds)
