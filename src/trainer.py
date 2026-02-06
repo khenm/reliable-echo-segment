@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from monai.losses import DiceCELoss
-from monai.metrics import DiceMetric, HausdorffDistanceMetric
+from monai.metrics import DiceMetric, HausdorffDistanceMetric, RMSEMetric
 from monai.transforms import AsDiscrete
 from tqdm import tqdm
 from src.utils.logging import get_logger
@@ -192,7 +192,7 @@ class Trainer:
         if lengths is not None:
             lengths = lengths.to(self.device)
 
-        mask_logits, vol, ef = self.model(imgs, lengths=lengths)
+        mask_logits, vol, ef, ef_probe = self.model(imgs, lengths=lengths)
 
         loss = 0.0
         comps = {}
@@ -208,13 +208,14 @@ class Trainer:
 
             # Check if loss function accepts frames (TemporalWeakSegLoss)
             loss_fn = self.criterions['segmentation']
+            # Pass ef_probe for supervision instead of raw geometric ef
             if hasattr(loss_fn, 'cycle_loss'):
                 l_seg, c_dict = loss_fn(
-                    mask_logits, target_masks, ef, ef_target, frame_mask, imgs
+                    mask_logits, target_masks, ef_probe, ef_target, frame_mask, imgs
                 )
             else:
                 l_seg, c_dict = loss_fn(
-                    mask_logits, target_masks, ef, ef_target, frame_mask
+                    mask_logits, target_masks, ef_probe, ef_target, frame_mask
                 )
             loss += l_seg
             comps['segmentation'] = l_seg.item()
@@ -398,11 +399,14 @@ class Trainer:
         if lengths is not None:
             lengths = lengths.to(self.device)
 
-        mask_logits, vol, ef = self.model(imgs, lengths=lengths)
+        mask_logits, vol, ef, ef_probe = self.model(imgs, lengths=lengths)
 
         if 'mae' in self.metrics:
             targets = batch["target"].to(self.device).view(-1, 1)
-            self.metrics['mae'](ef, targets)
+            # Use ef_probe for metrics
+            self.metrics['mae'](ef_probe, targets)
+            if 'rmse' in self.metrics: self.metrics['rmse'](ef_probe, targets)
+            if 'r2' in self.metrics: self.metrics['r2'](ef_probe, targets)
 
         if 'dice' in self.metrics:
             target_masks = batch.get("label")
@@ -448,6 +452,8 @@ class Trainer:
         if 'mae' in self.metrics:
             targets = batch["target"].to(self.device).view(-1, 1)
             self.metrics['mae'](ef, targets)
+            if 'rmse' in self.metrics: self.metrics['rmse'](ef, targets)
+            if 'r2' in self.metrics: self.metrics['r2'](ef, targets)
 
         if 'skeletal' in self.metrics:
             kps_gt = batch.get("keypoints")
@@ -481,6 +487,8 @@ class Trainer:
         if 'mae' in self.metrics:
             targets = batch["target"].to(self.device).view(-1, 1)
             self.metrics['mae'](preds, targets)
+            if 'rmse' in self.metrics: self.metrics['rmse'](preds, targets)
+            if 'r2' in self.metrics: self.metrics['r2'](preds, targets)
 
     def _val_seg(self, batch):
         imgs = batch["image"].to(self.device)
@@ -493,6 +501,8 @@ class Trainer:
 
     def _aggregate_metrics(self):
         mae = float(self.metrics['mae'].aggregate().cpu()) if 'mae' in self.metrics else 0.0
+        rmse = float(self.metrics['rmse'].aggregate().cpu()) if 'rmse' in self.metrics else 0.0
+        r2 = float(self.metrics['r2'].aggregate()) if 'r2' in self.metrics else 0.0
 
         dice = 0.0
         if 'dice' in self.metrics:
@@ -501,12 +511,12 @@ class Trainer:
                 dice = float(self.metrics['dice'].aggregate().cpu())
 
         if self.is_segmentation:
-            return (dice, mae, dice)
+            return (dice, mae, rmse, r2)
         elif self.is_skeletal and 'skeletal' in self.metrics:
             skel = float(self.metrics['skeletal'].aggregate())
-            return (-mae, mae, dice, skel)
+            return (-mae, mae, dice, skel, rmse, r2)
         elif self.is_regression or self.is_dual_stream:
-            return (-mae, mae, dice)
+            return (-mae, mae, dice, rmse, r2)
         else:
             return dice
 
@@ -538,11 +548,16 @@ class Trainer:
     def _log_epoch(self, ep, loss, comps, val_res):
         msg = f"E{ep:03d} loss={loss:.4f} " + " ".join([f"{k}={v:.4f}" for k, v in comps.items()])
         if isinstance(val_res, tuple):
-            # Segmentation: (dice, mae, dice) or Skeletal: (-mae, mae, dice, skel)
+            # Segmentation: (dice, mae, rmse, r2)
+            # Skeletal: (-mae, mae, dice, skel, rmse, r2)
+            # Regression: (-mae, mae, dice, rmse, r2)
+            
             if self.is_segmentation:
-                msg += f" valDice={val_res[0]:.4f} valMAE={val_res[1]:.4f}"
-            elif len(val_res) >= 4:
-                msg += f" valMAE={val_res[1]:.4f} valDice={val_res[2]:.4f} valSkel={val_res[3]:.4f}"
+                msg += f" valDice={val_res[0]:.4f} valMAE={val_res[1]:.4f} valRMSE={val_res[2]:.4f} valR2={val_res[3]:.4f}"
+            elif self.is_skeletal:
+                 msg += f" valMAE={val_res[1]:.4f} valDice={val_res[2]:.4f} valSkel={val_res[3]:.4f} valRMSE={val_res[4]:.4f} valR2={val_res[5]:.4f}"
+            elif self.is_regression or self.is_dual_stream:
+                 msg += f" valMAE={val_res[1]:.4f} valDice={val_res[2]:.4f} valRMSE={val_res[3]:.4f} valR2={val_res[4]:.4f}"
             else:
                 msg += f" valMAE={val_res[1]:.4f} valDice={val_res[2]:.4f}"
         else:
@@ -555,10 +570,19 @@ class Trainer:
                 if self.is_segmentation:
                     log_dict["val/dice"] = val_res[0]
                     log_dict["val/mae"] = val_res[1]
-                elif len(val_res) >= 4:
+                    log_dict["val/rmse"] = val_res[2]
+                    log_dict["val/r2"] = val_res[3]
+                elif self.is_skeletal:
                     log_dict["val/mae"] = val_res[1]
                     log_dict["val/dice"] = val_res[2]
                     log_dict["val/skeletal"] = val_res[3]
+                    log_dict["val/rmse"] = val_res[4]
+                    log_dict["val/r2"] = val_res[5]
+                elif self.is_regression or self.is_dual_stream:
+                    log_dict["val/mae"] = val_res[1]
+                    log_dict["val/dice"] = val_res[2]
+                    log_dict["val/rmse"] = val_res[3]
+                    log_dict["val/r2"] = val_res[4]
                 else:
                     log_dict["val/mae"] = val_res[1]
                     log_dict["val/dice"] = val_res[2]

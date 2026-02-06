@@ -81,6 +81,7 @@ class TemporalEchoSegmentTracker(nn.Module):
         self.decoder = SegmentationDecoder(hidden_dim=hidden_dim, output_size=output_size)
         self.slicer = MaskSlicer(num_slices=20)
         self.calculator = AreaLengthVolumeCalculator()
+        self.ef_head = nn.Linear(1, 1)
 
         logger.info(
             f"TemporalEchoSegmentTracker initialized: backbone={backbone}, "
@@ -96,7 +97,8 @@ class TemporalEchoSegmentTracker(nn.Module):
         Returns:
             mask_logits: (B, 1, T, H, W)
             volume: (B, T)
-            ef: (B, 1)
+            ef: (B, 1) - calculated geometric EF
+            ef_probe: (B, 1) - calibrated EF from linear probe
         """
         B, C, T, H, W = x.shape
 
@@ -158,5 +160,6 @@ class TemporalEchoSegmentTracker(nn.Module):
             esv, _ = volume.min(dim=1, keepdim=True)
 
         ef = (edv - esv) / (edv + 1e-6)
+        ef_probe = self.ef_head(ef)
 
-        return mask_logits, volume, ef
+        return mask_logits, volume, ef, ef_probe
