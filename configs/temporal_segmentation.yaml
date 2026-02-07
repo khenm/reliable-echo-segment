@@ -13,6 +13,12 @@ loss:
     smooth: 0.0
     contrast: 0.0
     cycle: 0.5
+  distillation:
+    enabled: true
+    weight: 1.0
+    temperature: 1.0
+    student_dim: 256
+
 
 training:
   epochs: 100

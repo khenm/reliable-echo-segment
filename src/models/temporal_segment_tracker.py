@@ -89,16 +89,18 @@ class TemporalEchoSegmentTracker(nn.Module):
             f"use_convlstm={use_convlstm}"
         )
 
-    def forward(self, x: torch.Tensor, lengths: torch.Tensor = None):
+    def forward(self, x: torch.Tensor, lengths: torch.Tensor = None, return_features: bool = False):
         """
         Args:
             x: (B, C, T, H, W) input video
             lengths: (B,) actual frame counts for variable-length sequences
+            return_features: If True, returns features (B, T, D)
         Returns:
             mask_logits: (B, 1, T, H, W)
             volume: (B, T)
             ef: (B, 1) - calculated geometric EF
             ef_probe: (B, 1) - calibrated EF from linear probe
+            features: (B, T, D) - Optional, only if return_features=True
         """
         B, C, T, H, W = x.shape
 
@@ -161,5 +163,8 @@ class TemporalEchoSegmentTracker(nn.Module):
 
         ef = (edv - esv) / (edv + 1e-6)
         ef_probe = self.ef_head(ef)
+
+        if return_features:
+            return mask_logits, volume, ef, ef_probe, hidden_states
 
         return mask_logits, volume, ef, ef_probe

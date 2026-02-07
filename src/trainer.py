@@ -192,7 +192,13 @@ class Trainer:
         if lengths is not None:
             lengths = lengths.to(self.device)
 
-        mask_logits, vol, ef, ef_probe = self.model(imgs, lengths=lengths)
+        need_features = 'distillation' in self.criterions
+        if need_features:
+            mask_logits, vol, ef, ef_probe, features = self.model(
+                imgs, lengths=lengths, return_features=True
+            )
+        else:
+            mask_logits, vol, ef, ef_probe = self.model(imgs, lengths=lengths)
 
         loss = 0.0
         comps = {}
@@ -220,6 +226,11 @@ class Trainer:
             loss += l_seg
             comps['segmentation'] = l_seg.item()
             comps.update({k: v.item() for k, v in c_dict.items()})
+
+        if 'distillation' in self.criterions:
+            l_distill = self.criterions['distillation'](features, imgs)
+            loss += l_distill
+            comps['distillation'] = l_distill.item()
 
         return loss, comps
 
@@ -500,8 +511,8 @@ class Trainer:
             self.metrics['dice'](pred, labs)
 
     def _aggregate_metrics(self):
-        mae = float(self.metrics['mae'].aggregate().cpu()) if 'mae' in self.metrics else 0.0
-        rmse = float(self.metrics['rmse'].aggregate().cpu()) if 'rmse' in self.metrics else 0.0
+        mae = float(self.metrics['mae'].aggregate()) if 'mae' in self.metrics else 0.0
+        rmse = float(self.metrics['rmse'].aggregate()) if 'rmse' in self.metrics else 0.0
         r2 = float(self.metrics['r2'].aggregate()) if 'r2' in self.metrics else 0.0
 
         dice = 0.0
