@@ -10,15 +10,9 @@ from src.utils.logging import get_logger
 logger = get_logger()
 
 
-def _load_panecho_teacher(clip_len: int = 16) -> nn.Module:
-    """
-    Load PanEcho backbone with proper namespace isolation.
-    
-    Handles collision between local 'src' package and PanEcho's 'src' package
-    by temporarily clearing src.* modules from sys.modules cache.
-    """
+def _isolate_and_load(hub_repo: str, model_name: str, **kwargs) -> nn.Module:
+    """Load from torch.hub with namespace isolation."""
     cwd = os.getcwd()
-
     if cwd in sys.path:
         sys.path.remove(cwd)
 
@@ -30,12 +24,7 @@ def _load_panecho_teacher(clip_len: int = 16) -> nn.Module:
         del sys.modules[key]
 
     try:
-        model = torch.hub.load(
-            'CarDS-Yale/PanEcho', 'PanEcho',
-            force_reload=False,
-            backbone_only=True,
-            clip_len=clip_len
-        )
+        model = torch.hub.load(hub_repo, model_name, force_reload=False, **kwargs)
     finally:
         sys.modules.update(cached_src_modules)
         if cwd not in sys.path:
@@ -47,12 +36,13 @@ def _load_panecho_teacher(clip_len: int = 16) -> nn.Module:
 @register_loss("PanEchoDistillation")
 class PanEchoDistillationLoss(nn.Module):
     """
-    Frame-wise knowledge distillation from PanEcho teacher.
+    Dual-head knowledge distillation from PanEcho.
     
     Architecture:
-        - Teacher: PanEcho backbone (frozen) producing 768-dim embeddings per frame
-        - Student: Projects hidden states (256-dim) to match teacher space
-        - Loss: MSE on L2-normalized features for each frame
+        - Frame-level: PanEcho image encoder (768-dim per frame) → segmentation supervision
+        - Video-level: PanEcho full backbone (768-dim per video) → temporal supervision
+        
+    Loss = alpha * frame_loss + (1 - alpha) * video_loss
     """
 
     def __init__(
@@ -60,43 +50,68 @@ class PanEchoDistillationLoss(nn.Module):
         student_dim: int = 256,
         teacher_dim: int = 768,
         temperature: float = 1.0,
+        alpha: float = 0.5,
         clip_len: int = 16
     ):
         super().__init__()
         self.temperature = temperature
+        self.alpha = alpha
         self.clip_len = clip_len
         self.teacher_dim = teacher_dim
 
-        self.projection = nn.Sequential(
+        self.frame_projection = nn.Sequential(
             nn.Linear(student_dim, teacher_dim),
             nn.ReLU(),
             nn.Linear(teacher_dim, teacher_dim)
         )
 
-        self.teacher = None
-        self._teacher_device = None
+        self.video_projection = nn.Sequential(
+            nn.Linear(student_dim, teacher_dim),
+            nn.ReLU(),
+            nn.Linear(teacher_dim, teacher_dim)
+        )
+
+        self.image_encoder = None
+        self.video_encoder = None
+        self._device = None
 
         logger.info(
             f"PanEchoDistillationLoss initialized: "
-            f"student_dim={student_dim}, teacher_dim={teacher_dim}"
+            f"student_dim={student_dim}, alpha={alpha} (frame vs video)"
         )
 
-    def _ensure_teacher(self, device: torch.device):
-        """Lazy load teacher on first forward pass and ensure all modules on device."""
-        if self.teacher is None:
-            logger.info("Loading PanEcho teacher model...")
-            self.teacher = _load_panecho_teacher(clip_len=self.clip_len)
-            self.teacher.eval()
-            for p in self.teacher.parameters():
+    def _ensure_teachers(self, device: torch.device):
+        """Lazy load both teacher models."""
+        if self.image_encoder is None:
+            logger.info("Loading PanEcho image encoder (frame-level)...")
+            self.image_encoder = _isolate_and_load(
+                'CarDS-Yale/PanEcho', 'PanEcho', image_encoder_only=True
+            )
+            self.image_encoder.eval()
+            for p in self.image_encoder.parameters():
                 p.requires_grad = False
-            self._teacher_device = device
-            self.teacher.to(device)
-            self.projection.to(device)
-            logger.info("PanEcho teacher loaded and frozen")
-        elif self._teacher_device != device:
-            self.teacher.to(device)
-            self.projection.to(device)
-            self._teacher_device = device
+
+            logger.info("Loading PanEcho video backbone (video-level)...")
+            self.video_encoder = _isolate_and_load(
+                'CarDS-Yale/PanEcho', 'PanEcho', backbone_only=True, clip_len=self.clip_len
+            )
+            self.video_encoder.eval()
+            for p in self.video_encoder.parameters():
+                p.requires_grad = False
+
+            self._device = device
+            self.image_encoder.to(device)
+            self.video_encoder.to(device)
+            self.frame_projection.to(device)
+            self.video_projection.to(device)
+            logger.info("PanEcho teachers loaded and frozen")
+
+        elif self._device != device:
+            self.image_encoder.to(device)
+            self.video_encoder.to(device)
+            self.frame_projection.to(device)
+            self.video_projection.to(device)
+            self._device = device
 
     def forward(
         self,
@@ -104,43 +119,32 @@ class PanEchoDistillationLoss(nn.Module):
         input_video: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute frame-wise distillation loss.
+        Compute dual-head distillation loss.
         
         Args:
-            student_features: (B, T, D_student) hidden states from student GRU
-            input_video: (B, C, T, H, W) original video input
+            student_features: (B, T, D_student) hidden states from student
+            input_video: (B, C, T, H, W) original video
             
         Returns:
-            loss: Scalar distillation loss
+            loss: Combined frame + video distillation loss
         """
         device = student_features.device
-        self._ensure_teacher(device)
+        self._ensure_teachers(device)
 
-        B, T_student, D = student_features.shape
-        B_vid, C, T_vid, H, W = input_video.shape
+        B, T, D = student_features.shape
 
-        teacher_input = self._prepare_teacher_input(input_video)
-        teacher_features = self._get_frame_features(teacher_input)
+        teacher_input = self._prepare_input(input_video)
 
-        if teacher_features.shape[1] != T_student:
-            teacher_features = F.interpolate(
-                teacher_features.permute(0, 2, 1),
-                size=T_student,
-                mode='linear',
-                align_corners=False
-            ).permute(0, 2, 1)
+        frame_loss = self._compute_frame_loss(student_features, teacher_input)
 
-        student_proj = self.projection(student_features)
+        video_loss = self._compute_video_loss(student_features, teacher_input)
 
-        student_norm = F.normalize(student_proj, dim=-1)
-        teacher_norm = F.normalize(teacher_features, dim=-1)
-
-        loss = F.mse_loss(student_norm / self.temperature, teacher_norm / self.temperature)
+        loss = self.alpha * frame_loss + (1 - self.alpha) * video_loss
 
         return loss
 
-    def _prepare_teacher_input(self, video: torch.Tensor) -> torch.Tensor:
-        """Resize video from student size (112) to teacher size (224)."""
+    def _prepare_input(self, video: torch.Tensor) -> torch.Tensor:
+        """Resize to 224x224 and ensure 3 channels."""
         B, C, T, H, W = video.shape
 
         if C == 1:
@@ -148,40 +152,66 @@ class PanEchoDistillationLoss(nn.Module):
 
         if H != 224 or W != 224:
             video_flat = video.permute(0, 2, 1, 3, 4).reshape(B * T, 3, H, W)
-            video_resized = F.interpolate(video_flat, size=(224, 224), mode='bilinear', align_corners=False)
+            video_resized = F.interpolate(
+                video_flat, size=(224, 224), mode='bilinear', align_corners=False
+            )
             video = video_resized.view(B, T, 3, 224, 224).permute(0, 2, 1, 3, 4)
 
         return video
 
-    def _get_frame_features(self, video: torch.Tensor) -> torch.Tensor:
-        """
-        Extract per-frame features from PanEcho teacher.
-        
-        PanEcho backbone outputs (B, 768) for the entire clip.
-        We extract features for each frame by sliding window.
-        """
-        B, C, T, H, W = video.shape
+    def _compute_frame_loss(
+        self,
+        student_features: torch.Tensor,
+        teacher_input: torch.Tensor
+    ) -> torch.Tensor:
+        """Frame-level distillation using image encoder."""
+        B, T, D = student_features.shape
+        _, _, T_vid, H, W = teacher_input.shape
+
+        frames = teacher_input.permute(0, 2, 1, 3, 4).reshape(B * T_vid, 3, H, W)
 
         with torch.no_grad():
-            if T <= self.clip_len:
-                padded = F.pad(video, (0, 0, 0, 0, 0, self.clip_len - T), mode='replicate')
-                embedding = self.teacher(padded)
-                frame_features = embedding.unsqueeze(1).expand(B, T, -1)
+            teacher_frame_features = self.image_encoder(frames)
+            teacher_frame_features = teacher_frame_features.view(B, T_vid, -1)
+
+        if T_vid != T:
+            teacher_frame_features = F.interpolate(
+                teacher_frame_features.permute(0, 2, 1),
+                size=T,
+                mode='linear',
+                align_corners=False
+            ).permute(0, 2, 1)
+
+        student_proj = self.frame_projection(student_features)
+
+        student_norm = F.normalize(student_proj, dim=-1)
+        teacher_norm = F.normalize(teacher_frame_features, dim=-1)
+
+        return F.mse_loss(student_norm / self.temperature, teacher_norm / self.temperature)
+
+    def _compute_video_loss(
+        self,
+        student_features: torch.Tensor,
+        teacher_input: torch.Tensor
+    ) -> torch.Tensor:
+        """Video-level distillation using full backbone."""
+        B, T, D = student_features.shape
+        _, C, T_vid, H, W = teacher_input.shape
+
+        with torch.no_grad():
+            if T_vid < self.clip_len:
+                padded = F.pad(teacher_input, (0, 0, 0, 0, 0, self.clip_len - T_vid), mode='replicate')
+            elif T_vid > self.clip_len:
+                padded = teacher_input[:, :, :self.clip_len, :, :]
             else:
-                frame_features_list = []
-                for t in range(T):
-                    start = max(0, t - self.clip_len // 2)
-                    end = min(T, start + self.clip_len)
-                    if end - start < self.clip_len:
-                        start = max(0, end - self.clip_len)
+                padded = teacher_input
 
-                    clip = video[:, :, start:end, :, :]
-                    if clip.shape[2] < self.clip_len:
-                        clip = F.pad(clip, (0, 0, 0, 0, 0, self.clip_len - clip.shape[2]), mode='replicate')
+            teacher_video_embedding = self.video_encoder(padded)
 
-                    embedding = self.teacher(clip)
-                    frame_features_list.append(embedding)
+        student_pooled = student_features.mean(dim=1)
+        student_proj = self.video_projection(student_pooled)
 
-                frame_features = torch.stack(frame_features_list, dim=1)
+        student_norm = F.normalize(student_proj, dim=-1)
+        teacher_norm = F.normalize(teacher_video_embedding, dim=-1)
 
-        return frame_features
+        return F.mse_loss(student_norm / self.temperature, teacher_norm / self.temperature)
