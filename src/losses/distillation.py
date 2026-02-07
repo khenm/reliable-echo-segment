@@ -82,7 +82,7 @@ class PanEchoDistillationLoss(nn.Module):
         )
 
     def _ensure_teacher(self, device: torch.device):
-        """Lazy load teacher on first forward pass."""
+        """Lazy load teacher on first forward pass and ensure all modules on device."""
         if self.teacher is None:
             logger.info("Loading PanEcho teacher model...")
             self.teacher = _load_panecho_teacher(clip_len=self.clip_len)
@@ -91,9 +91,11 @@ class PanEchoDistillationLoss(nn.Module):
                 p.requires_grad = False
             self._teacher_device = device
             self.teacher.to(device)
+            self.projection.to(device)
             logger.info("PanEcho teacher loaded and frozen")
         elif self._teacher_device != device:
             self.teacher.to(device)
+            self.projection.to(device)
             self._teacher_device = device
 
     def forward(
