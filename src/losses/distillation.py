@@ -11,10 +11,24 @@ logger = get_logger()
 
 
 def _load_panecho_teacher(clip_len: int = 16) -> nn.Module:
-    """Load PanEcho backbone, handling sys.path conflicts."""
+    """
+    Load PanEcho backbone with proper namespace isolation.
+    
+    Handles collision between local 'src' package and PanEcho's 'src' package
+    by temporarily clearing src.* modules from sys.modules cache.
+    """
     cwd = os.getcwd()
+
     if cwd in sys.path:
         sys.path.remove(cwd)
+
+    cached_src_modules = {
+        key: mod for key, mod in sys.modules.items()
+        if key == 'src' or key.startswith('src.')
+    }
+    for key in cached_src_modules:
+        del sys.modules[key]
+
     try:
         model = torch.hub.load(
             'CarDS-Yale/PanEcho', 'PanEcho',
@@ -23,8 +37,10 @@ def _load_panecho_teacher(clip_len: int = 16) -> nn.Module:
             clip_len=clip_len
         )
     finally:
+        sys.modules.update(cached_src_modules)
         if cwd not in sys.path:
-            sys.path.append(cwd)
+            sys.path.insert(0, cwd)
+
     return model
 
 
