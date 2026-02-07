@@ -49,15 +49,16 @@ class PanEchoDistillationLoss(nn.Module):
         self,
         student_dim: int = 256,
         teacher_dim: int = 768,
-        temperature: float = 1.0,
-        alpha: float = 0.5,
+        alpha: float = 0.1,
         clip_len: int = 16
     ):
         super().__init__()
-        self.temperature = temperature
         self.alpha = alpha
         self.clip_len = clip_len
         self.teacher_dim = teacher_dim
+
+        # Use CosineEmbeddingLoss for feature alignment
+        self.criterion = nn.CosineEmbeddingLoss()
 
         self.frame_projection = nn.Sequential(
             nn.Linear(student_dim, teacher_dim),
@@ -77,7 +78,7 @@ class PanEchoDistillationLoss(nn.Module):
 
         logger.info(
             f"PanEchoDistillationLoss initialized: "
-            f"student_dim={student_dim}, alpha={alpha} (frame vs video)"
+            f"student_dim={student_dim}, alpha={alpha} (frame vs video), loss=CosineEmbedding"
         )
 
     def _ensure_teachers(self, device: torch.device):
@@ -184,10 +185,14 @@ class PanEchoDistillationLoss(nn.Module):
 
         student_proj = self.frame_projection(student_features)
 
-        student_norm = F.normalize(student_proj, dim=-1)
-        teacher_norm = F.normalize(teacher_frame_features, dim=-1)
+        # Flatten for CosineEmbeddingLoss: (B*T, D)
+        student_flat = student_proj.reshape(-1, self.teacher_dim)
+        teacher_flat = teacher_frame_features.reshape(-1, self.teacher_dim)
+        
+        # Target is 1.0 (maximize similarity)
+        target = torch.ones(student_flat.shape[0], device=student_flat.device)
 
-        return F.mse_loss(student_norm / self.temperature, teacher_norm / self.temperature)
+        return self.criterion(student_flat, teacher_flat, target)
 
     def _compute_video_loss(
         self,
@@ -211,7 +216,7 @@ class PanEchoDistillationLoss(nn.Module):
         student_pooled = student_features.mean(dim=1)
         student_proj = self.video_projection(student_pooled)
 
-        student_norm = F.normalize(student_proj, dim=-1)
-        teacher_norm = F.normalize(teacher_video_embedding, dim=-1)
+        # Target is 1.0 (maximize similarity)
+        target = torch.ones(B, device=student_proj.device)
 
-        return F.mse_loss(student_norm / self.temperature, teacher_norm / self.temperature)
+        return self.criterion(student_proj, teacher_video_embedding, target)
