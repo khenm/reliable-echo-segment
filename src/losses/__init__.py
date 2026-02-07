@@ -1,5 +1,6 @@
 from .consistency import ConsistencyLoss
 from .cycle_consistency import CycleConsistencyLoss
+from .distillation import PanEchoDistillationLoss
 from .ef import DifferentiableEFLoss
 from .geometric_smooth import GeometricSmoothLoss
 from .segmentation_loss import WeakSegLoss
@@ -15,6 +16,7 @@ __all__ = [
     'DifferentiableEFLoss',
     'EchoSemiSupervisedLoss',
     'GeometricSmoothLoss',
+    'PanEchoDistillationLoss',
     'SkeletalLoss',
     'TemporalWeakSegLoss',
     'TopologyLoss',
