@@ -318,7 +318,8 @@ def _get_criterions(cfg):
             criterions['distillation'] = build_loss(
                 "PanEchoDistillation",
                 student_dim=distill_cfg.get('student_dim', 256),
-                temperature=distill_cfg.get('temperature', 1.0)
+                temperature=distill_cfg.get('temperature', 1.0),
+                alpha=distill_cfg.get('alpha', 0.5)
             )
     
     else:
