@@ -312,6 +312,14 @@ def _get_criterions(cfg):
             contrast_weight=weights.get('contrast', 0.1),
             cycle_weight=weights.get('cycle', 0.5)
         )
+
+        distill_cfg = cfg.get('loss', {}).get('distillation', {})
+        if distill_cfg.get('enabled', False):
+            criterions['distillation'] = build_loss(
+                "PanEchoDistillation",
+                student_dim=distill_cfg.get('student_dim', 256),
+                temperature=distill_cfg.get('temperature', 1.0)
+            )
     
     else:
         criterions['dice'] = DiceCELoss(to_onehot_y=True, softmax=True)
