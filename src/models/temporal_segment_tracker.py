@@ -5,7 +5,7 @@ import timm
 
 from src.registry import register_model
 from src.utils.logging import get_logger
-from src.models.segment_tracker import MaskSlicer, AreaLengthVolumeCalculator, SegmentationDecoder
+from src.models.segment_tracker import SegmentationDecoder
 from src.models.temporal_shift import TemporalShiftModule, ConvLSTM
 
 logger = get_logger()
@@ -79,9 +79,13 @@ class TemporalEchoSegmentTracker(nn.Module):
         )
 
         self.decoder = SegmentationDecoder(hidden_dim=hidden_dim, output_size=output_size)
-        self.slicer = MaskSlicer(num_slices=20)
-        self.calculator = AreaLengthVolumeCalculator()
-        self.ef_head = nn.Linear(1, 1)
+        self.volume_regressor = nn.Sequential(
+            nn.Linear(hidden_dim, 128),
+            nn.LayerNorm(128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 2)  # Output: [EDV, ESV] (Normalized)
+        )
 
         logger.info(
             f"TemporalEchoSegmentTracker initialized: backbone={backbone}, "
@@ -93,14 +97,17 @@ class TemporalEchoSegmentTracker(nn.Module):
         """
         Args:
             x: (B, C, T, H, W) input video
-            lengths: (B,) actual frame counts for variable-length sequences
-            return_features: If True, returns features (B, T, D)
+            lengths: (B,) actual frame counts
+            return_features: If True, returns features
         Returns:
-            mask_logits: (B, 1, T, H, W)
-            volume: (B, T)
-            ef: (B, 1) - calculated geometric EF
-            ef_probe: (B, 1) - calibrated EF from linear probe
-            features: (B, T, D) - Optional, only if return_features=True
+            dict: {
+                "mask_logits": (B, 1, T, H, W),
+                "pred_edv": (B, 1),
+                "pred_esv": (B, 1),
+                "pred_ef": (B, 1),
+                "features": Optional (B, T, D),
+                "hidden_states": (B, T, D)
+            }
         """
         B, C, T, H, W = x.shape
 
@@ -142,29 +149,27 @@ class TemporalEchoSegmentTracker(nn.Module):
         mask_logits = self.decoder(hidden_states.reshape(B * T, -1))
         mask_logits = mask_logits.view(B, T, 1, mask_logits.shape[-2], mask_logits.shape[-1])
         mask_logits = mask_logits.permute(0, 2, 1, 3, 4)
-
-        masks = torch.sigmoid(mask_logits)
-
-        masks_for_slicer = masks.permute(0, 2, 1, 3, 4)
-        long_axis, slice_widths = self.slicer(masks_for_slicer)
-        volume = self.calculator(long_axis, slice_widths)
-
+        
         if lengths is not None:
-            range_tensor = torch.arange(T, device=x.device).unsqueeze(0)
-            mask = range_tensor < lengths.unsqueeze(1)
-            vol_max, vol_min = volume.clone(), volume.clone()
-            vol_max[~mask] = -1e9
-            vol_min[~mask] = 1e9
-            edv, _ = vol_max.max(dim=1, keepdim=True)
-            esv, _ = vol_min.min(dim=1, keepdim=True)
+            mask = torch.arange(T, device=x.device)[None, :] < lengths[:, None]
+            mask = mask.unsqueeze(-1).float()
+            video_embedding = (hidden_states * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-6)
         else:
-            edv, _ = volume.max(dim=1, keepdim=True)
-            esv, _ = volume.min(dim=1, keepdim=True)
+            video_embedding = hidden_states.mean(dim=1)
 
-        ef = (edv - esv) / (edv + 1e-6)
-        ef_probe = self.ef_head(ef)
+        pred_vols = self.volume_regressor(video_embedding)
+        pred_vols = F.softplus(pred_vols) 
+        
+        pred_edv = pred_vols[:, 0:1]
+        pred_esv = pred_vols[:, 1:2]
 
-        if return_features:
-            return mask_logits, volume, ef, ef_probe, hidden_states
-
-        return mask_logits, volume, ef, ef_probe
+        pred_ef = (pred_edv - pred_esv) / (pred_edv + 1e-6)
+        
+        return {
+            "mask_logits": mask_logits,
+            "pred_edv": pred_edv,
+            "pred_esv": pred_esv,
+            "pred_ef": pred_ef,
+            "features": features if return_features else None,
+            "hidden_states": hidden_states
+        }

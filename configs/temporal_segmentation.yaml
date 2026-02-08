@@ -9,7 +9,8 @@ loss:
   name: "TemporalWeakSegLoss"
   weights:
     dice: 1.0
-    ef: 1.0
+    ef: 0.2
+    volume: 1.0
     smooth: 0.0
     contrast: 0.0
     cycle: 0.5
@@ -18,17 +19,17 @@ loss:
     weight: 1.0
     temperature: 1.0
     alpha: 0.5
-    student_dim: 256
+    student_dim: 768
 
 
 training:
   epochs: 100
   batch_size: 4
-  train_batch_size: 32
-  val_batch_size: 32
+  train_batch_size: 64
+  val_batch_size: 64
   num_workers: 4
   persistent_workers: True
-  lr: 1.0e-4
+  lr: 2.0e-4
   weight_decay: 1.0e-5
   patience: 10
   seed: 42

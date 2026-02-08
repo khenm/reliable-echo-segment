@@ -312,6 +312,12 @@ def _get_criterions(cfg):
             contrast_weight=weights.get('contrast', 0.1),
             cycle_weight=weights.get('cycle', 0.5)
         )
+        
+        if weights.get('volume', 0.0) > 0:
+            criterions['volume'] = torch.nn.MSELoss()
+            
+        if weights.get('ef', 0.0) > 0:
+            criterions['ef'] = torch.nn.L1Loss()
 
         distill_cfg = cfg.get('loss', {}).get('distillation', {})
         if distill_cfg.get('enabled', False):
@@ -344,9 +350,20 @@ def _get_metrics(cfg):
         if model_name == "skeletal_tracker":
             metrics['skeletal'] = SkeletalError()
     elif model_name in ["segment_tracker", "temporal_segment_tracker"]:
-        metrics['mae'] = MAE(reduction="mean")
-        metrics['rmse'] = RMSE(reduction="mean")
-        metrics['r2'] = R2Score()
+        metrics['mae'] = MAE(reduction="mean")     # EF
+        metrics['rmse'] = RMSE(reduction="mean")   # EF
+        metrics['r2'] = R2Score()                  # EF
+        
+        # EDV
+        metrics['mae_edv'] = MAE(reduction="mean")
+        metrics['rmse_edv'] = RMSE(reduction="mean")
+        metrics['r2_edv'] = R2Score()
+
+        # ESV
+        metrics['mae_esv'] = MAE(reduction="mean")
+        metrics['rmse_esv'] = RMSE(reduction="mean")
+        metrics['r2_esv'] = R2Score()
+        
         metrics['dice'] = DiceMetric(include_background=True, reduction="mean")
     else:
         metrics['dice'] = DiceMetric(include_background=include_bg, reduction="mean")
