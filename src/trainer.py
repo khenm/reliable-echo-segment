@@ -194,19 +194,31 @@ class Trainer:
 
         need_features = 'distillation' in self.criterions
         if need_features:
-            mask_logits, vol, ef, ef_probe, features = self.model(
-                imgs, lengths=lengths, return_features=True
-            )
+            outputs = self.model(imgs, lengths=lengths, return_features=True)
+            mask_logits = outputs['mask_logits']
+            pred_edv = outputs['pred_edv']
+            pred_esv = outputs['pred_esv']
+            pred_ef = outputs['pred_ef']
+            features = outputs['features']
         else:
-            mask_logits, vol, ef, ef_probe = self.model(imgs, lengths=lengths)
+            outputs = self.model(imgs, lengths=lengths)
+            mask_logits = outputs['mask_logits']
+            pred_edv = outputs['pred_edv']
+            pred_esv = outputs['pred_esv']
+            pred_ef = outputs['pred_ef']
 
         loss = 0.0
         comps = {}
 
         target_masks = batch.get("label")
         frame_mask = batch.get("frame_mask")
-        ef_target = batch.get("target").to(self.device).view(-1, 1)
+        
+        # Targets
+        ef_target = batch.get("target_ef").to(self.device).view(-1, 1) if "target_ef" in batch else batch.get("target").to(self.device).view(-1, 1)
+        edv_target = batch.get("target_edv").to(self.device).view(-1, 1)
+        esv_target = batch.get("target_esv").to(self.device).view(-1, 1)
 
+        # 1. Segmentation Loss
         if 'segmentation' in self.criterions and target_masks is not None:
             target_masks = target_masks.to(self.device)
             if frame_mask is not None:
@@ -214,18 +226,37 @@ class Trainer:
 
             # Check if loss function accepts frames (TemporalWeakSegLoss)
             loss_fn = self.criterions['segmentation']
-            # Pass ef_probe for supervision instead of raw geometric ef
+            # Pass pred_ef for supervision
             if hasattr(loss_fn, 'cycle_loss'):
                 l_seg, c_dict = loss_fn(
-                    mask_logits, target_masks, ef_probe, ef_target, frame_mask, imgs
+                    mask_logits, target_masks, pred_ef, ef_target, frame_mask, imgs
                 )
             else:
                 l_seg, c_dict = loss_fn(
-                    mask_logits, target_masks, ef_probe, ef_target, frame_mask
+                    mask_logits, target_masks, pred_ef, ef_target, frame_mask
                 )
             loss += l_seg
             comps['segmentation'] = l_seg.item()
             comps.update({k: v.item() for k, v in c_dict.items()})
+            
+        # 2. Volume Regression Loss
+        if 'volume' in self.criterions:
+             # Ignore dummy targets (-1)
+             # Start with simple MSE, mask out dummies if necessary (though usually they are filtered in dataset or valid)
+             # EchoNet dataset fills with -1.0 if missing.
+             
+             valid_vol = (edv_target >= 0) & (esv_target >= 0)
+             if valid_vol.any():
+                 l_vol = self.criterions['volume'](pred_edv[valid_vol], edv_target[valid_vol]) + \
+                         self.criterions['volume'](pred_esv[valid_vol], esv_target[valid_vol])
+                 loss += l_vol
+                 comps['volume'] = l_vol.item()
+                 
+        # 3. EF Regression Loss (Direct on physical EF)
+        if 'ef' in self.criterions:
+             l_ef = self.criterions['ef'](pred_ef, ef_target)
+             loss += l_ef
+             comps['ef'] = l_ef.item()
 
         if 'distillation' in self.criterions:
             l_distill = self.criterions['distillation'](features, imgs)
@@ -410,14 +441,39 @@ class Trainer:
         if lengths is not None:
             lengths = lengths.to(self.device)
 
-        mask_logits, vol, ef, ef_probe = self.model(imgs, lengths=lengths)
+        outputs = self.model(imgs, lengths=lengths)
+        mask_logits = outputs['mask_logits']
+        pred_ef = outputs['pred_ef']
+        pred_edv = outputs['pred_edv']
+        pred_esv = outputs['pred_esv']
 
+        # Targets
+        ef_target = batch.get("target_ef").to(self.device).view(-1, 1) if "target_ef" in batch else batch.get("target").to(self.device).view(-1, 1)
+        edv_target = batch.get("target_edv").to(self.device).view(-1, 1)
+        esv_target = batch.get("target_edv").to(self.device).view(-1, 1)
+
+        # 1. EF Metrics
         if 'mae' in self.metrics:
-            targets = batch["target"].to(self.device).view(-1, 1)
-            # Use ef_probe for metrics
-            self.metrics['mae'](ef_probe, targets)
-            if 'rmse' in self.metrics: self.metrics['rmse'](ef_probe, targets)
-            if 'r2' in self.metrics: self.metrics['r2'](ef_probe, targets)
+            self.metrics['mae'](pred_ef, ef_target)
+            if 'rmse' in self.metrics: self.metrics['rmse'](pred_ef, ef_target)
+            if 'r2' in self.metrics: self.metrics['r2'](pred_ef, ef_target)
+
+        # 2. Volume Metrics (EDV/ESV)
+        # Filter out invalid targets (-1.0)
+        if 'mae_edv' in self.metrics:
+            # EDV
+            valid_edv = (edv_target >= 0)
+            if valid_edv.any():
+                self.metrics['mae_edv'](pred_edv[valid_edv], edv_target[valid_edv])
+                self.metrics['rmse_edv'](pred_edv[valid_edv], edv_target[valid_edv])
+                self.metrics['r2_edv'](pred_edv[valid_edv], edv_target[valid_edv])
+
+            # ESV 
+            valid_esv = (esv_target >= 0)
+            if valid_esv.any():
+                self.metrics['mae_esv'](pred_esv[valid_esv], esv_target[valid_esv])
+                self.metrics['rmse_esv'](pred_esv[valid_esv], esv_target[valid_esv])
+                self.metrics['r2_esv'](pred_esv[valid_esv], esv_target[valid_esv])
 
         if 'dice' in self.metrics:
             target_masks = batch.get("label")
@@ -515,6 +571,16 @@ class Trainer:
         rmse = float(self.metrics['rmse'].aggregate()) if 'rmse' in self.metrics else 0.0
         r2 = float(self.metrics['r2'].aggregate()) if 'r2' in self.metrics else 0.0
 
+        # EDV
+        mae_edv = float(self.metrics['mae_edv'].aggregate()) if 'mae_edv' in self.metrics else 0.0
+        rmse_edv = float(self.metrics['rmse_edv'].aggregate()) if 'rmse_edv' in self.metrics else 0.0
+        r2_edv = float(self.metrics['r2_edv'].aggregate()) if 'r2_edv' in self.metrics else 0.0
+
+        # ESV
+        mae_esv = float(self.metrics['mae_esv'].aggregate()) if 'mae_esv' in self.metrics else 0.0
+        rmse_esv = float(self.metrics['rmse_esv'].aggregate()) if 'rmse_esv' in self.metrics else 0.0
+        r2_esv = float(self.metrics['r2_esv'].aggregate()) if 'r2_esv' in self.metrics else 0.0
+
         dice = 0.0
         if 'dice' in self.metrics:
             buffer = self.metrics['dice'].get_buffer()
@@ -522,7 +588,7 @@ class Trainer:
                 dice = float(self.metrics['dice'].aggregate().cpu())
 
         if self.is_segmentation:
-            return (dice, mae, rmse, r2)
+            return (dice, mae, rmse, r2, mae_edv, rmse_edv, r2_edv, mae_esv, rmse_esv, r2_esv)
         elif self.is_skeletal and 'skeletal' in self.metrics:
             skel = float(self.metrics['skeletal'].aggregate())
             return (-mae, mae, dice, skel, rmse, r2)
@@ -559,12 +625,11 @@ class Trainer:
     def _log_epoch(self, ep, loss, comps, val_res):
         msg = f"E{ep:03d} loss={loss:.4f} " + " ".join([f"{k}={v:.4f}" for k, v in comps.items()])
         if isinstance(val_res, tuple):
-            # Segmentation: (dice, mae, rmse, r2)
-            # Skeletal: (-mae, mae, dice, skel, rmse, r2)
-            # Regression: (-mae, mae, dice, rmse, r2)
-            
             if self.is_segmentation:
+                # (dice, mae, rmse, r2, mae_edv, rmse_edv, r2_edv, mae_esv, rmse_esv, r2_esv)
                 msg += f" valDice={val_res[0]:.4f} valMAE={val_res[1]:.4f} valRMSE={val_res[2]:.4f} valR2={val_res[3]:.4f}"
+                msg += f" valMAE_EDV={val_res[4]:.4f} valRMSE_EDV={val_res[5]:.4f} valR2_EDV={val_res[6]:.4f}"
+                msg += f" valMAE_ESV={val_res[7]:.4f} valRMSE_ESV={val_res[8]:.4f} valR2_ESV={val_res[9]:.4f}"
             elif self.is_skeletal:
                  msg += f" valMAE={val_res[1]:.4f} valDice={val_res[2]:.4f} valSkel={val_res[3]:.4f} valRMSE={val_res[4]:.4f} valR2={val_res[5]:.4f}"
             elif self.is_regression or self.is_dual_stream:
@@ -579,10 +644,18 @@ class Trainer:
             log_dict = {"val/loss": loss}
             if isinstance(val_res, tuple):
                 if self.is_segmentation:
-                    log_dict["val/dice"] = val_res[0]
-                    log_dict["val/mae"] = val_res[1]
-                    log_dict["val/rmse"] = val_res[2]
-                    log_dict["val/r2"] = val_res[3]
+                    log_dict.update({
+                        "val/dice": val_res[0],
+                        "val/mae": val_res[1],
+                        "val/rmse": val_res[2],
+                        "val/r2": val_res[3],
+                        "val/mae_edv": val_res[4],
+                        "val/rmse_edv": val_res[5],
+                        "val/r2_edv": val_res[6],
+                        "val/mae_esv": val_res[7],
+                        "val/rmse_esv": val_res[8],
+                        "val/r2_esv": val_res[9]
+                    })
                 elif self.is_skeletal:
                     log_dict["val/mae"] = val_res[1]
                     log_dict["val/dice"] = val_res[2]
@@ -606,8 +679,6 @@ class Trainer:
         if self.cfg.get('losses', {}).get('debug', {}).get('trace_gradients'):
             pass # Simplified out for now.
 
-    # --- Test / Eval Methods (Simplified) ---
-
     def evaluate_test(self):
         self.model.eval()
         records = []
@@ -615,7 +686,6 @@ class Trainer:
             for batch in tqdm(self.ld_ts, desc="Testing"):
                 if self.is_skeletal:
                     self._test_skeletal(batch, records)
-                # ... Add other handlers as needed
         
         if records:
             pd.DataFrame(records).to_csv(self.cfg['training']['test_metrics_csv'])

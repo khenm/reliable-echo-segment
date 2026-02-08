@@ -178,7 +178,7 @@ class SkeletalError:
         """
         # Calculate Euclidean distance per point
         # diff: (B, T, N, 2)
-        diff = preds - targets
+        diff = preds.float() - targets.float()
         
         # dist: (B, T, N)
         dist = torch.norm(diff, dim=-1)
@@ -210,9 +210,9 @@ class R2Score:
             targets (torch.Tensor or np.ndarray): Ground truth values.
         """
         if isinstance(preds, torch.Tensor):
-            preds = preds.detach().cpu().numpy()
+            preds = preds.float().detach().cpu().numpy()
         if isinstance(targets, torch.Tensor):
-            targets = targets.detach().cpu().numpy()
+            targets = targets.float().detach().cpu().numpy()
             
         self.preds.extend(preds.reshape(-1).tolist())
         self.targets.extend(targets.reshape(-1).tolist())
@@ -236,9 +236,9 @@ class MAE:
         
     def __call__(self, preds, targets):
         if isinstance(preds, torch.Tensor):
-            preds = preds.detach().cpu().numpy()
+            preds = preds.float().detach().cpu().numpy()
         if isinstance(targets, torch.Tensor):
-            targets = targets.detach().cpu().numpy()
+            targets = targets.float().detach().cpu().numpy()
             
         self.preds.extend(preds.reshape(-1).tolist())
         self.targets.extend(targets.reshape(-1).tolist())
@@ -262,9 +262,9 @@ class RMSE:
         
     def __call__(self, preds, targets):
         if isinstance(preds, torch.Tensor):
-            preds = preds.detach().cpu().numpy()
+            preds = preds.float().detach().cpu().numpy()
         if isinstance(targets, torch.Tensor):
-            targets = targets.detach().cpu().numpy()
+            targets = targets.float().detach().cpu().numpy()
             
         self.preds.extend(preds.reshape(-1).tolist())
         self.targets.extend(targets.reshape(-1).tolist())

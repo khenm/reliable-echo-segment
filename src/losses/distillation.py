@@ -12,25 +12,35 @@ logger = get_logger()
 
 def _isolate_and_load(hub_repo: str, model_name: str, **kwargs) -> nn.Module:
     """Load from torch.hub with namespace isolation."""
+    # 1. Capture current state
     cwd = os.getcwd()
-    if cwd in sys.path:
-        sys.path.remove(cwd)
-
-    cached_src_modules = {
-        key: mod for key, mod in sys.modules.items()
-        if key == 'src' or key.startswith('src.')
-    }
-    for key in cached_src_modules:
-        del sys.modules[key]
-
+    original_sys_path = list(sys.path)
+    
+    # 2. Aggressively clean sys.path
+    # Remove CWD, '', and the script directory if it matches CWD
+    sys.path = [p for p in sys.path if p != '' and os.path.abspath(p) != cwd]
+    
+    # 3. Purge conflicting modules from sys.modules
+    cached_src_modules = {}
+    for key in list(sys.modules.keys()):
+        if key == 'src' or key.startswith('src.'):
+            cached_src_modules[key] = sys.modules.pop(key)
+            
     try:
-        model = torch.hub.load(hub_repo, model_name, force_reload=False, **kwargs)
+        # 4. Load from Hub (this will add the repo to sys.path)
+        # verbose=False to reduce noise, assuming user trusts the repo
+        model = torch.hub.load(hub_repo, model_name, force_reload=False, verbose=False, **kwargs)
+        return model
+    except Exception as e:
+        logger.error(f"Failed to load {model_name} from {hub_repo}: {e}")
+        raise e
     finally:
+        # 5. Restore State
+        # Restore sys.modules
         sys.modules.update(cached_src_modules)
-        if cwd not in sys.path:
-            sys.path.insert(0, cwd)
-
-    return model
+        
+        # Restore sys.path
+        sys.path[:] = original_sys_path
 
 
 @register_loss("PanEchoDistillation")
@@ -49,6 +59,7 @@ class PanEchoDistillationLoss(nn.Module):
         self,
         student_dim: int = 256,
         teacher_dim: int = 768,
+        temperature: float = 1.0,
         alpha: float = 0.1,
         clip_len: int = 16
     ):
@@ -56,6 +67,7 @@ class PanEchoDistillationLoss(nn.Module):
         self.alpha = alpha
         self.clip_len = clip_len
         self.teacher_dim = teacher_dim
+        # temperature is unused but kept for config compatibility
 
         # Use CosineEmbeddingLoss for feature alignment
         self.criterion = nn.CosineEmbeddingLoss()
