@@ -240,15 +240,20 @@ class Trainer:
             comps.update({k: v.item() for k, v in c_dict.items()})
             
         # 2. Volume Regression Loss
-        if 'volume' in self.criterions:
-             # Ignore dummy targets (-1)
-             # Start with simple MSE, mask out dummies if necessary (though usually they are filtered in dataset or valid)
-             # EchoNet dataset fills with -1.0 if missing.
+        if 'volume' in self.criterions and target_masks is not None:
+             B, C, T, H, W = mask_logits.shape
+             ml_flat = mask_logits.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
+             mt_flat = target_masks.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
              
-             valid_vol = (edv_target >= 0) & (esv_target >= 0)
-             if valid_vol.any():
-                 l_vol = self.criterions['volume'](pred_edv[valid_vol], edv_target[valid_vol]) + \
-                         self.criterions['volume'](pred_esv[valid_vol], esv_target[valid_vol])
+             if frame_mask is not None:
+                 frame_mask_flat = frame_mask.view(-1)
+                 valid_idx = torch.nonzero(frame_mask_flat).squeeze()
+                 if valid_idx.numel() > 0:
+                     l_vol = self.criterions['volume'](ml_flat[valid_idx], mt_flat[valid_idx])
+                     loss += l_vol
+                     comps['volume'] = l_vol.item()
+             else:
+                 l_vol = self.criterions['volume'](ml_flat, mt_flat)
                  loss += l_vol
                  comps['volume'] = l_vol.item()
                  

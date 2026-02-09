@@ -10,7 +10,7 @@ loss:
   weights:
     dice: 1.0
     ef: 0.2
-    volume: 1.0
+    volume: 0.5
     smooth: 0.0
     contrast: 0.0
     cycle: 0.5
