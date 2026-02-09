@@ -2,7 +2,6 @@ model: "temporal_segment_tracker"
 
 data:
   name: "echonet"
-  subset_size: 100
   max_retries: 5
 
 loss:
@@ -24,7 +23,7 @@ loss:
 
 training:
   epochs: 100
-  batch_size: 4
+  batch_size: 8
   train_batch_size: 64
   val_batch_size: 64
   num_workers: 4
@@ -34,10 +33,10 @@ training:
   patience: 10
   seed: 42
 
-  save_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs"
-  checkpoint_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/checkpoints"
-  test_metrics_csv: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/temporal_metrics.csv"
-  clinical_pairs_csv: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic/runs/temporal_clinical_pairs.csv"
+  save_dir: "/workspace/runs"
+  checkpoint_dir: "/workspace/checkpoints"
+  test_metrics_csv: "/workspace/runs/temporal_metrics.csv"
+  clinical_pairs_csv: "/workspace/runs/temporal_clinical_pairs.csv"
   resume_path: null
 
 tta:

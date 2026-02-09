@@ -313,9 +313,7 @@ def _get_criterions(cfg):
             cycle_weight=weights.get('cycle', 0.5)
         )
         
-        if weights.get('volume', 0.0) > 0:
-            criterions['volume'] = src.losses.LogVolumeLoss(lambda_vol=weights.get('volume'))
-            
+
         if weights.get('ef', 0.0) > 0:
             criterions['ef'] = torch.nn.L1Loss()
 
