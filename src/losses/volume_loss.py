@@ -1,26 +1,23 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-class LogVolumeLoss(nn.Module):
+class VolumeLoss(nn.Module):
     def __init__(self, lambda_vol=0.1, sigmoid=True):
         super().__init__()
         self.lambda_vol = lambda_vol
         self.sigmoid = sigmoid
-        # SmoothL1 acts like Log-Cosh: Square error for small diffs, Linear for large diffs
-        self.regression_loss = nn.SmoothL1Loss(beta=1.0) 
+        self.loss_fn = nn.L1Loss()
 
     def get_volume(self, mask_probs):
         """
         Differentiable Volume Calculation
         Args:
-            mask_probs: (Batch, 1, H, W) - Soft probabilities (0..1)
+            mask_probs: (Batch, C, T, H, W) or (Batch, C, H, W)
         Returns:
             volume: (Batch, ) - Sum of pixels (Area/Volume proxy)
         """
-        # Sum probabilities to get soft area/volume
-        # If you have pixel spacing (cm/pixel), multiply here: sum * spacing_x * spacing_y
-        vol = torch.sum(mask_probs, dim=(1, 2, 3)) 
+        dims = tuple(range(2, mask_probs.ndim))
+        vol = torch.sum(mask_probs, dim=dims) 
         return vol
 
     def forward(self, pred_masks, target_masks):
@@ -39,12 +36,7 @@ class LogVolumeLoss(nn.Module):
         pred_vol = self.get_volume(pred_probs)
         target_vol = self.get_volume(target_masks.float())
 
-        # 3. Log-Space Transformation (The "Equalizer" for ESV vs EDV)
-        # Add epsilon for numerical stability
-        log_pred = torch.log(pred_vol + 1e-6)
-        log_target = torch.log(target_vol + 1e-6)
-
-        # 4. Compute Loss (Behaves like Log-Cosh)
-        loss = self.regression_loss(log_pred, log_target)
+        # 3. Compute L1 Loss on Volume
+        loss = self.loss_fn(pred_vol, target_vol)
 
         return self.lambda_vol * loss

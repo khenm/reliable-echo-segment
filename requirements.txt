@@ -5,6 +5,7 @@ torchaudio
 monai[all]>=1.4.0
 nibabel
 scikit-image
+opencv-python-headless
 einops
 tqdm
 tensorboard
@@ -15,3 +16,4 @@ pyyaml
 scikit-learn
 filelock>=3.15
 wandb
+timm

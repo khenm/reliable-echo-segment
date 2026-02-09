@@ -1,5 +1,5 @@
 name: "ECHONET"
-root_dir: "/content/drive/MyDrive/Dataset/EchoNet-Dynamic"
+root_dir: "/workspace/data/Echonet-Dynamic"
 # root_dir: "datasets/echonet-dynamic"
 split_dir: ""
 nifti_dir: ""

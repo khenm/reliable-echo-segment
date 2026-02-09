@@ -239,24 +239,17 @@ class Trainer:
             comps['segmentation'] = l_seg.item()
             comps.update({k: v.item() for k, v in c_dict.items()})
             
-        # 2. Volume Regression Loss
-        if 'volume' in self.criterions and target_masks is not None:
-             B, C, T, H, W = mask_logits.shape
-             ml_flat = mask_logits.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
-             mt_flat = target_masks.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
-             
-             if frame_mask is not None:
-                 frame_mask_flat = frame_mask.view(-1)
-                 valid_idx = torch.nonzero(frame_mask_flat).squeeze()
-                 if valid_idx.numel() > 0:
-                     l_vol = self.criterions['volume'](ml_flat[valid_idx], mt_flat[valid_idx])
-                     loss += l_vol
-                     comps['volume'] = l_vol.item()
-             else:
-                 l_vol = self.criterions['volume'](ml_flat, mt_flat)
-                 loss += l_vol
-                 comps['volume'] = l_vol.item()
-                 
+        # 2. Direct Volume Regression Loss (L1 on pred_edv/esv)
+        w_vol = self.cfg.get('loss', {}).get('weights', {}).get('volume', 0.0)
+        if w_vol > 0:
+            valid_vol = (edv_target > 0) & (esv_target > 0)
+            if valid_vol.any():
+                l_edv = F.l1_loss(pred_edv[valid_vol], edv_target[valid_vol])
+                l_esv = F.l1_loss(pred_esv[valid_vol], esv_target[valid_vol])
+                loss += w_vol * (l_edv + l_esv)
+                comps['vol_edv'] = l_edv.item()
+                comps['vol_esv'] = l_esv.item()
+                
         # 3. EF Regression Loss (Direct on physical EF)
         if 'ef' in self.criterions:
              l_ef = self.criterions['ef'](pred_ef, ef_target)
@@ -455,7 +448,7 @@ class Trainer:
         # Targets
         ef_target = batch.get("target_ef").to(self.device).view(-1, 1) if "target_ef" in batch else batch.get("target").to(self.device).view(-1, 1)
         edv_target = batch.get("target_edv").to(self.device).view(-1, 1)
-        esv_target = batch.get("target_edv").to(self.device).view(-1, 1)
+        esv_target = batch.get("target_esv").to(self.device).view(-1, 1)
 
         # 1. EF Metrics
         if 'mae' in self.metrics:
@@ -464,21 +457,26 @@ class Trainer:
             if 'r2' in self.metrics: self.metrics['r2'](pred_ef, ef_target)
 
         # 2. Volume Metrics (EDV/ESV)
-        # Filter out invalid targets (-1.0)
         if 'mae_edv' in self.metrics:
             # EDV
             valid_edv = (edv_target >= 0)
             if valid_edv.any():
-                self.metrics['mae_edv'](pred_edv[valid_edv], edv_target[valid_edv])
-                self.metrics['rmse_edv'](pred_edv[valid_edv], edv_target[valid_edv])
-                self.metrics['r2_edv'](pred_edv[valid_edv], edv_target[valid_edv])
+                p_edv_ml = pred_edv[valid_edv] * 300.0
+                t_edv_ml = edv_target[valid_edv] * 300.0
+                
+                self.metrics['mae_edv'](p_edv_ml, t_edv_ml)
+                self.metrics['rmse_edv'](p_edv_ml, t_edv_ml)
+                self.metrics['r2_edv'](p_edv_ml, t_edv_ml)
 
             # ESV 
             valid_esv = (esv_target >= 0)
             if valid_esv.any():
-                self.metrics['mae_esv'](pred_esv[valid_esv], esv_target[valid_esv])
-                self.metrics['rmse_esv'](pred_esv[valid_esv], esv_target[valid_esv])
-                self.metrics['r2_esv'](pred_esv[valid_esv], esv_target[valid_esv])
+                p_esv_ml = pred_esv[valid_esv] * 300.0
+                t_esv_ml = esv_target[valid_esv] * 300.0
+                
+                self.metrics['mae_esv'](p_esv_ml, t_esv_ml)
+                self.metrics['rmse_esv'](p_esv_ml, t_esv_ml)
+                self.metrics['r2_esv'](p_esv_ml, t_esv_ml)
 
         if 'dice' in self.metrics:
             target_masks = batch.get("label")
@@ -628,7 +626,10 @@ class Trainer:
         return load_full_checkpoint(path, self.model, optimizer=self.opt, scaler=self.scaler, device=self.device, load_rng=True)
 
     def _log_epoch(self, ep, loss, comps, val_res):
-        msg = f"E{ep:03d} loss={loss:.4f} " + " ".join([f"{k}={v:.4f}" for k, v in comps.items()])
+        if isinstance(ep, str):
+            msg = f"{ep} loss={loss:.4f} " + " ".join([f"{k}={v:.4f}" for k, v in comps.items()])
+        else:
+            msg = f"E{ep:03d} loss={loss:.4f} " + " ".join([f"{k}={v:.4f}" for k, v in comps.items()])
         if isinstance(val_res, tuple):
             if self.is_segmentation:
                 # (dice, mae, rmse, r2, mae_edv, rmse_edv, r2_edv, mae_esv, rmse_esv, r2_esv)
@@ -686,12 +687,28 @@ class Trainer:
 
     def evaluate_test(self):
         self.model.eval()
+        for m in self.metrics.values(): m.reset()
         records = []
-        with torch.no_grad():
+        
+        dev_type = self.device.type if hasattr(self.device, 'type') else str(self.device)
+        with torch.no_grad(), torch.amp.autocast(device_type=dev_type):
             for batch in tqdm(self.ld_ts, desc="Testing"):
                 if self.is_skeletal:
                     self._test_skeletal(batch, records)
+                elif self.is_segmentation:
+                    self._val_segmentation(batch)
+                elif self.is_unet_2d:
+                    self._val_unet_2d(batch)
+                elif self.is_regression or self.is_dual_stream:
+                    self._val_reg_dual(batch)
+                else:
+                    self._val_seg(batch)
         
+        if self.is_segmentation or self.is_regression or self.is_dual_stream or self.is_unet_2d:
+             val_res = self._aggregate_metrics()
+             # Log with "Test" as epoch placeholder
+             self._log_epoch("Test", 0.0, {}, val_res)
+
         if records:
             pd.DataFrame(records).to_csv(self.cfg['training']['test_metrics_csv'])
 
