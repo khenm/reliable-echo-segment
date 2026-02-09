@@ -9,6 +9,7 @@ from .skeletal_loss import SkeletalLoss
 from .temporal_segmentation_loss import TemporalWeakSegLoss
 from .topology_loss import TopologyLoss
 from .vae import KLLoss
+from .log_volume_loss import LogVolumeLoss
 
 __all__ = [
     'ConsistencyLoss',
@@ -21,6 +22,7 @@ __all__ = [
     'TemporalWeakSegLoss',
     'TopologyLoss',
     'KLLoss',
-    'WeakSegLoss'
+    'WeakSegLoss',
+    'LogVolumeLoss'
 ]
 
