@@ -193,19 +193,12 @@ class Trainer:
             lengths = lengths.to(self.device)
 
         need_features = 'distillation' in self.criterions
-        if need_features:
-            outputs = self.model(imgs, lengths=lengths, return_features=True)
-            mask_logits = outputs['mask_logits']
-            pred_edv = outputs['pred_edv']
-            pred_esv = outputs['pred_esv']
-            pred_ef = outputs['pred_ef']
-            features = outputs['features']
-        else:
-            outputs = self.model(imgs, lengths=lengths)
-            mask_logits = outputs['mask_logits']
-            pred_edv = outputs['pred_edv']
-            pred_esv = outputs['pred_esv']
-            pred_ef = outputs['pred_ef']
+
+        outputs = self.model(imgs, lengths=lengths)
+        mask_logits = outputs['mask_logits']
+        pred_edv = outputs['pred_edv']
+        pred_esv = outputs['pred_esv']
+        pred_ef = outputs['pred_ef']
 
         loss = 0.0
         comps = {}
@@ -257,7 +250,7 @@ class Trainer:
              comps['ef'] = l_ef.item()
 
         if 'distillation' in self.criterions:
-            l_distill = self.criterions['distillation'](features, imgs)
+            l_distill = self.criterions['distillation'](mask_logits, imgs)
             loss += l_distill
             comps['distillation'] = l_distill.item()
 

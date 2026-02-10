@@ -3,7 +3,6 @@ import cv2
 import numpy as np
 import pandas as pd
 import torch
-from monai.transforms import Compose, Lambda
 from torch.utils.data import Dataset, DataLoader, Subset
 
 from src.utils.logging import get_logger
@@ -16,10 +15,11 @@ class EchoNetVideoDataset(Dataset):
     Dataset class for EchoNet-Dynamic Video Classification/Regression.
     Loads video clips for R(2+1)D model.
     """
-    def __init__(self, root_dir, split="TRAIN", clip_len=32, sampling_rate=1, transform=None, return_keypoints=False):
+    def __init__(self, root_dir, split="TRAIN", max_clip_len=250, img_size=(112, 112), sampling_rate=1, transform=None, return_keypoints=False):
         self.root_dir = root_dir
         self.split = split.upper()
-        self.clip_len = clip_len
+        self.max_clip_len = max_clip_len
+        self.img_size = img_size
         self.sampling_rate = sampling_rate
         self.transform = transform
         self.return_keypoints = return_keypoints
@@ -103,34 +103,32 @@ class EchoNetVideoDataset(Dataset):
         return mask
 
     def _get_start_frame(self, fname, total_frames):
-        max_len = self.clip_len
-        
         if fname in self.meta_lookup:
             meta = self.meta_lookup[fname]
             ed, es = int(meta["EDFrame"]), int(meta["ESFrame"])
-            cycle_dist = abs(ed - es)
-            target_len = min(max_len, max(int(1.5 * cycle_dist), cycle_dist))
-            midpoint = (ed + es) / 2
-            start_frame = int(midpoint - target_len / 2)
-            
-            # Bounds check
-            if start_frame < 0:
-                start_frame = 0
-            elif start_frame + target_len > total_frames:
+            lo, hi = min(ed, es), max(ed, es)
+            cycle_dist = hi - lo
+            target_len = min(self.max_clip_len, max(int(1.5 * cycle_dist) + 1, cycle_dist + 1))
+            padding = (target_len - cycle_dist - 1) // 2
+            start_frame = lo - padding
+
+            start_frame = max(start_frame, 0)
+            start_frame = min(start_frame, hi - target_len + 1) if hi >= target_len else 0
+            if start_frame + target_len > total_frames:
                 start_frame = max(0, total_frames - target_len)
-            
+
             return start_frame, target_len
-        
-        # Fallback
-        frames_to_read = max_len
-        if total_frames > max_len * self.sampling_rate:
+
+        # Fallback: read up to max_clip_len frames
+        frames_to_read = min(total_frames, self.max_clip_len)
+        if total_frames > frames_to_read:
             if self.split == "TRAIN":
-                start_frame = np.random.randint(0, total_frames - max_len * self.sampling_rate)
+                start_frame = np.random.randint(0, total_frames - frames_to_read)
             else:
-                start_frame = (total_frames - max_len * self.sampling_rate) // 2
+                start_frame = (total_frames - frames_to_read) // 2
         else:
             start_frame = 0
-            
+
         return start_frame, frames_to_read
 
     def _load_video_clip(self, video_path, fname):
@@ -149,7 +147,10 @@ class EchoNetVideoDataset(Dataset):
             ret, frame = cap.read()
             if not ret:
                 break
-            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            if (frame.shape[0], frame.shape[1]) != self.img_size:
+                frame = cv2.resize(frame, (self.img_size[1], self.img_size[0]), interpolation=cv2.INTER_LINEAR)
+            frames.append(frame)
             count += 1
             for _ in range(self.sampling_rate - 1):
                 cap.read()
@@ -157,11 +158,8 @@ class EchoNetVideoDataset(Dataset):
         
         if not frames:
             return None
-            
+
         actual_len = len(frames)
-        if actual_len < self.clip_len:
-            frames.extend([np.zeros_like(frames[0])] * (self.clip_len - actual_len))
-            
         return np.stack(frames, axis=0), start_frame, actual_len
 
     def _get_keypoints(self, t_subset, H, W):
@@ -215,15 +213,18 @@ class EchoNetVideoDataset(Dataset):
                               keypoints_clip[t] = self._get_keypoints(t_subset, H, W)
                      current_frame_idx += self.sampling_rate
 
-        video = video.transpose(3, 0, 1, 2).astype(np.float32) / 255.0 # (C, T, H, W)
-        mask_clip = mask_clip[None, ...].astype(np.float32) # (1, T, H, W)
+        video = video.transpose(3, 0, 1, 2).astype(np.float32) / 255.0  # (C, T, H, W)
+        mask_clip = mask_clip[None, ...].astype(np.float32)  # (1, T, H, W)
+
+        video = torch.from_numpy(video)
+        mask_clip = torch.from_numpy(mask_clip)
 
         if self.transform:
             data = self.transform({"video": video, "label": mask_clip})
             video, mask_clip = data["video"], data.get("label", mask_clip)
-            
+
         output = {
-            "video": video, 
+            "video": video,
             "label": mask_clip, 
             "case": fname,
             "frame_mask": torch.tensor(frame_mask, dtype=torch.float32),
@@ -238,48 +239,77 @@ class EchoNetVideoDataset(Dataset):
             
         return output
 
-class ResizeVideoLabel:
-    def __init__(self, size, clip_len):
-        self.size = size
-        self.clip_len = clip_len
+def variable_length_collate_fn(batch):
+    """Pads variable-length video tensors to the max length within each batch."""
+    max_len = max(sample["lengths"].item() for sample in batch)
+    B = len(batch)
 
-    def __call__(self, data):
-        vid = torch.as_tensor(data["video"]).unsqueeze(0)
-        tgt_size = (self.clip_len, self.size[0], self.size[1])
-        vid = torch.nn.functional.interpolate(vid, size=tgt_size, mode='trilinear', align_corners=False).squeeze(0)
-        data["video"] = vid
-        
-        if "label" in data:
-            lab = torch.as_tensor(data["label"]).unsqueeze(0)
-            lab = torch.nn.functional.interpolate(lab, size=tgt_size, mode='nearest').squeeze(0)
-            data["label"] = lab
-        return data
+    _, C_vid, _, H, W = batch[0]["video"].shape[0], *batch[0]["video"].shape
+    C_lab = batch[0]["label"].shape[0]
+
+    videos = torch.zeros(B, C_vid, max_len, H, W)
+    labels = torch.zeros(B, C_lab, max_len, H, W)
+    frame_masks = torch.zeros(B, max_len)
+    lengths = torch.zeros(B, dtype=torch.long)
+
+    has_keypoints = "keypoints" in batch[0]
+    if has_keypoints:
+        K, D = batch[0]["keypoints"].shape[1], batch[0]["keypoints"].shape[2]
+        keypoints = torch.zeros(B, max_len, K, D)
+
+    scalars = {k: [] for k in ["target_ef", "target_edv", "target_esv"]}
+    cases = []
+
+    for i, sample in enumerate(batch):
+        t = sample["lengths"].item()
+        lengths[i] = t
+        videos[i, :, :t] = sample["video"][:, :t]
+        labels[i, :, :t] = sample["label"][:, :t]
+        frame_masks[i, :t] = sample["frame_mask"][:t]
+        if has_keypoints:
+            keypoints[i, :t] = sample["keypoints"][:t]
+        for k in scalars:
+            scalars[k].append(sample[k])
+        cases.append(sample["case"])
+
+    output = {
+        "video": videos,
+        "label": labels,
+        "frame_mask": frame_masks,
+        "lengths": lengths,
+        "target_ef": torch.stack(scalars["target_ef"]),
+        "target_edv": torch.stack(scalars["target_edv"]),
+        "target_esv": torch.stack(scalars["target_esv"]),
+        "case": cases,
+    }
+    if has_keypoints:
+        output["keypoints"] = keypoints
+    return output
+
 
 @register_dataset("ECHONET")
 class EchoNet:
     @staticmethod
     def get_dataloaders(cfg):
         root_dir = cfg['data']['root_dir']
-        img_size = tuple(cfg['data']['img_size'])
         batch_size = cfg['training'].get('batch_size', 8)
         num_workers = cfg['training'].get('num_workers', 4)
         model_name = cfg['model'].get('name', 'VAEUNet')
-        
+
         if model_name.lower() not in ["r2plus1d", "unet_tcm", "skeletal_tracker", "segment_tracker", "temporal_segment_tracker"]:
-             raise NotImplementedError(f"EchoNet dataloader not implemented for model '{model_name}'")
+            raise NotImplementedError(f"EchoNet dataloader not implemented for model '{model_name}'")
 
-        clip_len = cfg['model'].get('clip_length', 32)
+        max_clip_len = cfg['model'].get('max_clip_len', 250)
+        img_size = tuple(cfg['data'].get('img_size', [112, 112]))
         return_kps = cfg['model'].get('return_keypoints', False)
-        if model_name.lower() == "skeletal_tracker": return_kps = True
-        elif model_name.lower() in ["segment_tracker", "temporal_segment_tracker"]: return_kps = False
-        
-        resize_op = ResizeVideoLabel(img_size, clip_len)
-        train_transforms = Compose([Lambda(func=resize_op)])
-        val_transforms = Compose([Lambda(func=resize_op)])
+        if model_name.lower() == "skeletal_tracker":
+            return_kps = True
+        elif model_name.lower() in ["segment_tracker", "temporal_segment_tracker"]:
+            return_kps = False
 
-        ds_tr = EchoNetVideoDataset(root_dir, "TRAIN", clip_len, transform=train_transforms, return_keypoints=return_kps)
-        ds_va = EchoNetVideoDataset(root_dir, "VAL", clip_len, transform=val_transforms, return_keypoints=return_kps)
-        ds_ts = EchoNetVideoDataset(root_dir, "TEST", clip_len, transform=val_transforms, return_keypoints=return_kps)
+        ds_tr = EchoNetVideoDataset(root_dir, "TRAIN", max_clip_len=max_clip_len, img_size=img_size, return_keypoints=return_kps)
+        ds_va = EchoNetVideoDataset(root_dir, "VAL", max_clip_len=max_clip_len, img_size=img_size, return_keypoints=return_kps)
+        ds_ts = EchoNetVideoDataset(root_dir, "TEST", max_clip_len=max_clip_len, img_size=img_size, return_keypoints=return_kps)
 
         if cfg['data'].get('subset_size'):
             subset_size = int(cfg['data']['subset_size'])
@@ -289,7 +319,7 @@ class EchoNet:
             ds_ts = Subset(ds_ts, range(min(len(ds_ts), subset_size)))
 
         return (
-            DataLoader(ds_tr, batch_size=batch_size, shuffle=True, num_workers=num_workers),
-            DataLoader(ds_va, batch_size=batch_size, shuffle=False, num_workers=num_workers),
-            DataLoader(ds_ts, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+            DataLoader(ds_tr, batch_size=batch_size, shuffle=True, num_workers=num_workers, collate_fn=variable_length_collate_fn),
+            DataLoader(ds_va, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=variable_length_collate_fn),
+            DataLoader(ds_ts, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=variable_length_collate_fn)
         )

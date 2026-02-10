@@ -6,7 +6,6 @@ import timm
 from src.registry import register_model
 from src.utils.logging import get_logger
 from src.models.segment_tracker import SegmentationDecoder
-from src.models.temporal_shift import TemporalShiftModule, ConvLSTM
 
 logger = get_logger()
 
@@ -14,15 +13,12 @@ logger = get_logger()
 @register_model("temporal_segment_tracker")
 class TemporalEchoSegmentTracker(nn.Module):
     """
-    Temporal Segmentation with TSM + ConvLSTM bottleneck.
-    
+    Late Temporal Modeling for echocardiogram segmentation.
+
     Architecture:
-        1. TSM before spatial encoding (inject temporal context to 2D conv)
-        2. ConvNeXt Encoder (spatial features per frame)
-        3. Conv1D Temporal Injector
-        4. Optional ConvLSTM at bottleneck (spatial-temporal learning)
-        5. GRU for sequence modeling
-        6. Decoder for mask upsampling
+        - Backbone with spatial features preserved (no global pooling)
+        - Path A (Segmentation): frame-wise, adapter -> pool -> decoder
+        - Path B (Regression): sequence-wise, adapter -> pool -> GRU -> regressor
     """
 
     @classmethod
@@ -33,8 +29,6 @@ class TemporalEchoSegmentTracker(nn.Module):
             hidden_dim=model_cfg.get('hidden_dim', 256),
             output_size=model_cfg.get('output_size', 112),
             pretrained=model_cfg.get('pretrained', True),
-            shift_fraction=model_cfg.get('shift_fraction', 0.125),
-            use_convlstm=model_cfg.get('use_convlstm', True)
         )
 
     def __init__(
@@ -43,133 +37,107 @@ class TemporalEchoSegmentTracker(nn.Module):
         hidden_dim: int = 256,
         output_size: int = 112,
         pretrained: bool = True,
-        shift_fraction: float = 0.125,
-        use_convlstm: bool = True
+        **kwargs,
     ):
         super().__init__()
-        self.use_convlstm = use_convlstm
 
-        self.tsm = TemporalShiftModule(shift_fraction=shift_fraction)
-
-        self.encoder = timm.create_model(backbone, pretrained=pretrained, num_classes=0)
+        # FIX #1: Disable global pooling to keep spatial dims (B, C, H', W')
+        self.encoder = timm.create_model(
+            backbone,
+            pretrained=pretrained,
+            num_classes=0,
+            global_pool='',
+        )
         self.feature_dim = self.encoder.num_features
 
-        self.temporal_injector = nn.Sequential(
-            nn.Conv1d(self.feature_dim, self.feature_dim, kernel_size=3, padding=1),
-            nn.BatchNorm1d(self.feature_dim),
-            nn.ReLU(),
-            nn.Conv1d(self.feature_dim, self.feature_dim, kernel_size=3, padding=1),
-            nn.BatchNorm1d(self.feature_dim),
-            nn.ReLU()
+        # Channel adapter: feature_dim -> hidden_dim
+        self.adapter = nn.Conv2d(self.feature_dim, hidden_dim, kernel_size=1)
+
+        # Path A: Segmentation (frame-wise, spatial pool -> decoder)
+        self.seg_pool = nn.AdaptiveAvgPool2d(1)
+        self.decoder = SegmentationDecoder(
+            hidden_dim=hidden_dim, output_size=output_size
         )
 
-        if use_convlstm:
-            self.bottleneck_lstm = ConvLSTM(
-                input_dim=self.feature_dim,
-                hidden_dim=self.feature_dim,
-                kernel_size=3
-            )
-            logger.info("Using ConvLSTM bottleneck for spatial-temporal features")
-
-        self.temporal = nn.GRU(
-            input_size=self.feature_dim,
-            hidden_size=hidden_dim,
+        # Path B: Volume Regression (temporal sequence)
+        self.temporal_pool = nn.AdaptiveAvgPool2d(1)
+        self.gru = nn.GRU(
+            input_size=hidden_dim,
+            hidden_size=128,
             num_layers=2,
-            batch_first=True
+            batch_first=True,
         )
-
-        self.decoder = SegmentationDecoder(hidden_dim=hidden_dim, output_size=output_size)
         self.volume_regressor = nn.Sequential(
-            nn.Linear(hidden_dim, 128),
-            nn.LayerNorm(128),
+            nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(128, 2)  # Output: [EDV, ESV] (Normalized)
+            nn.Linear(64, 2),  # [EDV, ESV]
         )
 
         logger.info(
-            f"TemporalEchoSegmentTracker initialized: backbone={backbone}, "
-            f"hidden_dim={hidden_dim}, shift_fraction={shift_fraction}, "
-            f"use_convlstm={use_convlstm}"
+            "TemporalEchoSegmentTracker initialized: "
+            f"backbone={backbone}, hidden_dim={hidden_dim}, "
+            f"feature_dim={self.feature_dim}"
         )
 
-    def forward(self, x: torch.Tensor, lengths: torch.Tensor = None, return_features: bool = False):
+    def forward(self, x: torch.Tensor, lengths: torch.Tensor = None, **kwargs):
         """
         Args:
-            x: (B, C, T, H, W) input video
-            lengths: (B,) actual frame counts
-            return_features: If True, returns features
+            x: (B, C, T, H, W) padded input video
+            lengths: (B,) actual frame counts per sample
         Returns:
-            dict: {
-                "mask_logits": (B, 1, T, H, W),
-                "pred_edv": (B, 1),
-                "pred_esv": (B, 1),
-                "pred_ef": (B, 1),
-                "features": Optional (B, T, D),
-                "hidden_states": (B, T, D)
-            }
+            dict with mask_logits, pred_edv, pred_esv, pred_ef
         """
         B, C, T, H, W = x.shape
 
-        x_time = x.permute(0, 2, 1, 3, 4)
-        x_shifted = self.tsm(x_time)
+        # Fold time into batch for spatial encoding
+        x_flat = x.transpose(1, 2).reshape(B * T, C, H, W)
 
-        x_flat = x_shifted.reshape(B * T, C, H, W)
+        # Backbone → spatial feature maps (B*T, feature_dim, H', W')
         features = self.encoder(x_flat)
+        features = self.adapter(features)  # (B*T, hidden_dim, H', W')
 
-        if features.dim() == 4:
-            spatial_h, spatial_w = features.shape[2], features.shape[3]
-            features_spatial = features.view(B, T, self.feature_dim, spatial_h, spatial_w)
+        # ----- Path A: Segmentation (frame-wise) -----
+        seg_vec = self.seg_pool(features).flatten(1)  # (B*T, hidden_dim)
+        mask_logits = self.decoder(seg_vec)  # (B*T, 1, H_out, W_out)
 
-            if self.use_convlstm:
-                features_lstm = self.bottleneck_lstm(features_spatial)
-                features = features_lstm.mean(dim=(3, 4))
-            else:
-                features = features.view(B, T, -1)
-                features = features[:, :, :self.feature_dim]
-        else:
-            features = features.view(B, T, -1)
+        mask_logits = mask_logits.view(
+            B, T, 1, mask_logits.shape[-2], mask_logits.shape[-1]
+        )
+        mask_logits = mask_logits.transpose(1, 2)  # (B, 1, T, H_out, W_out)
 
-        features_t = features.permute(0, 2, 1)
-        features_t = self.temporal_injector(features_t)
-        features = features_t.permute(0, 2, 1)
+        # ----- Path B: Volume Regression (temporal) -----
+        feat_vec = self.temporal_pool(features).flatten(1)  # (B*T, hidden_dim)
+        feat_vec = feat_vec.view(B, T, -1)  # (B, T, hidden_dim)
 
         if lengths is not None:
             lengths_cpu = lengths.to('cpu').int()
-            packed_feat = nn.utils.rnn.pack_padded_sequence(
-                features, lengths_cpu, batch_first=True, enforce_sorted=False
+            packed = nn.utils.rnn.pack_padded_sequence(
+                feat_vec, lengths_cpu, batch_first=True, enforce_sorted=False
             )
-            packed_out, _ = self.temporal(packed_feat)
-            hidden_states, _ = nn.utils.rnn.pad_packed_sequence(
+            packed_out, _ = self.gru(packed)
+            gru_out, _ = nn.utils.rnn.pad_packed_sequence(
                 packed_out, batch_first=True, total_length=T
             )
+
+            # Average only valid frames
+            mask_t = torch.arange(T, device=x.device)[None, :] < lengths[:, None]
+            mask_t = mask_t.unsqueeze(-1).float()
+            video_embedding = (
+                (gru_out * mask_t).sum(dim=1)
+                / mask_t.sum(dim=1).clamp(min=1e-6)
+            )
         else:
-            hidden_states, _ = self.temporal(features)
+            gru_out, _ = self.gru(feat_vec)
+            video_embedding = gru_out.mean(dim=1)
 
-        mask_logits = self.decoder(hidden_states.reshape(B * T, -1))
-        mask_logits = mask_logits.view(B, T, 1, mask_logits.shape[-2], mask_logits.shape[-1])
-        mask_logits = mask_logits.permute(0, 2, 1, 3, 4)
-        
-        if lengths is not None:
-            mask = torch.arange(T, device=x.device)[None, :] < lengths[:, None]
-            mask = mask.unsqueeze(-1).float()
-            video_embedding = (hidden_states * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-6)
-        else:
-            video_embedding = hidden_states.mean(dim=1)
+        pred_vols = F.softplus(self.volume_regressor(video_embedding))
 
-        pred_vols = self.volume_regressor(video_embedding)
-        pred_vols = F.softplus(pred_vols) 
-        
-        pred_edv = pred_vols[:, 0:1]
-        pred_esv = pred_vols[:, 1:2]
-
-        pred_ef = (pred_edv - pred_esv) / (pred_edv + 1e-6)
-        
         return {
             "mask_logits": mask_logits,
-            "pred_edv": pred_edv,
-            "pred_esv": pred_esv,
-            "pred_ef": pred_ef,
-            "features": features if return_features else None,
-            "hidden_states": hidden_states
+            "pred_edv": pred_vols[:, 0:1],
+            "pred_esv": pred_vols[:, 1:2],
+            "pred_ef": (
+                (pred_vols[:, 0:1] - pred_vols[:, 1:2])
+                / (pred_vols[:, 0:1] + 1e-6)
+            ),
         }
