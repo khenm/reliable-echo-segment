@@ -134,6 +134,7 @@ class TemporalEchoSegmentTracker(nn.Module):
 
         return {
             "mask_logits": mask_logits,
+            "hidden_features": feat_vec,
             "pred_edv": pred_vols[:, 0:1],
             "pred_esv": pred_vols[:, 1:2],
             "pred_ef": (

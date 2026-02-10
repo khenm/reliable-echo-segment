@@ -250,7 +250,8 @@ class Trainer:
              comps['ef'] = l_ef.item()
 
         if 'distillation' in self.criterions:
-            l_distill = self.criterions['distillation'](mask_logits, imgs)
+            hidden_features = outputs['hidden_features']
+            l_distill = self.criterions['distillation'](hidden_features, imgs)
             loss += l_distill
             comps['distillation'] = l_distill.item()
 
