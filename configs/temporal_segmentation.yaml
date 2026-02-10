@@ -18,7 +18,7 @@ loss:
     weight: 1.0
     temperature: 1.0
     alpha: 0.5
-    student_dim: 768
+    student_dim: 256
 
 
 training:
