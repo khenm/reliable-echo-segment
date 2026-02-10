@@ -196,20 +196,27 @@ class SafeTTAEngine:
             
             # Forward Pass (Need logits and features)
             try:
-                out = self.model(x_t, return_features=True)
-                if isinstance(out, tuple):
+                out = self.model(x_t)
+                if isinstance(out, dict):
+                    logits = out['mask_logits']
+                    # Derive features via spatial pooling
+                    if logits.ndim == 5:
+                        B_o, C_o, T_o, H_o, W_o = logits.shape
+                        flat = logits.permute(0, 2, 1, 3, 4).reshape(B_o * T_o, C_o, H_o, W_o)
+                        features = flat.mean(dim=(2, 3))
+                    else:
+                        features = logits.mean(dim=tuple(range(2, logits.ndim)))
+                elif isinstance(out, tuple):
                     if len(out) == 3:
                          val1 = out[0]
                          val2 = out[1]
                          features = out[2]
                          
                          if val1.ndim >= 4: 
-                             # (seg, ef) -> Swap for AuditCalibrator (expects ef, seg)
                              logits = (val2, val1)
                          else:
-                             # (ef, seg) -> Keep
                              logits = (val1, val2)
-                             
+                              
                     elif len(out) == 2:
                          logits, features = out
                     else:

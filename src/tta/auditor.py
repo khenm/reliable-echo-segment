@@ -45,9 +45,6 @@ class SelfAuditor:
         logits = inputs
         # 1. Handle Tuple (Hybrid Models)
         if isinstance(logits, (tuple, list)):
-            # Heuristic: Find first tensor with ndim >= 3 (Spatial)
-            # If none, find first tensor with ndim == 2 (Classification)
-            # If none, take the first element
             selected = logits[0]
             for item in logits:
                 if isinstance(item, torch.Tensor) and item.ndim >= 3:
@@ -127,26 +124,32 @@ class SelfAuditor:
                 inputs = inputs.to(device)
                 
                 try:
-                    out = model(inputs, return_features=True)
-                    if isinstance(out, tuple):
-                        # Handle variable return lengths
+                    out = model(inputs)
+                    if isinstance(out, dict):
+                        logits = out['mask_logits']
+                        # Derive features via spatial pooling of mask logits
+                        if logits.ndim == 5:
+                            B_o, C_o, T_o, H_o, W_o = logits.shape
+                            flat = logits.permute(0, 2, 1, 3, 4).reshape(B_o * T_o, C_o, H_o, W_o)
+                            features = flat.mean(dim=(2, 3))
+                        else:
+                            features = logits.mean(dim=tuple(range(2, logits.ndim)))
+                    elif isinstance(out, tuple):
                         if len(out) == 2:
                             logits, features = out
                         elif len(out) == 3:
-                            # Assuming (logits, ef/aux, features)
                             logits, _, features = out
                         else:
-                            # Fallback: assume first is logits, last is features
                             logits = out[0]
                             features = out[-1]
                     else:
                         logits = out
                         features = getattr(model, 'features', None)
                         if features is None:
-                             raise ValueError("Model must return features or have 'features' attribute for SelfAuditor.")
+                            raise ValueError("Model must return features or have 'features' attribute for SelfAuditor.")
                 except TypeError:
-                     logits = model(inputs)
-                     raise ValueError("SelfAuditor requires model to support feature extraction via return_features=True or similar mechanism.")
+                    logits = model(inputs)
+                    raise ValueError("SelfAuditor requires model to support feature extraction via return_features=True or similar mechanism.")
 
                 # 1. Handle Feature Shape (B, D, T) -> (B*T, D)
                 if features.ndim == 3:
