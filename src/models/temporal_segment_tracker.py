@@ -41,7 +41,6 @@ class TemporalEchoSegmentTracker(nn.Module):
     ):
         super().__init__()
 
-        # FIX #1: Disable global pooling to keep spatial dims (B, C, H', W')
         self.encoder = timm.create_model(
             backbone,
             pretrained=pretrained,
@@ -53,23 +52,12 @@ class TemporalEchoSegmentTracker(nn.Module):
         # Channel adapter: feature_dim -> hidden_dim
         self.adapter = nn.Conv2d(self.feature_dim, hidden_dim, kernel_size=1)
 
-        self.temporal_mixer = nn.Sequential(
-            nn.Conv3d(
-                hidden_dim, hidden_dim,
-                kernel_size=(3, 1, 1), padding=(1, 0, 0), bias=False,
-            ),
-            nn.BatchNorm3d(hidden_dim),
-            nn.ReLU(inplace=True),
-        )
-
-        # Path A: Segmentation (frame-wise, spatial pool -> decoder)
-        self.seg_pool = nn.AdaptiveAvgPool2d(1)
+        # Path A: Segmentation (frame-wise, spatial map -> decoder)
         self.decoder = SegmentationDecoder(
             hidden_dim=hidden_dim, output_size=output_size
         )
 
         # Path B: Volume Regression (temporal sequence)
-        self.temporal_pool = nn.AdaptiveAvgPool2d(1)
         self.gru = nn.GRU(
             input_size=hidden_dim,
             hidden_size=128,
@@ -79,7 +67,7 @@ class TemporalEchoSegmentTracker(nn.Module):
         self.volume_regressor = nn.Sequential(
             nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Linear(64, 2),  # [EDV, ESV]
+            nn.Linear(64, 2),  # [Generic Vol 1, Generic Vol 2]
         )
 
         logger.info(
@@ -105,23 +93,36 @@ class TemporalEchoSegmentTracker(nn.Module):
         features = self.encoder(x_flat)
         features = self.adapter(features)  # (B*T, hidden_dim, H', W')
 
-        # ----- Temporal mixing: smooth features over time -----
-        _, Dim, H_f, W_f = features.shape
-        features_5d = features.view(B, T, Dim, H_f, W_f).permute(0, 2, 1, 3, 4)
-        features_5d = self.temporal_mixer(features_5d)
-        features = features_5d.permute(0, 2, 1, 3, 4).reshape(B * T, Dim, H_f, W_f)
+        # ----- Path A: Segmentation (spatial features -> decoder) -----
+        # Pass spatial features directly to decoder
+        mask_logits = self.decoder(features)  # (B*T, 1, H_out, W_out)
 
-        # ----- Path A: Segmentation (frame-wise, now temporally smoothed) -----
-        seg_vec = self.seg_pool(features).flatten(1)  # (B*T, hidden_dim)
-        mask_logits = self.decoder(seg_vec)  # (B*T, 1, H_out, W_out)
+        # ----- Path B: Mask-Guided Pooling for Regression -----
+        # 1. Downsample mask logits to feature size
+        # features shape: (N, C, H', W')
+        feat_h, feat_w = features.shape[-2:]
+        
+        # Detach gradient for mask guidance?? 
+        # Plan says: "Wrap this block in torch.set_grad_enabled(True)... so that gradients from the regression loss flow back through the mask"
+        # So we do NOT detach.
+        
+        mask_down = F.interpolate(
+            mask_logits, size=(feat_h, feat_w), mode='bilinear', align_corners=False
+        )
+        mask_prob = torch.sigmoid(mask_down) # (N, 1, H', W')
+        
+        # 2. Weighted Average
+        # (N, C, H', W') * (N, 1, H', W') -> sum spatial dims
+        numerator = (features * mask_prob).sum(dim=(-2, -1)) # (N, C)
+        denominator = mask_prob.sum(dim=(-2, -1)) + 1e-6 # (N, 1)
+        
+        feat_vec = numerator / denominator # (N, C) aka (B*T, hidden_dim)
 
+        # Reshape for Temporal Model
         mask_logits = mask_logits.view(
             B, T, 1, mask_logits.shape[-2], mask_logits.shape[-1]
-        )
-        mask_logits = mask_logits.transpose(1, 2)  # (B, 1, T, H_out, W_out)
+        ).transpose(1, 2) # (B, 1, T, H_out, W_out)
 
-        # ----- Path B: Volume Regression (temporal) -----
-        feat_vec = self.temporal_pool(features).flatten(1)  # (B*T, hidden_dim)
         feat_vec = feat_vec.view(B, T, -1)  # (B, T, hidden_dim)
 
         if lengths is not None:
@@ -145,15 +146,20 @@ class TemporalEchoSegmentTracker(nn.Module):
             gru_out, _ = self.gru(feat_vec)
             video_embedding = gru_out.mean(dim=1)
 
-        pred_vols = F.softplus(self.volume_regressor(video_embedding))
+        # ----- Path C: Sorted Volume Regression -----
+        pred_vols = F.softplus(self.volume_regressor(video_embedding)) # (B, 2)
+        
+        # Sort: max -> EDV, min -> ESV
+        pred_edv, _ = pred_vols.max(dim=1, keepdim=True)
+        pred_esv, _ = pred_vols.min(dim=1, keepdim=True)
 
         return {
             "mask_logits": mask_logits,
-            "hidden_features": feat_vec,
-            "pred_edv": pred_vols[:, 0:1],
-            "pred_esv": pred_vols[:, 1:2],
+            "hidden_features": feat_vec, # This is now the pooled features
+            "pred_edv": pred_edv,
+            "pred_esv": pred_esv,
             "pred_ef": (
-                (pred_vols[:, 0:1] - pred_vols[:, 1:2])
-                / (pred_vols[:, 0:1] + 1e-6)
+                (pred_edv - pred_esv)
+                / (pred_edv + 1e-6)
             ),
         }

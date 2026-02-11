@@ -91,6 +91,7 @@ class SegmentationDecoder(nn.Module):
         self.output_size = output_size
 
         self.pre_deconv = nn.Linear(hidden_dim, 64 * 7 * 7)
+        self.proj = nn.Conv2d(hidden_dim, 64, kernel_size=1)
 
         self.decoder = nn.Sequential(
             nn.ConvTranspose2d(64, 64, kernel_size=4, stride=2, padding=1),
@@ -112,16 +113,19 @@ class SegmentationDecoder(nn.Module):
             nn.Conv2d(8, 1, kernel_size=3, padding=1),
         )
 
-    def forward(self, hidden_states):
+    def forward(self, x):
         """
         Args:
-            hidden_states: (B*T, hidden_dim)
+            x: (B*T, hidden_dim) [2D] OR (B*T, hidden_dim, H, W) [4D]
         Returns:
             masks: (B*T, 1, output_size, output_size) logits
         """
-        x = self.pre_deconv(hidden_states)
-        x = x.view(-1, 64, 7, 7)
-
+        if x.dim() == 2:
+            x = self.pre_deconv(x)
+            x = x.view(-1, 64, 7, 7)
+        elif x.dim() == 4:
+            x = self.proj(x)
+        
         x = self.decoder(x)
 
         if x.shape[-1] != self.output_size:
