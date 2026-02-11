@@ -53,6 +53,15 @@ class TemporalEchoSegmentTracker(nn.Module):
         # Channel adapter: feature_dim -> hidden_dim
         self.adapter = nn.Conv2d(self.feature_dim, hidden_dim, kernel_size=1)
 
+        self.temporal_mixer = nn.Sequential(
+            nn.Conv3d(
+                hidden_dim, hidden_dim,
+                kernel_size=(3, 1, 1), padding=(1, 0, 0), bias=False,
+            ),
+            nn.BatchNorm3d(hidden_dim),
+            nn.ReLU(inplace=True),
+        )
+
         # Path A: Segmentation (frame-wise, spatial pool -> decoder)
         self.seg_pool = nn.AdaptiveAvgPool2d(1)
         self.decoder = SegmentationDecoder(
@@ -96,7 +105,13 @@ class TemporalEchoSegmentTracker(nn.Module):
         features = self.encoder(x_flat)
         features = self.adapter(features)  # (B*T, hidden_dim, H', W')
 
-        # ----- Path A: Segmentation (frame-wise) -----
+        # ----- Temporal mixing: smooth features over time -----
+        _, Dim, H_f, W_f = features.shape
+        features_5d = features.view(B, T, Dim, H_f, W_f).permute(0, 2, 1, 3, 4)
+        features_5d = self.temporal_mixer(features_5d)
+        features = features_5d.permute(0, 2, 1, 3, 4).reshape(B * T, Dim, H_f, W_f)
+
+        # ----- Path A: Segmentation (frame-wise, now temporally smoothed) -----
         seg_vec = self.seg_pool(features).flatten(1)  # (B*T, hidden_dim)
         mask_logits = self.decoder(seg_vec)  # (B*T, 1, H_out, W_out)
 
