@@ -108,7 +108,7 @@ class EchoNetVideoDataset(Dataset):
             ed, es = int(meta["EDFrame"]), int(meta["ESFrame"])
             lo, hi = min(ed, es), max(ed, es)
             cycle_dist = hi - lo
-            target_len = min(self.max_clip_len, max(int(1.5 * cycle_dist) + 1, cycle_dist + 1))
+            target_len = min(self.max_clip_len, max(int(2.0 * cycle_dist) + 1, cycle_dist + 1))
             padding = (target_len - cycle_dist - 1) // 2
             start_frame = lo - padding
 
