@@ -139,7 +139,6 @@ class Trainer:
             
             # Step optimizer every accum_steps
             if (batch_idx + 1) % self.accum_steps == 0:
-                self._debug_gradients(ep)
                 self.scaler.step(self.opt)
                 self.scaler.update()
                 self.opt.zero_grad(set_to_none=True)
@@ -159,7 +158,6 @@ class Trainer:
 
         # Handle remaining gradients if total batches not divisible by accum_steps
         if len(self.ld_tr) % self.accum_steps != 0:
-            self._debug_gradients(ep)
             self.scaler.step(self.opt)
             self.scaler.update()
             self.opt.zero_grad(set_to_none=True)
@@ -222,7 +220,9 @@ class Trainer:
             # Pass pred_ef for supervision
             if hasattr(loss_fn, 'cycle_loss'):
                 l_seg, c_dict = loss_fn(
-                    mask_logits, target_masks, pred_ef, ef_target, frame_mask, imgs
+                    mask_logits, target_masks, pred_ef, ef_target, frame_mask, imgs,
+                    pred_edv=pred_edv, target_edv=edv_target,
+                    pred_esv=pred_esv, target_esv=esv_target
                 )
             else:
                 l_seg, c_dict = loss_fn(
@@ -231,23 +231,6 @@ class Trainer:
             loss += l_seg
             comps['segmentation'] = l_seg.item()
             comps.update({k: v.item() for k, v in c_dict.items()})
-            
-        # 2. Direct Volume Regression Loss (L1 on pred_edv/esv)
-        w_vol = self.cfg.get('loss', {}).get('weights', {}).get('volume', 0.0)
-        if w_vol > 0:
-            valid_vol = (edv_target > 0) & (esv_target > 0)
-            if valid_vol.any():
-                l_edv = F.l1_loss(pred_edv[valid_vol], edv_target[valid_vol])
-                l_esv = F.l1_loss(pred_esv[valid_vol], esv_target[valid_vol])
-                loss += w_vol * (l_edv + l_esv)
-                comps['vol_edv'] = l_edv.item()
-                comps['vol_esv'] = l_esv.item()
-                
-        # 3. EF Regression Loss (Direct on physical EF)
-        if 'ef' in self.criterions:
-             l_ef = self.criterions['ef'](pred_ef, ef_target)
-             loss += l_ef
-             comps['ef'] = l_ef.item()
 
         if 'distillation' in self.criterions:
             hidden_features = outputs['hidden_features']
@@ -673,11 +656,6 @@ class Trainer:
             else:
                 log_dict["val/dice"] = val_res
             wandb.log(log_dict)
-
-    def _debug_gradients(self, ep):
-        # Optional gradient tracing
-        if self.cfg.get('losses', {}).get('debug', {}).get('trace_gradients'):
-            pass # Simplified out for now.
 
     def evaluate_test(self):
         self.model.eval()
