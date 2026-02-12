@@ -308,14 +308,9 @@ def _get_criterions(cfg):
             "TemporalWeakSegLoss",
             dice_weight=weights.get('dice', 1.0),
             ef_weight=weights.get('ef', 10.0),
-            smooth_weight=weights.get('smooth', 1.0),
-            contrast_weight=weights.get('contrast', 0.1),
+            volume_weight=weights.get('volume', 0.0),
             cycle_weight=weights.get('cycle', 0.5)
         )
-        
-
-        if weights.get('ef', 0.0) > 0:
-            criterions['ef'] = torch.nn.L1Loss()
 
         distill_cfg = cfg.get('loss', {}).get('distillation', {})
         if distill_cfg.get('enabled', False):
