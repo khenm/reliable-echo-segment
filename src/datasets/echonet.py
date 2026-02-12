@@ -15,10 +15,11 @@ class EchoNetVideoDataset(Dataset):
     Dataset class for EchoNet-Dynamic Video Classification/Regression.
     Loads video clips for R(2+1)D model.
     """
-    def __init__(self, root_dir, split="TRAIN", max_clip_len=64, img_size=(112, 112), sampling_rate=1, transform=None, return_keypoints=False):
+    def __init__(self, root_dir, split="TRAIN", max_clip_len=32, img_size=(112, 112), sampling_rate=1, transform=None, return_keypoints=False):
         self.root_dir = root_dir
         self.split = split.upper()
         self.max_clip_len = max_clip_len
+        self.overlap = max_clip_len // 2 
         self.img_size = img_size
         self.sampling_rate = sampling_rate
         self.transform = transform
@@ -27,14 +28,23 @@ class EchoNetVideoDataset(Dataset):
         self.videos_dir = os.path.join(root_dir, "Videos")
 
         self.file_list = self._load_file_list()
-        self.samples = self.file_list["FileName"].values
         
+        # Meta lookup for ED/ES frames
+        self.meta_lookup = self._create_meta_lookup()
+        self.tracings = self._load_tracings()
+        
+        # Pre-calculate all valid clips
+        self.clips = self._generate_clips()
+        
+        # Targets lookup (still by filename, but accessed via clip index)
         self.ef_targets = self._get_normalized_column("EF", 100.0)
         self.edv_targets = self._get_normalized_column("EDV", 300.0)
         self.esv_targets = self._get_normalized_column("ESV", 300.0)
-
-        self.meta_lookup = self._create_meta_lookup()
-        self.tracings = self._load_tracings()
+        
+        # Map filename to index in file_list for target retrieval
+        self.fname_to_idx = {fname: i for i, fname in enumerate(self.file_list["FileName"].values)}
+        
+        logger.info(f"EchoNetVideoDataset initialized: Split={self.split}, Clips={len(self.clips)}, Videos={len(self.file_list)}")
 
     def _load_file_list(self):
         fname_w_frames = "FileListwFrames112.csv"
@@ -80,10 +90,36 @@ class EchoNetVideoDataset(Dataset):
             
         df = pd.read_csv(path)
         df["FileName"] = df["FileName"].astype(str).apply(lambda x: x[:-4] if x.lower().endswith('.avi') else x)
-        return df[df["FileName"].isin(set(self.samples))]
+        
+        # Only keep tracings for available files
+        available_files = set(self.file_list["FileName"].values)
+        return df[df["FileName"].isin(available_files)]
+
+    def _generate_clips(self):
+        """
+        Generates a list of all valid clips using a sliding window approach.
+        Returns: List of (filename, start_frame, end_frame, total_frames)
+        """
+        clips = []
+        stride = max(1, self.max_clip_len - self.overlap)
+        
+        for _, row in self.file_list.iterrows():
+            fname = row["FileName"]
+            total_frames = int(row["NumberOfFrames"])
+            
+            # Generate clips: [0, 32), [16, 48), ...
+            for start in range(0, total_frames, stride):
+                end = start + self.max_clip_len
+                # Stop if we went way past
+                if start >= total_frames:
+                    break
+                    
+                clips.append((fname, start, end, total_frames))
+                
+        return clips
 
     def __len__(self):
-        return len(self.samples)
+        return len(self.clips)
 
     @staticmethod
     def _generate_mask(points, height, width):
@@ -95,18 +131,6 @@ class EchoNetVideoDataset(Dataset):
         ], axis=1).astype(np.int32)
         cv2.fillPoly(mask, [pts], 1)
         return mask
-
-    def _get_clip_window(self, fname, total_frames):
-        if fname in self.meta_lookup:
-            meta = self.meta_lookup[fname]
-            center_idx = (int(meta["EDFrame"]) + int(meta["ESFrame"])) // 2
-        else:
-            center_idx = np.random.randint(0, total_frames) if self.split == "TRAIN" else total_frames // 2
-
-        half_len = self.max_clip_len // 2
-        start_idx = center_idx - half_len
-        end_idx = start_idx + self.max_clip_len
-        return start_idx, end_idx
 
     def _pad_video_tensor(self, video_chunk, start_idx, end_idx, valid_start, valid_end):
         pad_left = max(0, valid_start - start_idx)
@@ -128,17 +152,11 @@ class EchoNetVideoDataset(Dataset):
                  video_chunk = video_chunk[:self.max_clip_len]
         return video_chunk
 
-    def _load_video_clip(self, video_path, fname):
+    def _load_video_clip(self, video_path, fname, start_idx, end_idx, total_frames):
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             return None
             
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total_frames <= 0:
-            cap.release()
-            return None
-
-        start_idx, end_idx = self._get_clip_window(fname, total_frames)
         valid_start = max(0, start_idx)
         valid_end = min(total_frames, end_idx)
         
@@ -156,12 +174,12 @@ class EchoNetVideoDataset(Dataset):
         cap.release()
         
         if not frames:
-            return np.zeros((self.max_clip_len, *self.img_size, 3), dtype=np.uint8), 0, total_frames
+            return np.zeros((self.max_clip_len, *self.img_size, 3), dtype=np.uint8)
             
         video_chunk = np.stack(frames, axis=0)
         video_chunk = self._pad_video_tensor(video_chunk, start_idx, end_idx, valid_start, valid_end)
 
-        return video_chunk, start_idx, total_frames
+        return video_chunk
 
     def _get_keypoints(self, t_subset, H, W):
         pts_df = t_subset.iloc[1:]
@@ -182,22 +200,40 @@ class EchoNetVideoDataset(Dataset):
         return kps
 
     def __getitem__(self, idx, _retry_count=0):
-        fname = self.samples[idx]
+        fname, start_idx, end_idx, total_frames = self.clips[idx]
+        file_idx = self.fname_to_idx[fname]
+        
         video_path = os.path.join(self.videos_dir, fname + (".avi" if not fname.lower().endswith(".avi") else ""))
         
-        result = self._load_video_clip(video_path, fname)
-        if result is None:
+        video = self._load_video_clip(video_path, fname, start_idx, end_idx, total_frames)
+        
+        if video is None:
             logger.warning(f"Failed to load video clip: {video_path}")
             if _retry_count >= self.max_retries:
                 raise RuntimeError(f"Failed to load {self.max_retries} consecutive samples from {idx}")
             return self.__getitem__((idx+1)%len(self), _retry_count + 1)
         
-        video, start_idx, total_frames = result
         T_clip, H, W, _ = video.shape
-
+        
         mask_clip = np.zeros((T_clip, H, W), dtype=np.uint8)
         frame_mask = np.zeros((T_clip,), dtype=np.float32)
         keypoints_clip = np.zeros((T_clip, 42, 2), dtype=np.float32)
+
+        # Metadata lookup for ED/ES frames
+        if fname in self.meta_lookup:
+            meta = self.meta_lookup[fname]
+            ed_frame = int(meta.get("EDFrame", -1))
+            es_frame = int(meta.get("ESFrame", -1))
+        else:
+            ed_frame, es_frame = -1, -1
+
+        # Populate frame_mask regardless of tracings presence
+        for t in range(T_clip):
+            original_frame_idx = start_idx + t
+            if original_frame_idx == ed_frame:
+                frame_mask[t] = 2.0
+            elif original_frame_idx == es_frame:
+                frame_mask[t] = 1.0
 
         if self.tracings is not None:
              file_tracings = self.tracings[self.tracings["FileName"] == fname]
@@ -209,7 +245,6 @@ class EchoNetVideoDataset(Dataset):
                          t_subset = file_tracings[file_tracings["Frame"] == original_frame_idx]
                          if not t_subset.empty:
                               mask_clip[t] = self._generate_mask(t_subset, H, W)
-                              frame_mask[t] = 1.0
                               if self.return_keypoints:
                                    keypoints_clip[t] = self._get_keypoints(t_subset, H, W)
 
@@ -229,9 +264,9 @@ class EchoNetVideoDataset(Dataset):
             "case": fname,
             "frame_mask": torch.tensor(frame_mask, dtype=torch.float32),
             "lengths": torch.tensor(T_clip, dtype=torch.long),
-            "target_ef": torch.tensor(self.ef_targets[idx], dtype=torch.float32),
-            "target_edv": torch.tensor(self.edv_targets[idx], dtype=torch.float32),
-            "target_esv": torch.tensor(self.esv_targets[idx], dtype=torch.float32)
+            "target_ef": torch.tensor(self.ef_targets[file_idx], dtype=torch.float32),
+            "target_edv": torch.tensor(self.edv_targets[file_idx], dtype=torch.float32),
+            "target_esv": torch.tensor(self.esv_targets[file_idx], dtype=torch.float32)
         }
         
         if self.return_keypoints:
@@ -251,7 +286,7 @@ class EchoNet:
         if model_name.lower() not in ["r2plus1d", "unet_tcm", "skeletal_tracker", "segment_tracker", "temporal_segment_tracker"]:
             raise NotImplementedError(f"EchoNet dataloader not implemented for model '{model_name}'")
 
-        max_clip_len = cfg['model'].get('max_clip_len', 250)
+        max_clip_len = cfg['model'].get('max_clip_len', 32)
         img_size = tuple(cfg['data'].get('img_size', [112, 112]))
         return_kps = cfg['model'].get('return_keypoints', False)
         
