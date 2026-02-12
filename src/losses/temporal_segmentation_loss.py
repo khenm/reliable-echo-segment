@@ -17,7 +17,7 @@ class TemporalWeakSegLoss(nn.Module):
     Components:
         - Dice+CE: Strong supervision on labeled frames only (ED/ES)
         - EF Regression: Weak supervision backprops through entire volume curve
-        - Volume Regression: Direct supervision on EDV/ESV
+        - Volume Regression: Direct supervision on EDV/ESV (Conditional on frame presence)
         - Cycle Consistency: Self-supervision via warp agreement on unlabeled frames
     """
 
@@ -62,7 +62,7 @@ class TemporalWeakSegLoss(nn.Module):
             target_masks: (B, T, 1, H, W) - Ground truth masks
             pred_ef: (B,) or (B, 1) - Predicted EF
             target_ef: (B,) - Target EF
-            frame_mask: (B, T) - 1.0 if labeled (ED/ES), 0.0 otherwise
+            frame_mask: (B, T) - 1.0 if ES, 2.0 if ED, 0.0 otherwise
             frames: (B, C, T, H, W) - Input video for cycle loss (optional)
             pred_edv, target_edv, pred_esv, target_esv: Volume regression (optional)
 
@@ -77,15 +77,31 @@ class TemporalWeakSegLoss(nn.Module):
         loss_ef = self.l1(pred_ef_flat, target_ef_flat)
 
         loss_volume = torch.tensor(0.0, device=pred_logits.device)
+        
         if self.volume_weight > 0 and pred_edv is not None and target_edv is not None:
+             # Check distinct presence of frames based on mask labels
+             # 1.0 = ES Frame, 2.0 = ED Frame
+             has_es = (frame_mask == 1.0).any(dim=1)
+             has_ed = (frame_mask == 2.0).any(dim=1)
+             
              target_edv_flat = target_edv.view(-1)
              target_esv_flat = target_esv.view(-1)
              
-             valid_vol = (target_edv_flat > 0) & (target_esv_flat > 0)
-             if valid_vol.any():
-                l_edv = self.l1(pred_edv.view(-1)[valid_vol], target_edv_flat[valid_vol])
-                l_esv = self.l1(pred_esv.view(-1)[valid_vol], target_esv_flat[valid_vol])
-                loss_volume = l_edv + l_esv
+             # Calculate EDV loss only where ED frame exists
+             l_edv = torch.tensor(0.0, device=pred_logits.device)
+             if has_ed.any():
+                 valid_edv = (target_edv_flat > 0) & has_ed
+                 if valid_edv.any():
+                     l_edv = self.l1(pred_edv.view(-1)[valid_edv], target_edv_flat[valid_edv])
+
+             # Calculate ESV loss only where ES frame exists
+             l_esv = torch.tensor(0.0, device=pred_logits.device)
+             if has_es.any():
+                 valid_esv = (target_esv_flat > 0) & has_es
+                 if valid_esv.any():
+                     l_esv = self.l1(pred_esv.view(-1)[valid_esv], target_esv_flat[valid_esv])
+                     
+             loss_volume = l_edv + l_esv
 
         if frames is not None and self.cycle_weight > 0:
             probs = torch.sigmoid(pred_logits)
