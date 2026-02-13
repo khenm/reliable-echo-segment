@@ -21,7 +21,7 @@ class EchoNetVideoDataset(Dataset):
         self.root_dir = root_dir
         self.split = split.upper()
         self.max_clip_len = max_clip_len
-        self.overlap = max_clip_len // 2 
+        self.overlap = 0
         self.img_size = img_size
         self.sampling_rate = sampling_rate
         self.transform = transform

@@ -9,7 +9,7 @@ loss:
   weights:
     dice: 1.0
     ef: 0.2
-    volume: 0.5
+    smooth: 0.1
     cycle: 0.5
   distillation:
     enabled: true
@@ -26,7 +26,7 @@ training:
   val_batch_size: 64
   num_workers: 12
   persistent_workers: True
-  lr: 1.4e-4
+  lr: 1.2e-4
   weight_decay: 1.0e-5
   patience: 10
   seed: 42

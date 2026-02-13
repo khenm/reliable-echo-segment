@@ -25,13 +25,13 @@ class TemporalWeakSegLoss(nn.Module):
         self,
         dice_weight: float = 1.0,
         ef_weight: float = 10.0,
-        volume_weight: float = 0.0,
+        smooth_weight: float = 0.0,
         cycle_weight: float = 0.5
     ):
         super().__init__()
         self.dice_weight = dice_weight
         self.ef_weight = ef_weight
-        self.volume_weight = volume_weight
+        self.smooth_weight = smooth_weight
         self.cycle_weight = cycle_weight
 
         self.dice_func = DiceCELoss(sigmoid=True, reduction='mean')
@@ -40,7 +40,7 @@ class TemporalWeakSegLoss(nn.Module):
 
         logger.info(
             f"TemporalWeakSegLoss initialized: dice={dice_weight}, ef={ef_weight}, "
-            f"volume={volume_weight}, cycle={cycle_weight}"
+            f"cycle={cycle_weight}"
         )
 
     def forward(
@@ -50,11 +50,7 @@ class TemporalWeakSegLoss(nn.Module):
         pred_ef: torch.Tensor,
         target_ef: torch.Tensor,
         frame_mask: torch.Tensor,
-        frames: torch.Tensor = None,
-        pred_edv: torch.Tensor = None,
-        target_edv: torch.Tensor = None,
-        pred_esv: torch.Tensor = None,
-        target_esv: torch.Tensor = None
+        frames: torch.Tensor = None
     ):
         """
         Args:
@@ -64,7 +60,6 @@ class TemporalWeakSegLoss(nn.Module):
             target_ef: (B,) - Target EF
             frame_mask: (B, T) - 1.0 if ES, 2.0 if ED, 0.0 otherwise
             frames: (B, C, T, H, W) - Input video for cycle loss (optional)
-            pred_edv, target_edv, pred_esv, target_esv: Volume regression (optional)
 
         Returns:
             total_loss: Scalar
@@ -76,33 +71,6 @@ class TemporalWeakSegLoss(nn.Module):
         target_ef_flat = target_ef.view(-1) if target_ef.dim() > 1 else target_ef
         loss_ef = self.l1(pred_ef_flat, target_ef_flat)
 
-        loss_volume = torch.tensor(0.0, device=pred_logits.device)
-        
-        if self.volume_weight > 0 and pred_edv is not None and target_edv is not None:
-             # Check distinct presence of frames based on mask labels
-             # 1.0 = ES Frame, 2.0 = ED Frame
-             has_es = (frame_mask == 1.0).any(dim=1)
-             has_ed = (frame_mask == 2.0).any(dim=1)
-             
-             target_edv_flat = target_edv.view(-1)
-             target_esv_flat = target_esv.view(-1)
-             
-             # Calculate EDV loss only where ED frame exists
-             l_edv = torch.tensor(0.0, device=pred_logits.device)
-             if has_ed.any():
-                 valid_edv = (target_edv_flat > 0) & has_ed
-                 if valid_edv.any():
-                     l_edv = self.l1(pred_edv.view(-1)[valid_edv], target_edv_flat[valid_edv])
-
-             # Calculate ESV loss only where ES frame exists
-             l_esv = torch.tensor(0.0, device=pred_logits.device)
-             if has_es.any():
-                 valid_esv = (target_esv_flat > 0) & has_es
-                 if valid_esv.any():
-                     l_esv = self.l1(pred_esv.view(-1)[valid_esv], target_esv_flat[valid_esv])
-                     
-             loss_volume = l_edv + l_esv
-
         if frames is not None and self.cycle_weight > 0:
             probs = torch.sigmoid(pred_logits)
             probs_for_cycle = probs.permute(0, 2, 1, 3, 4)
@@ -110,18 +78,20 @@ class TemporalWeakSegLoss(nn.Module):
         else:
             loss_cycle = torch.tensor(0.0, device=pred_logits.device)
 
+        loss_smooth = self._compute_smoothness_loss(torch.sigmoid(pred_logits))
+
         total_loss = (
             self.dice_weight * loss_dice +
             self.ef_weight * loss_ef +
-            self.volume_weight * loss_volume +
+            self.smooth_weight * loss_smooth +
             self.cycle_weight * loss_cycle
         )
 
         return total_loss, {
             "dice": loss_dice,
             "ef": loss_ef,
-            "volume": loss_volume,
-            "cycle": loss_cycle
+            "cycle": loss_cycle,
+            "smooth": loss_smooth
         }
 
     def _compute_dice_loss(
@@ -152,3 +122,10 @@ class TemporalWeakSegLoss(nn.Module):
             pred_flat[valid_indices],
             target_flat[valid_indices]
         )
+
+    def _compute_smoothness_loss(self, pred_logits):
+        """Total Variation Loss to force spatial coherence"""
+        # Penalize differences between adjacent pixels (noise)
+        diff_h = torch.abs(pred_logits[..., 1:, :] - pred_logits[..., :-1, :])
+        diff_w = torch.abs(pred_logits[..., :, 1:] - pred_logits[..., :, :-1])
+        return diff_h.mean() + diff_w.mean()
