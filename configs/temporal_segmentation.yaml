@@ -9,6 +9,7 @@ loss:
   weights:
     dice: 1.0
     ef: 0.2
+    volume: 0.2
     smooth: 0.1
     cycle: 0.5
   distillation:
