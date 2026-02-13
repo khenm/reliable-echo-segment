@@ -544,6 +544,7 @@ def main():
     parser.add_argument("--resume", action="store_true", help="Resume training from the latest checkpoint")
     parser.add_argument("--all", action="store_true", help="Run all steps")
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
+    parser.add_argument("--pretrain", action="store_true", help="Run in pretraining mode (filter clips to contain both ED and ES)")
     
     args = parser.parse_args()
 
@@ -555,6 +556,10 @@ def main():
     # Override wandb enable status based on flag
     if 'wandb' not in cfg: cfg['wandb'] = {}
     cfg['wandb']['enable'] = args.wandb
+    
+    # Set pretrain mode
+    if 'training' not in cfg: cfg['training'] = {}
+    cfg['training']['pretrain'] = args.pretrain
 
     # Initialize Distributed Mode
     setup_dist()
