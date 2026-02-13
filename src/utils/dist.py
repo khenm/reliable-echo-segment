@@ -16,7 +16,8 @@ def setup_dist():
             backend="nccl",
             init_method="env://",
             world_size=world_size,
-            rank=rank
+            rank=rank,
+            device_id=torch.device(f'cuda:{gpu}')
         )
         dist.barrier()
         print(f"Distributed Init: Rank {rank}/{world_size}, Local Rank {gpu}, Device: {gpu}")

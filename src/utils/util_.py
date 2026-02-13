@@ -177,7 +177,13 @@ def save_checkpoint(path, state_dict):
     """
     torch.save(state_dict, path)
 
+
+def load_checkpoint(model, ckpt_path, device):
+    """
+    Wrapper for load_full_checkpoint to match main.py signature.
+    """
     load_full_checkpoint(ckpt_path, model, device=device)
+
 
 def export_onnx(ckpt_path, output_path, input_shape, device='cpu'):
     """
