@@ -54,7 +54,7 @@ class TemporalEchoSegmentTracker(nn.Module):
 
         # Path A: Segmentation (frame-wise, spatial map -> decoder)
         self.decoder = SegmentationDecoder(
-            hidden_dim=hidden_dim, output_size=output_size
+            hidden_dim=hidden_dim, output_size=output_size, spatial_input=True
         )
 
         # Path B: Volume Regression (temporal sequence)
