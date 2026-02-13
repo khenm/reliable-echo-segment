@@ -110,7 +110,13 @@ class EchoNetVideoDataset(Dataset):
             # Generate clips: [0, 32), [16, 48), ...
             for start in range(0, total_frames, stride):
                 end = start + self.max_clip_len
-                # Stop if we went way past
+                # Smart Padding Logic
+                if end > total_frames:
+                    pad_len = end - total_frames
+                    if pad_len > (0.2 * self.max_clip_len):
+                        continue # Drop clip if padding exceeds 20%
+                        
+                # Stop if we went way past (redundant with continue, but keeps logic clean)
                 if start >= total_frames:
                     break
                     
@@ -140,14 +146,14 @@ class EchoNetVideoDataset(Dataset):
             video_chunk = np.pad(
                 video_chunk, 
                 ((pad_left, pad_right), (0,0), (0,0), (0,0)), 
-                mode='constant'
+                mode='edge'
             )
         
         # Ensure exact length
         if video_chunk.shape[0] != self.max_clip_len:
              current_len = video_chunk.shape[0]
              if current_len < self.max_clip_len:
-                 video_chunk = np.pad(video_chunk, ((0, self.max_clip_len - current_len), (0,0), (0,0), (0,0)), mode='constant')
+                 video_chunk = np.pad(video_chunk, ((0, self.max_clip_len - current_len), (0,0), (0,0), (0,0)), mode='edge')
              else:
                  video_chunk = video_chunk[:self.max_clip_len]
         return video_chunk
