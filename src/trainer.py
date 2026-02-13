@@ -17,6 +17,7 @@ from src.utils.plot import plot_volume_debug
 from src.utils.dist import is_main_process, reduce_tensor, get_world_size, get_rank
 import torch.distributed as dist
 import wandb
+from src.tta.augmentations import SpectralNormalizer
 
 logger = get_logger()
 
@@ -96,7 +97,7 @@ class Trainer:
         if self.num_classes == 1:
             self.post_pred = AsDiscrete(threshold=0.5)
             if 'dice' in self.metrics:
-                self.metrics['dice'] = DiceMetric(include_background=True, reduction="mean")
+                self.metrics['dice'] = DiceMetric(include_background=False, reduction="mean")
         else:
             self.post_pred = AsDiscrete(argmax=True, to_onehot=self.num_classes)
 
@@ -170,7 +171,7 @@ class Trainer:
             postfix.update({k: f"{v:.4f}" for k, v in batch_comps.items()})
             pbar.set_postfix(postfix)
 
-            if wandb.run is not None:
+            if is_main_process() and wandb.run is not None:
                 wandb.log({"train/loss": loss.item(), **{f"train/{k}": v for k, v in batch_comps.items()}})
 
         # Handle remaining gradients if total batches not divisible by accum_steps
@@ -246,9 +247,7 @@ class Trainer:
             # Pass pred_ef for supervision
             if hasattr(loss_fn, 'cycle_loss'):
                 l_seg, c_dict = loss_fn(
-                    mask_logits, target_masks, pred_ef, ef_target, frame_mask, imgs,
-                    pred_edv=pred_edv, target_edv=edv_target,
-                    pred_esv=pred_esv, target_esv=esv_target
+                    mask_logits, target_masks, pred_ef, ef_target, frame_mask, imgs
                 )
             else:
                 l_seg, c_dict = loss_fn(
@@ -729,3 +728,83 @@ class Trainer:
     def get_examples(self, num_examples=3):
         # Placeholder for visualization logic
         return []
+
+    def compute_golden_stats(self):
+        """
+        Phase 2: Offline 'Golden' Calibration.
+        Iterates over Training Loader to compute:
+        1. Average Landmarks (Apex, Basal-L, Basal-R) -> golden_landmarks.pt
+        2. Average Fourier Amplitude -> golden_amplitude.pt
+        """
+        logger.info("Starting Golden Stats Calibration...")
+        self.model.eval()
+        
+        # Accumulators
+        total_landmarks = None
+        landmark_counts = None
+        
+        total_amplitude = None
+        amp_count = 0
+        
+        normalizer = SpectralNormalizer()
+        
+        # Iterate over Training Data
+        # We use a progress bar
+        pbar = tqdm(self.ld_tr, desc="Calibrating Golden Stats")
+        
+        with torch.no_grad():
+            for batch in pbar:
+                # 1. Geometry (Keypoints)
+                kps = batch.get("keypoints")
+                if kps is not None:
+                    kps = kps.to(self.device)
+                    # Shape: (B, N, 2) usually
+                    if total_landmarks is None:
+                        total_landmarks = torch.zeros_like(kps[0])
+                        landmark_counts = torch.zeros(kps.shape[1], device=self.device)
+                    
+                    # Sum over batch
+                    total_landmarks += kps.sum(dim=0)
+                    landmark_counts += kps.shape[0]
+
+                # 2. Texture (Amplitude)
+                # Use video or image
+                imgs = batch.get("video")
+                if imgs is None: imgs = batch.get("image")
+                
+                if imgs is not None:
+                    imgs = imgs.to(self.device)
+                    # Extract Amplitude
+                    amp = normalizer.extract_amplitude(imgs)
+                    
+                    # Handle shapes: (B, C, T, H, W) -> Average over B and T
+                    if amp.ndim == 5:
+                        # Average over T first
+                        amp_frame_avg = amp.mean(dim=2) # (B, C, H, W)
+                        amp_batch_sum = amp_frame_avg.sum(dim=0) # (C, H, W)
+                        curr_count = imgs.shape[0]
+                    else:
+                        # (B, C, H, W)
+                        amp_batch_sum = amp.sum(dim=0)
+                        curr_count = imgs.shape[0]
+                        
+                    if total_amplitude is None:
+                        total_amplitude = torch.zeros_like(amp_batch_sum)
+                    
+                    total_amplitude += amp_batch_sum
+                    amp_count += curr_count
+        
+        # Compute Averages and Save
+        if total_landmarks is not None:
+             # Avoid div by zero
+            golden_landmarks = total_landmarks / landmark_counts.view(-1, 1).clamp(min=1)
+            save_path = os.path.join(self.vault_dir, "golden_landmarks.pt")
+            torch.save(golden_landmarks, save_path)
+            logger.info(f"Saved Golden Landmarks to {save_path}")
+            
+        if total_amplitude is not None:
+            golden_amplitude = total_amplitude / amp_count
+            save_path = os.path.join(self.vault_dir, "golden_amplitude.pt")
+            torch.save(golden_amplitude, save_path)
+            logger.info(f"Saved Golden Amplitude to {save_path}")
+

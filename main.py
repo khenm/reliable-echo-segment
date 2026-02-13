@@ -13,7 +13,7 @@ from src.utils.util_ import seed_everything, get_device, load_checkpoint
 from src.registry import get_dataloaders, build_model, build_loss, get_tta_component_class
 from src.trainer import Trainer
 from src.utils.logging import get_logger
-from src.utils.dist import setup_dist, cleanup_dist
+from src.utils.dist import setup_dist, cleanup_dist, is_main_process
 from src.models.temporal import TemporalConsistencyLoss
 from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric
@@ -27,8 +27,8 @@ from src.utils.plot import (
     plot_martingale
 )
 from src.utils.metric import SkeletalError, R2Score, MAE, RMSE
-from src.tta.engine import TTAEngine, SafeTTAEngine
-from src.tta.auditor import SelfAuditor
+from src.tta.engine import CloudAdaptiveEngine
+from src.tta.auditor import AdaptiveGatekeeper
 import glob
 
 # Setup logging (stdout only initially)
@@ -128,6 +128,10 @@ def _setup_workspace(cfg, args_resume):
     return run_dir, vault_dir, timestamp
 
 def _setup_wandb(cfg, run_dir, timestamp):
+    # Only initialize wandb on the main process
+    if not is_main_process():
+        return
+
     if cfg.get('wandb', {}).get('enable', True):
         import wandb
         project_name = cfg.get('wandb', {}).get('project', 'reliable-echo-segment')
@@ -308,7 +312,7 @@ def _get_criterions(cfg):
             "TemporalWeakSegLoss",
             dice_weight=weights.get('dice', 1.0),
             ef_weight=weights.get('ef', 10.0),
-            volume_weight=weights.get('volume', 0.0),
+            smooth_weight=weights.get('smooth', 1.0),
             cycle_weight=weights.get('cycle', 0.5)
         )
 
@@ -401,43 +405,80 @@ def run_eval(cfg, device):
     except Exception as e:
         logger.error(f"Failed to plot visualization examples: {e}")
 
-def run_tta(cfg, device):
-    logger.info("Starting Test-Time Adaptation (TTA)...")
+def run_golden_calibration(cfg, device):
+    logger.info("Starting Golden Calibration...")
+    loaders = get_dataloaders(cfg)
+    model = build_model(cfg, device)
+    metrics = _get_metrics(cfg)
+    trainer = Trainer(model, loaders, cfg, device, metrics=metrics)
+    trainer.compute_golden_stats()
+
+def run_tta(cfg, device, simulate_cloud=False):
+    mode_name = "Cloud-Guided" if simulate_cloud else "Standard"
+    logger.info(f"Starting Test-Time Adaptation ({mode_name})...")
     
+    # 1. Load Data
     original_bs = cfg['training'].get('batch_size')
     cfg['training']['batch_size'] = 1
     loaders = get_dataloaders(cfg)
     cfg['training']['batch_size'] = original_bs
     _, _, ld_ts = loaders
     
+    # 2. Load Model
     model = _load_model_for_inference(cfg, device)
     if model is None: return
     
+    # 3. Load Golden Stats & Init Gatekeeper
+    vault_dir = cfg['training']['vault_dir']
+    gl_path = os.path.join(vault_dir, "golden_landmarks.pt")
+    ga_path = os.path.join(vault_dir, "golden_amplitude.pt")
+    
+    gl = torch.load(gl_path, map_location=device) if os.path.exists(gl_path) else None
+    ga = torch.load(ga_path, map_location=device) if os.path.exists(ga_path) else None
+    
+    if gl is None: logger.warning("Golden Landmarks not found. Adaption may be limited.")
+    if ga is None: logger.warning("Golden Amplitude not found. Adaption may be limited.")
+    
+    gatekeeper = AdaptiveGatekeeper(golden_landmarks=gl, golden_amplitude=ga)
+    
+    # 4. Init Engine
     tta_cfg = cfg.get('tta', {})
-    engine = TTAEngine(
-        model, 
-        lr=float(tta_cfg.get('lr', 1e-4)), 
-        n_augments=int(tta_cfg.get('n_augments', 4)),
-        steps=int(tta_cfg.get('steps', 1)),
-        optimizer_name=tta_cfg.get('optimizer', 'SGD')
-    )
-    engine.model.to(device)
+    threshold = float(tta_cfg.get('uncertainty_threshold', 0.5))
+    engine = CloudAdaptiveEngine(model, gatekeeper, uncertainty_threshold=threshold)
     
     results = []
     logger.info(f"Running TTA on {len(ld_ts)} videos...")
     
     for batch in tqdm(ld_ts, desc="TTA Inference"):
-        engine.reset()
+        gatekeeper.reset()
+        
         video = batch["video"].to(device)
         target = batch["target"].to(device)
         case = batch["case"][0]
         
-        pred = engine.forward_and_adapt(video)
-        results.append({
+        # Prepare batch data for Cloud Simulation
+        batch_data = None
+        if simulate_cloud:
+             batch_data = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+        
+        output, meta = engine.predict_step(video, batch_data=batch_data, simulate_cloud=simulate_cloud)
+        
+        # Parse Output (Assumes Regression or scalar EF for now based on previous code)
+        pred_ef = 0.0
+        if isinstance(output, dict):
+            pred_ef = output.get('pred_ef', output.get('mask_logits', 0.0)).item()
+        else:
+            pred_ef = output.item()
+            
+        res_entry = {
             "FileName": case,
             "Actual_EF": target.item(),
-            "Predicted_EF": pred.item()
-        })
+            "Predicted_EF": pred_ef,
+            "Uncertainty": meta['uncertainty'],
+            "Cloud_Triggered": meta['cloud_triggered'],
+            "Adaptation_Step": meta['adaptation_step']
+        }
+        results.append(res_entry)
         
     df_results = pd.DataFrame(results)
     save_path = cfg['training']['clinical_pairs_csv'].replace(".csv", "_tta.csv")
@@ -481,175 +522,6 @@ def run_profile(cfg, device):
     profiler.save(save_path)
     logger.info(f"Latent profile saved to {save_path}")
 
-def _get_calibrator(cfg):
-    model_name = cfg['model'].get('name', 'VAEUNet')
-    is_dual = ("r2plus1d" in model_name.lower()) or (model_name in ["unet_tcm", "dual_stream"])
-    
-    if is_dual:
-         logger.info(f"Initializing AuditCalibrator for Dual-Stream Model ({model_name})...")
-         RegCal = get_tta_component_class("regression_calibrator")
-         SegCal = get_tta_component_class("segmentation_calibrator")
-         AuditCal = get_tta_component_class("audit_calibrator")
-         return AuditCal({
-             'regression': RegCal(alpha=0.05),
-             'segmentation': SegCal(alpha=0.05)
-         })
-    elif model_name == "temporal_segment_tracker":
-         logger.info(f"Initializing AuditCalibrator for {model_name}...")
-         RegCal = get_tta_component_class("regression_calibrator")
-         SegCal = get_tta_component_class("segmentation_calibrator")
-         AuditCal = get_tta_component_class("audit_calibrator")
-         return AuditCal({
-             'regression': RegCal(alpha=0.05),
-             'segmentation': SegCal(alpha=0.05)
-         })
-    elif model_name == "UNet_2D":
-        logger.info(f"Initializing SegmentationCalibrator for {model_name}...")
-        SegCal = get_tta_component_class("segmentation_calibrator")
-        return SegCal(alpha=0.05)
-    else:
-        num_classes = cfg['data'].get('num_classes', 10)
-        logger.info(f"Initializing ClassificationCalibrator for {model_name}...")
-        ClassCal = get_tta_component_class("classification_calibrator")
-        return ClassCal(alpha=0.05, num_classes=num_classes)
-
-def run_safe_tta(cfg, device):
-    logger.info("Starting Safe-TTA...")
-    
-    original_bs = cfg['training'].get('batch_size')
-    cfg['training']['batch_size'] = 1
-    loaders = get_dataloaders(cfg)
-    cfg['training']['batch_size'] = original_bs
-    
-    _, ld_val, ld_ts = loaders
-    
-    model = _load_model_for_inference(cfg, device)
-    if model is None: return
-        
-    # 1. Initialize Components
-    feature_dim = cfg['model'].get('latent_dim', 512) 
-    auditor = SelfAuditor(feature_dim=feature_dim)
-    calibrator = _get_calibrator(cfg)
-    
-    safe_engine = SafeTTAEngine(
-        model, 
-        auditor=auditor, 
-        calibrator=calibrator,
-        lr=float(cfg.get('tta', {}).get('lr', 1e-4))
-    )
-    safe_engine.model.to(device)
-    
-    # 2. Calibration Phase (Offline)
-    safe_engine.run_calibration(ld_val, device)
-
-    # 3. Test Phase (Online)
-    results = []
-    logger.info(f"Running Safe-TTA on {len(ld_ts)} videos...")
-    
-    plots_dir = os.path.join(cfg['training']['run_dir'], "safe_tta_plots")
-    os.makedirs(plots_dir, exist_ok=True)
-    
-    for batch in tqdm(ld_ts, desc="Safe-TTA Inference"):
-        safe_engine.reset()
-        video = batch["video"].to(device)
-        target = batch.get("target")
-        if target is None: target = batch.get("target_ef")
-        if target is None: target = batch.get("EF")
-        
-        if target is not None: target = target.to(device)
-        case = batch["case"][0] 
-        
-        output, q_used, collapsed, audit_stats = safe_engine.predict_step(video)
-        
-        # Plot Martingale Dynamics
-        if isinstance(audit_stats, dict) and 'martingale' in audit_stats:
-            m_vals = audit_stats['martingale']
-            p_vals = audit_stats.get('p_value', [0.5]*len(m_vals))
-            if not isinstance(m_vals, list): m_vals = [m_vals]
-            if not isinstance(p_vals, list): p_vals = [p_vals]
-            
-            plot_martingale(
-                m_vals, 
-                p_vals, 
-                case_name=str(case),
-                save_path=os.path.join(plots_dir, f"martingale_{case}.png")
-            )
-        
-        if collapsed:
-            results.append({
-                "FileName": case,
-                "Status": "COLLAPSED",
-                "Q_Val": q_used
-            })
-            continue
-
-        if isinstance(output, dict):
-            reg_res = output.get('regression')
-            pred_ef_interval = (0.0, 0.0)
-            pred_ef_mean = 0.0
-            
-            if isinstance(reg_res, dict) and 'intervals' in reg_res:
-                intervals = reg_res['intervals']
-                predictions = reg_res['predictions']
-                pred_ef_interval = intervals[0] if intervals else (0.0, 0.0)
-                pred_ef_mean = predictions[0] if predictions else 0.0
-            elif isinstance(reg_res, list):
-                pred_ef_interval = reg_res[0] if reg_res else (0.0, 0.0)
-                pred_ef_mean = sum(pred_ef_interval) / 2
-                
-            results.append({
-                "FileName": case,
-                "Actual_EF": target[0].item() if (target is not None and target.numel() > 0) else -1,
-                "Predicted_EF": pred_ef_mean,
-                "Predicted_EF_Low": pred_ef_interval[0],
-                "Predicted_EF_High": pred_ef_interval[1],
-                "Q_Val": q_used,
-                "Status": "OK"
-            })
-            
-            seg_res = output.get('segmentation')
-            if seg_res is not None:
-                core_mask, shadow_mask = seg_res
-                T_dim = 2 if video.ndim == 5 else 1
-                mid_frame = video.shape[T_dim] // 2 
-                case_str = str(case)
-                save_name = os.path.join(cfg['training']['run_dir'], f"conformal_seg_{case_str}_f{mid_frame}.png")
-                
-                gt_mask = batch.get("label")
-                if gt_mask is not None: gt_mask = gt_mask.to(device)
-
-                plot_conformal_segmentation(
-                    video=video, 
-                    core_mask=core_mask, 
-                    shadow_mask=shadow_mask, 
-                    target_mask=gt_mask,
-                    frame_idx=mid_frame,
-                    save_path=save_name
-                )
-            
-        elif isinstance(output, tuple):
-             results.append({
-                "FileName": case,
-                "Status": "OK (Segmentation)",
-                "Q_Val": q_used
-            })
-
-        elif isinstance(output, list):
-            for i, p_set in enumerate(output):
-                 results.append({
-                    "FileName": case,
-                    "Actual_Class": target.view(-1)[i].item() if (target is not None and target.numel() > i) else -1,
-                    "Prediction_Set": str(p_set),
-                    "Set_Size": len(p_set),
-                    "Q_Val": q_used,
-                    "Status": "OK"
-                })
-            
-    df_results = pd.DataFrame(results)
-    save_path = os.path.join(cfg['training']['run_dir'], "safe_tta_results.csv")
-    df_results.to_csv(save_path, index=False)
-    logger.info(f"Safe-TTA Results saved to {save_path}")
-
 def main():
     """
     Main entry point for the Reliable Echo Segmentation Pipeline.
@@ -663,7 +535,8 @@ def main():
     parser.add_argument("--eval", action="store_true", help="Run evaluation (metrics + EF)")
     parser.add_argument("--rcps", action="store_true", help="Run RCPS calibration and evaluation")
     parser.add_argument("--tta", action="store_true", help="Run Test-Time Adaptation")
-    parser.add_argument("--safe_tta", action="store_true", help="Run Safe-TTA (Audited Conformal)")
+    parser.add_argument("--compute_golden", action="store_true", help="Run Offline 'Golden' Calibration for Adapters")
+    parser.add_argument("--cloud_simulation", action="store_true", help="Simulate Cloud Oracle during TTA")
     parser.add_argument("--adaptive", action="store_true", help="Run Adaptive Calibration")
     parser.add_argument("--profile", action="store_true", help="Run Latent Profiling")
     parser.add_argument("--plot", action="store_true", help="Generate all plots")
@@ -685,7 +558,7 @@ def main():
     # Initialize Distributed Mode
     setup_dist()
 
-    run_all = args.all or not (args.init or args.preprocess or args.train or args.eval or args.plot or args.rcps or args.profile or args.adaptive or args.tta or args.safe_tta)
+    run_all = args.all or not (args.init or args.preprocess or args.train or args.eval or args.plot or args.rcps or args.profile or args.adaptive or args.tta)
 
     device = run_init(cfg, args.resume)
     
@@ -701,11 +574,11 @@ def main():
     if run_all or args.profile:
         run_profile(cfg, device)
         
-    if run_all or args.tta:
-        run_tta(cfg, device)
+    if run_all or args.compute_golden:
+        run_golden_calibration(cfg, device)
 
-    if run_all or args.safe_tta:
-        run_safe_tta(cfg, device)
+    if run_all or args.tta:
+        run_tta(cfg, device, simulate_cloud=args.cloud_simulation)
         
     if run_all or args.eval:
         run_eval(cfg, device)
