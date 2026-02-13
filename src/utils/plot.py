@@ -237,6 +237,13 @@ def plot_conformal_segmentation(video, core_mask, shadow_mask, target_mask=None,
     else:
          base_img = video[0, frame_idx].detach().cpu().numpy()
 
+    # Robust Normalization for Display
+    if base_img.max() > base_img.min():
+        base_img = (base_img - base_img.min()) / (base_img.max() - base_img.min())
+    else:
+        # Avoid division by zero for constant images (e.g. padding)
+        pass 
+
     # Core and Shadow inputs are expected to be tensors, likely (B, C, T, H, W) or similar
     # We will handle if they are passed as full tensors
     if core_mask.ndim == 5:

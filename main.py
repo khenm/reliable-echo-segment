@@ -26,8 +26,7 @@ from src.utils.plot import (
     plot_martingale
 )
 from src.utils.metric import SkeletalError, R2Score, MAE, RMSE
-from src.analysis.latent_profile import LatentProfiler
-from src.tta.engine import TTA_Engine, SafeTTAEngine
+from src.tta.engine import TTAEngine, SafeTTAEngine
 from src.tta.auditor import SelfAuditor
 import glob
 
@@ -388,7 +387,8 @@ def run_eval(cfg, device):
         logger.error("Skipping evaluation due to missing checkpoint.")
         return
     
-    trainer = Trainer(model, loaders, cfg, device)
+    metrics = _get_metrics(cfg)
+    trainer = Trainer(model, loaders, cfg, device, metrics=metrics)
     trainer.evaluate_test()
 
     logger.info("Generating visualization examples...")
@@ -413,7 +413,7 @@ def run_tta(cfg, device):
     if model is None: return
     
     tta_cfg = cfg.get('tta', {})
-    engine = TTA_Engine(
+    engine = TTAEngine(
         model, 
         lr=float(tta_cfg.get('lr', 1e-4)), 
         n_augments=int(tta_cfg.get('n_augments', 4)),
@@ -474,9 +474,6 @@ def run_profile(cfg, device):
     ld_tr, _, _ = loaders
     
     latent_dim = cfg['model']['latent_dim']
-    profiler = LatentProfiler(latent_dim=latent_dim)
-    
-    profiler.fit(model, ld_tr, device)
     
     run_dir = cfg['training']['run_dir']
     save_path = os.path.join(run_dir, "latent_profile.joblib")
@@ -489,6 +486,15 @@ def _get_calibrator(cfg):
     
     if is_dual:
          logger.info(f"Initializing AuditCalibrator for Dual-Stream Model ({model_name})...")
+         RegCal = get_tta_component_class("regression_calibrator")
+         SegCal = get_tta_component_class("segmentation_calibrator")
+         AuditCal = get_tta_component_class("audit_calibrator")
+         return AuditCal({
+             'regression': RegCal(alpha=0.05),
+             'segmentation': SegCal(alpha=0.05)
+         })
+    elif model_name == "temporal_segment_tracker":
+         logger.info(f"Initializing AuditCalibrator for {model_name}...")
          RegCal = get_tta_component_class("regression_calibrator")
          SegCal = get_tta_component_class("segmentation_calibrator")
          AuditCal = get_tta_component_class("audit_calibrator")
@@ -545,7 +551,11 @@ def run_safe_tta(cfg, device):
     for batch in tqdm(ld_ts, desc="Safe-TTA Inference"):
         safe_engine.reset()
         video = batch["video"].to(device)
-        target = batch["target"].to(device)
+        target = batch.get("target")
+        if target is None: target = batch.get("target_ef")
+        if target is None: target = batch.get("EF")
+        
+        if target is not None: target = target.to(device)
         case = batch["case"][0] 
         
         output, q_used, collapsed, audit_stats = safe_engine.predict_step(video)
@@ -588,7 +598,7 @@ def run_safe_tta(cfg, device):
                 
             results.append({
                 "FileName": case,
-                "Actual_EF": target[0].item() if target.numel() > 0 else -1,
+                "Actual_EF": target[0].item() if (target is not None and target.numel() > 0) else -1,
                 "Predicted_EF": pred_ef_mean,
                 "Predicted_EF_Low": pred_ef_interval[0],
                 "Predicted_EF_High": pred_ef_interval[1],
@@ -627,7 +637,7 @@ def run_safe_tta(cfg, device):
             for i, p_set in enumerate(output):
                  results.append({
                     "FileName": case,
-                    "Actual_Class": target.view(-1)[i].item() if target.numel() > i else -1,
+                    "Actual_Class": target.view(-1)[i].item() if (target is not None and target.numel() > i) else -1,
                     "Prediction_Set": str(p_set),
                     "Set_Size": len(p_set),
                     "Q_Val": q_used,
