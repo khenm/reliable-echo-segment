@@ -135,7 +135,6 @@ class EchoNetVideoDataset(Dataset):
                         continue
                         
                 # Smart Padding Logic
-                # Smart Padding Logic
                 if end > total_frames:
                     pad_len = end - total_frames
                     if pad_len > (0.2 * self.max_clip_len):

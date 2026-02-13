@@ -246,10 +246,6 @@ class Trainer:
             # Check if loss function accepts frames (TemporalWeakSegLoss)
             loss_fn = self.criterions['segmentation']
             
-            # Prepare args based on signature or just pass blindly if kwargs supported (but explicit is better)
-            # TemporalWeakSegLoss Signature: 
-            # (pred_logits, target_masks, pred_ef, target_ef, frame_mask, frames=None, target_edv=None, target_esv=None)
-            
             if hasattr(loss_fn, 'volume_weight'): # Identify our custom loss
                  l_seg, c_dict = loss_fn(
                     mask_logits, 
@@ -259,7 +255,9 @@ class Trainer:
                     frame_mask, 
                     frames=imgs,
                     target_edv=edv_target,
-                    target_esv=esv_target
+                    target_esv=esv_target,
+                    pred_edv=pred_edv,
+                    pred_esv=pred_esv
                 )
             elif hasattr(loss_fn, 'cycle_loss'):
                 l_seg, c_dict = loss_fn(
