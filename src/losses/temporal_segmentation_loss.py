@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from monai.losses import DiceCELoss
+import torch.nn.functional as F
 
 from src.registry import register_loss
 from src.utils.logging import get_logger
@@ -54,7 +55,9 @@ class TemporalWeakSegLoss(nn.Module):
         frame_mask: torch.Tensor,
         frames: torch.Tensor = None,
         target_edv: torch.Tensor = None,
-        target_esv: torch.Tensor = None
+        target_esv: torch.Tensor = None,
+        pred_edv: torch.Tensor = None,
+        pred_esv: torch.Tensor = None
     ):
         """
         Args:
@@ -66,6 +69,8 @@ class TemporalWeakSegLoss(nn.Module):
             frames: (B, C, T, H, W) - Input video for cycle loss (optional)
             target_edv: (B,) or (B, 1) - Target End-Diastolic Volume
             target_esv: (B,) or (B, 1) - Target End-Systolic Volume
+            pred_edv: (B,) or (B, 1) - Predicted EDV (Optional)
+            pred_esv: (B,) or (B, 1) - Predicted ESV (Optional)
 
         Returns:
             total_loss: Scalar
@@ -84,8 +89,8 @@ class TemporalWeakSegLoss(nn.Module):
         else:
             loss_cycle = torch.tensor(0.0, device=pred_logits.device)
 
-        if self.volume_weight > 0 and target_edv is not None and target_esv is not None:
-             loss_volume = self._compute_volume_loss(pred_logits, frame_mask, target_edv, target_esv)
+        if self.volume_weight > 0 and target_edv is not None and target_esv is not None and pred_edv is not None and pred_esv is not None:
+             loss_volume = self._compute_volume_loss(pred_edv, pred_esv, target_edv, target_esv)
         else:
              loss_volume = torch.tensor(0.0, device=pred_logits.device)
 
@@ -138,47 +143,34 @@ class TemporalWeakSegLoss(nn.Module):
 
     def _compute_volume_loss(
         self,
-        pred_logits: torch.Tensor,
-        frame_mask: torch.Tensor,
+        pred_edv: torch.Tensor,
+        pred_esv: torch.Tensor,
         target_edv: torch.Tensor,
         target_esv: torch.Tensor
     ) -> torch.Tensor:
-        """Computes L1 loss between predicted and target volumes at ED/ES frames."""
-        # pred_logits: (B, 1, T, H, W)
-        pred_probs = torch.sigmoid(pred_logits)
+        """Computes L1 loss between predicted and target volumes."""
+        p_edv = pred_edv.view(-1)
+        t_edv = target_edv.view(-1)
         
-        # Sum over spatial dimensions (H, W) to get volume per frame (in pixels)
-        # Result: (B, 1, T) -> (B, T)
-        pred_vol = pred_probs.sum(dim=(-2, -1)).squeeze(1)
-
+        p_esv = pred_esv.view(-1)
+        t_esv = target_esv.view(-1)
+        
+        # Filter out invalid targets (-1 or whatever marker for missing data)
+        valid_edv = t_edv >= 0
+        valid_esv = t_esv >= 0
+        
         loss_vol = []
         
-        B = pred_vol.shape[0]
-        
-        # Iterate over batch to find specific ED/ES indices
-        for b in range(B):
-            # ED Frame (marked as 2.0)
-            ed_idx = (frame_mask[b] == 2.0).nonzero()
-            # ES Frame (marked as 1.0)
-            es_idx = (frame_mask[b] == 1.0).nonzero()
+        if valid_edv.any():
+            loss_vol.append(F.l1_loss(p_edv[valid_edv], t_edv[valid_edv]))
             
-            if ed_idx.numel() > 0:
-                idx = ed_idx[0].item()
-                # target_edv shape (B,) or (B, 1)
-                t_edv = target_edv[b].view(-1)
-                p_edv = pred_vol[b, idx].view(-1)
-                loss_vol.append(torch.abs(p_edv - t_edv))
-                
-            if es_idx.numel() > 0:
-                idx = es_idx[0].item()
-                t_esv = target_esv[b].view(-1)
-                p_esv = pred_vol[b, idx].view(-1)
-                loss_vol.append(torch.abs(p_esv - t_esv))
-                
+        if valid_esv.any():
+            loss_vol.append(F.l1_loss(p_esv[valid_esv], t_esv[valid_esv]))
+            
         if len(loss_vol) > 0:
-            return torch.mean(torch.cat(loss_vol))
+            return torch.stack(loss_vol).mean()
         else:
-            return torch.tensor(0.0, device=pred_logits.device)
+            return torch.tensor(0.0, device=pred_edv.device)
 
     def _compute_smoothness_loss(self, pred_logits):
         """Total Variation Loss to force spatial coherence"""
