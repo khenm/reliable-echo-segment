@@ -13,16 +13,17 @@ logger = get_logger()
 @register_model("temporal_segment_tracker")
 class TemporalEchoSegmentTracker(nn.Module):
     """
-    Late Temporal Modeling for echocardiogram segmentation.
+    Late Temporal Modeling for echocardiogram segmentation and volume regression.
 
     Architecture:
-        - Backbone with spatial features preserved (no global pooling)
-        - Path A (Segmentation): frame-wise, adapter -> pool -> decoder
-        - Path B (Regression): sequence-wise, adapter -> pool -> GRU -> regressor
+        - Backbone: Spatial features preserved (no global pooling).
+        - Path A (Segmentation): Frame-wise adapter -> SegmentationDecoder.
+        - Path B (Regression): Sequence-wise adapter -> Mask-Guided Pooling -> GRU -> Regressor.
     """
 
     @classmethod
-    def from_config(cls, cfg):
+    def from_config(cls, cfg: dict) -> "TemporalEchoSegmentTracker":
+        """Creates an instance from a configuration dictionary."""
         model_cfg = cfg.get('model', {})
         return cls(
             backbone=model_cfg.get('backbone', 'convnext_tiny'),
@@ -39,6 +40,16 @@ class TemporalEchoSegmentTracker(nn.Module):
         pretrained: bool = True,
         **kwargs,
     ):
+        """
+        Initializes the TemporalEchoSegmentTracker.
+
+        Args:
+            backbone: Name of the timm backbone model.
+            hidden_dim: Dimension of the hidden layer.
+            output_size: Size of the output spatial dimensions.
+            pretrained: Whether to use pretrained backbone weights.
+            **kwargs: Additional arguments.
+        """
         super().__init__()
 
         self.encoder = timm.create_model(
@@ -48,18 +59,16 @@ class TemporalEchoSegmentTracker(nn.Module):
             global_pool='',
         )
         self.feature_dim = self.encoder.num_features
-
-        # Channel adapter: feature_dim -> hidden_dim
         self.adapter = nn.Conv2d(self.feature_dim, hidden_dim, kernel_size=1)
 
-        # Path A: Segmentation (frame-wise, spatial map -> decoder)
+        # Path A: Segmentation
         self.decoder = SegmentationDecoder(
             hidden_dim=hidden_dim, output_size=output_size, spatial_input=True
         )
 
-        # Path B: Volume Regression (temporal sequence)
+        # Path B: Volume Regression
         self.gru = nn.GRU(
-            input_size=hidden_dim,
+            input_size=hidden_dim + 1,  # +1 for Area feature
             hidden_size=128,
             num_layers=2,
             batch_first=True,
@@ -71,60 +80,66 @@ class TemporalEchoSegmentTracker(nn.Module):
         )
 
         logger.info(
-            "TemporalEchoSegmentTracker initialized: "
-            f"backbone={backbone}, hidden_dim={hidden_dim}, "
-            f"feature_dim={self.feature_dim}"
+            f"TemporalEchoSegmentTracker initialized: backbone={backbone}, "
+            f"hidden_dim={hidden_dim}, feature_dim={self.feature_dim}"
         )
 
-    def forward(self, x: torch.Tensor, lengths: torch.Tensor = None, **kwargs):
+    def forward(self, x: torch.Tensor, lengths: torch.Tensor = None, **kwargs) -> dict:
         """
+        Forward pass of the model.
+
         Args:
-            x: (B, C, T, H, W) padded input video
-            lengths: (B,) actual frame counts per sample
+            x: Input tensor of shape (B, C, T, H, W).
+            lengths: Actual frame counts per sample of shape (B,).
+            **kwargs: Additional arguments.
+
         Returns:
-            dict with mask_logits, pred_edv, pred_esv, pred_ef
+            Dictionary containing:
+                - mask_logits: Segmentation masks (B, T, 1, H, W).
+                - hidden_features: Pooled features used for regression.
+                - pred_edv: Predicted End-Diastolic Volume.
+                - pred_esv: Predicted End-Systolic Volume.
+                - pred_ef: Predicted Ejection Fraction.
         """
         B, C, T, H, W = x.shape
 
         # Fold time into batch for spatial encoding
         x_flat = x.transpose(1, 2).reshape(B * T, C, H, W)
 
-        # Backbone → spatial feature maps (B*T, feature_dim, H', W')
+        # Backbone extraction
         features = self.encoder(x_flat)
         features = self.adapter(features)  # (B*T, hidden_dim, H', W')
 
-        # ----- Path A: Segmentation (spatial features -> decoder) -----
-        # Pass spatial features directly to decoder
+        # Path A: Segmentation
         mask_logits = self.decoder(features)  # (B*T, 1, H_out, W_out)
 
-        # ----- Path B: Mask-Guided Pooling for Regression -----
-        # 1. Downsample mask logits to feature size
-        # features shape: (N, C, H', W')
-        feat_h, feat_w = features.shape[-2:]
-        
-        # Detach gradient for mask guidance?? 
-        # Plan says: "Wrap this block in torch.set_grad_enabled(True)... so that gradients from the regression loss flow back through the mask"
-        # So we do NOT detach.
-        
-        mask_down = F.interpolate(
-            mask_logits, size=(feat_h, feat_w), mode='bilinear', align_corners=False
-        )
-        mask_prob = torch.sigmoid(mask_down) # (N, 1, H', W')
-        
-        # 2. Weighted Average
-        # (N, C, H', W') * (N, 1, H', W') -> sum spatial dims
-        numerator = (features * mask_prob).sum(dim=(-2, -1)) # (N, C)
-        denominator = mask_prob.sum(dim=(-2, -1)) + 1e-6 # (N, 1)
-        
-        feat_vec = numerator / denominator # (N, C) aka (B*T, hidden_dim)
+        # Path B: Regression with Gradient Shield and Area-Aware Pooling
+        feat_reg = features.detach()
+        mask_reg = mask_logits.detach()
 
-        # Reshape for Temporal Model
+        feat_h, feat_w = feat_reg.shape[-2:]
+        mask_down = F.interpolate(
+            mask_reg, size=(feat_h, feat_w), mode='bilinear', align_corners=False
+        )
+        mask_prob = torch.sigmoid(mask_down)
+
+        # Mask-Guided Pooling: Weighted Average (Texture) + Sum (Area)
+        numerator = (feat_reg * mask_prob).sum(dim=(-2, -1))
+        area = mask_prob.sum(dim=(-2, -1)) + 1e-6
+
+        avg_feat = numerator / area
+        area_feat = torch.log(area)
+
+        # Concatenate features and reshape for GRU
+        feat_vec = torch.cat([avg_feat, area_feat], dim=1)
+        feat_vec = feat_vec.view(B, T, -1)
+
+        # Reshape masks to (B, T, 1, H, W)
         mask_logits = mask_logits.view(
             B, T, 1, mask_logits.shape[-2], mask_logits.shape[-1]
-        ).transpose(1, 2) # (B, 1, T, H_out, W_out)
+        ).transpose(1, 2)
 
-        feat_vec = feat_vec.view(B, T, -1)  # (B, T, hidden_dim)
-
+        # Temporal Modeling
         if lengths is not None:
             lengths_cpu = lengths.to('cpu').int()
             packed = nn.utils.rnn.pack_padded_sequence(
@@ -135,31 +150,25 @@ class TemporalEchoSegmentTracker(nn.Module):
                 packed_out, batch_first=True, total_length=T
             )
 
-            # Average only valid frames
-            mask_t = torch.arange(T, device=x.device)[None, :] < lengths[:, None]
-            mask_t = mask_t.unsqueeze(-1).float()
-            video_embedding = (
-                (gru_out * mask_t).sum(dim=1)
-                / mask_t.sum(dim=1).clamp(min=1e-6)
-            )
+            # Average pooling over valid frames only
+            mask_t = (
+                torch.arange(T, device=x.device)[None, :] < lengths[:, None]
+            ).float().unsqueeze(-1)
+            
+            video_embedding = (gru_out * mask_t).sum(dim=1) / mask_t.sum(dim=1).clamp(min=1e-6)
         else:
             gru_out, _ = self.gru(feat_vec)
             video_embedding = gru_out.mean(dim=1)
 
-        # ----- Path C: Sorted Volume Regression -----
-        pred_vols = F.softplus(self.volume_regressor(video_embedding)) # (B, 2)
-        
-        # Sort: max -> EDV, min -> ESV
+        # Volume Regression and Sorting
+        pred_vols = F.softplus(self.volume_regressor(video_embedding))
         pred_edv, _ = pred_vols.max(dim=1, keepdim=True)
         pred_esv, _ = pred_vols.min(dim=1, keepdim=True)
 
         return {
             "mask_logits": mask_logits,
-            "hidden_features": feat_vec, # This is now the pooled features
+            "hidden_features": feat_vec,
             "pred_edv": pred_edv,
             "pred_esv": pred_esv,
-            "pred_ef": (
-                (pred_edv - pred_esv)
-                / (pred_edv + 1e-6)
-            ),
+            "pred_ef": (pred_edv - pred_esv) / (pred_edv + 1e-6),
         }
