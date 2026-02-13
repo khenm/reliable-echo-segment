@@ -147,14 +147,15 @@ class TemporalEchoSegmentTracker(nn.Module):
             )
             packed_out, _ = self.gru(packed)
             gru_out, _ = nn.utils.rnn.pad_packed_sequence(
-                packed_out, batch_first=True, total_length=T
+                packed_out, batch_first=True, total_length=x.size(2)
             )
 
             # Average pooling over valid frames only
+            # Create mask dynamically based on current batch's T
             mask_t = (
-                torch.arange(T, device=x.device)[None, :] < lengths[:, None]
+                torch.arange(x.size(2), device=x.device)[None, :] < lengths[:, None]
             ).float().unsqueeze(-1)
-            
+
             video_embedding = (gru_out * mask_t).sum(dim=1) / mask_t.sum(dim=1).clamp(min=1e-6)
         else:
             gru_out, _ = self.gru(feat_vec)
@@ -167,7 +168,7 @@ class TemporalEchoSegmentTracker(nn.Module):
 
         return {
             "mask_logits": mask_logits,
-            "hidden_features": feat_vec,
+            "hidden_features": avg_feat.view(B, T, -1),
             "pred_edv": pred_edv,
             "pred_esv": pred_esv,
             "pred_ef": (pred_edv - pred_esv) / (pred_edv + 1e-6),
