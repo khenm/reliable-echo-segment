@@ -14,6 +14,8 @@ from src.utils.logging import get_logger
 from src.utils.util_ import save_checkpoint, load_full_checkpoint
 from src.models.temporal import TemporalGate
 from src.utils.plot import plot_volume_debug
+from src.utils.dist import is_main_process, reduce_tensor, get_world_size, get_rank
+import torch.distributed as dist
 import wandb
 
 logger = get_logger()
@@ -79,6 +81,17 @@ class Trainer:
         dev_type = self.device.type if hasattr(self.device, 'type') else str(self.device)
         self.scaler = torch.amp.GradScaler(device=dev_type, enabled=(dev_type == 'cuda'))
 
+        # DDP Wrapping
+        if dist.is_available() and dist.is_initialized():
+            if hasattr(self.model, 'to'):
+                self.model = self.model.to(self.device)
+            self.model = torch.nn.parallel.DistributedDataParallel(
+                self.model, 
+                device_ids=[self.device] if self.device.type == 'cuda' else None,
+                find_unused_parameters=False
+            )
+            logger.info(f"Wrapped model in DDP (Rank {get_rank()})")
+
     def _setup_metrics(self):
         if self.num_classes == 1:
             self.post_pred = AsDiscrete(threshold=0.5)
@@ -100,6 +113,10 @@ class Trainer:
         logger.info(f"Starting training from epoch {start_ep}")
         
         for ep in range(start_ep, epochs + 1):
+            # Set epoch for DistributedSampler to ensure shuffling
+            if hasattr(self.ld_tr, 'sampler') and hasattr(self.ld_tr.sampler, 'set_epoch'):
+                self.ld_tr.sampler.set_epoch(ep)
+                
             avg_loss, loss_comps = self._run_epoch(ep, epochs)
             val_result = self._validate()
             
@@ -161,6 +178,15 @@ class Trainer:
             self.scaler.step(self.opt)
             self.scaler.update()
             self.opt.zero_grad(set_to_none=True)
+
+        # Sync metrics across processes
+        if dist.is_available() and dist.is_initialized():
+             run_loss_t = torch.tensor(run_loss, device=self.device)
+             run_loss = reduce_tensor(run_loss_t).item()
+             
+             for k in loss_components:
+                 comp_t = torch.tensor(loss_components[k], device=self.device)
+                 loss_components[k] = reduce_tensor(comp_t).item()
 
         avg_loss = run_loss / len(self.ld_tr)
         avg_comps = {k: v / len(self.ld_tr) for k, v in loss_components.items()}
@@ -580,6 +606,12 @@ class Trainer:
     # --- Utils ---
     
     def _save_checkpoint(self, ep, metric, is_best=False):
+        if not is_main_process():
+            return
+            
+        # Unwrap DDP model
+        model_to_save = self.model.module if hasattr(self.model, 'module') else self.model
+
         rng_state = {
             "torch": torch.get_rng_state(),
             "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
@@ -588,7 +620,7 @@ class Trainer:
         }
         state = {
             'epoch': ep,
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': model_to_save.state_dict(),
             'optimizer_state_dict': self.opt.state_dict(),
             'scaler_state_dict': self.scaler.state_dict(),
             'rng_state': rng_state,
@@ -603,6 +635,8 @@ class Trainer:
         return load_full_checkpoint(path, self.model, optimizer=self.opt, scaler=self.scaler, device=self.device, load_rng=True)
 
     def _log_epoch(self, ep, loss, comps, val_res):
+        if not is_main_process():
+            return
         if isinstance(ep, str):
             msg = f"{ep} loss={loss:.4f} " + " ".join([f"{k}={v:.4f}" for k, v in comps.items()])
         else:

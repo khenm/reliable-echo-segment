@@ -13,6 +13,7 @@ from src.utils.util_ import seed_everything, get_device, load_checkpoint
 from src.registry import get_dataloaders, build_model, build_loss, get_tta_component_class
 from src.trainer import Trainer
 from src.utils.logging import get_logger
+from src.utils.dist import setup_dist, cleanup_dist
 from src.models.temporal import TemporalConsistencyLoss
 from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric
@@ -672,11 +673,17 @@ def main():
     
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
+    if args.config:
+        cfg = load_config(args.config)
+    else:
+        cfg = load_config("configs/config.yaml")
 
     # Override wandb enable status based on flag
     if 'wandb' not in cfg: cfg['wandb'] = {}
     cfg['wandb']['enable'] = args.wandb
+
+    # Initialize Distributed Mode
+    setup_dist()
 
     run_all = args.all or not (args.init or args.preprocess or args.train or args.eval or args.plot or args.rcps or args.profile or args.adaptive or args.tta or args.safe_tta)
 
@@ -705,6 +712,8 @@ def main():
         
     if run_all or args.plot:
         run_plot(cfg)
+        
+    cleanup_dist()
 
 if __name__ == "__main__":
     main()

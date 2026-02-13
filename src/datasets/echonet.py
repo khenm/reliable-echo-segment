@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data.distributed import DistributedSampler
+from src.utils.dist import is_main_process, get_world_size, get_rank
 
 from src.utils.logging import get_logger
 from src.registry import register_dataset
@@ -312,8 +314,23 @@ class EchoNet:
             ds_va = Subset(ds_va, range(min(len(ds_va), subset_size)))
             ds_ts = Subset(ds_ts, range(min(len(ds_ts), subset_size)))
 
+        # DDP Sampler
+        sampler_tr = None
+        sampler_va = None
+        sampler_ts = None
+        
+        shuffle_tr = True
+        shuffle_va = False
+        
+        if get_world_size() > 1:
+            sampler_tr = DistributedSampler(ds_tr, shuffle=True)
+            sampler_va = DistributedSampler(ds_va, shuffle=False)
+            sampler_ts = DistributedSampler(ds_ts, shuffle=False)
+            shuffle_tr = False # Sampler handles shuffling
+            shuffle_va = False
+
         return (
-            DataLoader(ds_tr, batch_size=batch_size, shuffle=True, num_workers=num_workers),
-            DataLoader(ds_va, batch_size=batch_size, shuffle=False, num_workers=num_workers),
-            DataLoader(ds_ts, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+            DataLoader(ds_tr, batch_size=batch_size, shuffle=shuffle_tr, num_workers=num_workers, sampler=sampler_tr, pin_memory=True),
+            DataLoader(ds_va, batch_size=batch_size, shuffle=shuffle_va, num_workers=num_workers, sampler=sampler_va, pin_memory=True),
+            DataLoader(ds_ts, batch_size=batch_size, shuffle=False, num_workers=num_workers, sampler=sampler_ts, pin_memory=True)
         )

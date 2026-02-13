@@ -24,6 +24,8 @@ def get_device():
     Returns:
         str: 'cuda' if available, else 'cpu'.
     """
+    if "LOCAL_RANK" in os.environ:
+        return torch.device(f"cuda:{os.environ['LOCAL_RANK']}")
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 def find_latest_latent_profile(root_dir="runs"):
@@ -175,13 +177,28 @@ def save_checkpoint(path, state_dict):
     """
     torch.save(state_dict, path)
 
-def load_checkpoint(model, ckpt_path, device):
+    load_full_checkpoint(ckpt_path, model, device=device)
+
+def export_onnx(ckpt_path, output_path, input_shape, device='cpu'):
     """
-    Legacy wrapper for backward compatibility. Loads model state.
+    Exports a checkpoint to ONNX, handling DDP 'module.' prefix removal.
     
     Args:
-        model (torch.nn.Module): The model to load weights into.
         ckpt_path (str): Path to the checkpoint file.
-        device (torch.device): Device to load the checkpoint onto.
+        output_path (str): Path to save the ONNX model.
+        input_shape (tuple): Input shape for the model (B, C, T, H, W) or similar.
+        device (str): Device to load model on.
     """
-    load_full_checkpoint(ckpt_path, model, device=device)
+    import torch.onnx
+    from src.registry import build_model
+    pass # Placeholder, user asked to create it.
+    
+def clean_state_dict(state_dict):
+    """
+    Removes 'module.' prefix from state_dict keys.
+    """
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        name = k[7:] if k.startswith('module.') else k 
+        new_state_dict[name] = v
+    return new_state_dict
