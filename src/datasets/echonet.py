@@ -17,7 +17,7 @@ class EchoNetVideoDataset(Dataset):
     Dataset class for EchoNet-Dynamic Video Classification/Regression.
     Loads video clips for R(2+1)D model.
     """
-    def __init__(self, root_dir, split="TRAIN", max_clip_len=32, img_size=(112, 112), sampling_rate=1, transform=None, return_keypoints=False):
+    def __init__(self, root_dir, split="TRAIN", max_clip_len=32, img_size=(112, 112), sampling_rate=1, transform=None, return_keypoints=False, pretrain=False):
         self.root_dir = root_dir
         self.split = split.upper()
         self.max_clip_len = max_clip_len
@@ -26,6 +26,8 @@ class EchoNetVideoDataset(Dataset):
         self.sampling_rate = sampling_rate
         self.transform = transform
         self.return_keypoints = return_keypoints
+        self.pretrain = pretrain
+        self.max_retries = 5
         self.max_retries = 5
         self.videos_dir = os.path.join(root_dir, "Videos")
 
@@ -112,6 +114,27 @@ class EchoNetVideoDataset(Dataset):
             # Generate clips: [0, 32), [16, 48), ...
             for start in range(0, total_frames, stride):
                 end = start + self.max_clip_len
+                
+                # Pretrain Filtering Logic
+                if self.pretrain:
+                    if fname not in self.meta_lookup:
+                        continue
+                        
+                    meta = self.meta_lookup[fname]
+                    ed_frame = int(meta.get("EDFrame", -1))
+                    es_frame = int(meta.get("ESFrame", -1))
+                    
+                    if ed_frame == -1 or es_frame == -1:
+                        continue
+                        
+                    # Check if BOTH frames are within [start, end)
+                    has_ed = (start <= ed_frame < end)
+                    has_es = (start <= es_frame < end)
+                    
+                    if not (has_ed and has_es):
+                        continue
+                        
+                # Smart Padding Logic
                 # Smart Padding Logic
                 if end > total_frames:
                     pad_len = end - total_frames
@@ -302,10 +325,14 @@ class EchoNet:
             return_kps = True
         elif model_name.lower() in ["segment_tracker", "temporal_segment_tracker"]:
             return_kps = False
+            
+        pretrain = cfg['training'].get('pretrain', False)
+        if pretrain:
+            logger.info("Pretraining Mode: Filtering clips to contain both ED and ES frames.")
 
-        ds_tr = EchoNetVideoDataset(root_dir, "TRAIN", max_clip_len=max_clip_len, img_size=img_size, return_keypoints=return_kps)
-        ds_va = EchoNetVideoDataset(root_dir, "VAL", max_clip_len=max_clip_len, img_size=img_size, return_keypoints=return_kps)
-        ds_ts = EchoNetVideoDataset(root_dir, "TEST", max_clip_len=max_clip_len, img_size=img_size, return_keypoints=return_kps)
+        ds_tr = EchoNetVideoDataset(root_dir, "TRAIN", max_clip_len=max_clip_len, img_size=img_size, return_keypoints=return_kps, pretrain=pretrain)
+        ds_va = EchoNetVideoDataset(root_dir, "VAL", max_clip_len=max_clip_len, img_size=img_size, return_keypoints=return_kps, pretrain=pretrain)
+        ds_ts = EchoNetVideoDataset(root_dir, "TEST", max_clip_len=max_clip_len, img_size=img_size, return_keypoints=return_kps, pretrain=pretrain)
 
         if cfg['data'].get('subset_size'):
             subset_size = int(cfg['data']['subset_size'])

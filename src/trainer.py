@@ -143,7 +143,7 @@ class Trainer:
     def _run_epoch(self, ep, max_ep):
         self.model.train()
         run_loss = 0.0
-        loss_components = {key: 0.0 for key in self.criterions.keys()}
+        loss_components = {}
         
         pbar = tqdm(self.ld_tr, desc=f"Epoch {ep}/{max_ep}", mininterval=2.0)
         self.opt.zero_grad(set_to_none=True)
@@ -163,8 +163,9 @@ class Trainer:
             
             run_loss += loss.item()
             for k, v in batch_comps.items():
-                if k in loss_components:
-                    loss_components[k] += v
+                if k not in loss_components:
+                    loss_components[k] = 0.0
+                loss_components[k] += v
             
             # Update Pbar
             postfix = {"loss": f"{loss.item():.4f}"}
