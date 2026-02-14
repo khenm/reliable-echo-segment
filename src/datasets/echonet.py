@@ -313,7 +313,7 @@ class EchoNet:
         num_workers = cfg['training'].get('num_workers', 4)
         model_name = cfg['model'].get('name', 'VAEUNet')
 
-        if model_name.lower() not in ["r2plus1d", "unet_tcm", "skeletal_tracker", "segment_tracker", "temporal_segment_tracker"]:
+        if model_name.lower() not in ["r2plus1d", "unet_tcm", "skeletal_tracker", "segment_tracker", "temporal_segment_tracker", "cardiac_mamba"]:
             raise NotImplementedError(f"EchoNet dataloader not implemented for model '{model_name}'")
 
         max_clip_len = cfg['model'].get('max_clip_len', 32)
@@ -322,7 +322,7 @@ class EchoNet:
         
         if model_name.lower() == "skeletal_tracker":
             return_kps = True
-        elif model_name.lower() in ["segment_tracker", "temporal_segment_tracker"]:
+        elif model_name.lower() in ["segment_tracker", "temporal_segment_tracker", "cardiac_mamba"]:
             return_kps = False
             
         pretrain = cfg['training'].get('pretrain', False)

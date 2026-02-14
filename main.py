@@ -307,14 +307,15 @@ def _get_criterions(cfg):
             contrast_weight=weights.get('contrast', 0.1)
         )
 
-    elif model_name == "temporal_segment_tracker":
+    elif model_name == "temporal_segment_tracker" or model_name == "cardiac_mamba":
         criterions['segmentation'] = build_loss(
             "TemporalWeakSegLoss",
             dice_weight=weights.get('dice', 1.0),
             ef_weight=weights.get('ef', 10.0),
             smooth_weight=weights.get('smooth', 1.0),
             cycle_weight=weights.get('cycle', 0.5),
-            volume_weight=weights.get('volume', 0.1)
+            volume_weight=weights.get('volume', 0.1),
+            phase_weight=weights.get('phase', 0.0)
         )
 
         distill_cfg = cfg.get('loss', {}).get('distillation', {})
@@ -347,7 +348,7 @@ def _get_metrics(cfg):
         metrics['dice'] = DiceMetric(include_background=include_bg, reduction="mean")
         if model_name == "skeletal_tracker":
             metrics['skeletal'] = SkeletalError()
-    elif model_name in ["segment_tracker", "temporal_segment_tracker"]:
+    elif model_name in ["segment_tracker", "temporal_segment_tracker", "cardiac_mamba"]:
         metrics['mae'] = MAE(reduction="mean")     # EF
         metrics['rmse'] = RMSE(reduction="mean")   # EF
         metrics['r2'] = R2Score()                  # EF

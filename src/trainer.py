@@ -53,7 +53,7 @@ class Trainer:
         self.is_unet_2d = (self.model_name in ["unet_tcm"])
         self.is_dual_stream = (self.model_name == "dual_stream")
         self.is_skeletal = (self.model_name == "skeletal_tracker")
-        self.is_segmentation = (self.model_name in ["segment_tracker", "temporal_segment_tracker"])
+        self.is_segmentation = (self.model_name in ["segment_tracker", "temporal_segment_tracker", "cardiac_mamba"])
 
     def _setup_optimization(self):
         # Temporal Gate
@@ -224,7 +224,9 @@ class Trainer:
         mask_logits = outputs['mask_logits']
         pred_edv = outputs['pred_edv']
         pred_esv = outputs['pred_esv']
+        pred_esv = outputs['pred_esv']
         pred_ef = outputs['pred_ef']
+        pred_phase = outputs.get('pred_phase')
 
         loss = 0.0
         comps = {}
@@ -257,7 +259,8 @@ class Trainer:
                     target_edv=edv_target,
                     target_esv=esv_target,
                     pred_edv=pred_edv,
-                    pred_esv=pred_esv
+                    pred_esv=pred_esv,
+                    pred_phase=pred_phase
                 )
             elif hasattr(loss_fn, 'cycle_loss'):
                 l_seg, c_dict = loss_fn(
@@ -457,9 +460,9 @@ class Trainer:
 
         outputs = self.model(imgs, lengths=lengths)
         mask_logits = outputs['mask_logits']
-        pred_ef = outputs['pred_ef']
-        pred_edv = outputs['pred_edv']
-        pred_esv = outputs['pred_esv']
+        pred_ef = outputs['pred_ef'].view(-1, 1)
+        pred_edv = outputs['pred_edv'].view(-1, 1)
+        pred_esv = outputs['pred_esv'].view(-1, 1)
 
         # Targets
         ef_target = batch.get("target_ef").to(self.device).view(-1, 1) if "target_ef" in batch else batch.get("target").to(self.device).view(-1, 1)
