@@ -19,3 +19,6 @@ wandb
 timm
 onnx>=1.16.0
 onnxscript>=0.1.0
+mamba-ssm
+causal-conv1d
+einops

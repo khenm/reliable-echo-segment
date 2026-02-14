@@ -184,3 +184,63 @@ class TemporalEchoSegmentTracker(nn.Module):
             "pred_ef": (pred_edv - pred_esv) / (pred_edv + 1e-6),
             "pred_vol_curve": pred_vol_seq,
         }
+
+    def forward_step(self, x: torch.Tensor, h_prev: torch.Tensor = None) -> dict:
+        """
+        Streaming inference for a single frame.
+
+        Args:
+            x: Single frame input of shape (B, C, H, W).
+            h_prev: Previous hidden state of shape (num_layers, B, hidden_size).
+                    If None, it initializes as zeros.
+
+        Returns:
+            dict: {
+                "mask_logits": (B, 1, H, W),
+                "pred_vol": (B, 1),
+                "hidden_state": (num_layers, B, hidden_size) -> Pass this to next step!
+            }
+        """
+        B, C, H, W = x.shape
+
+        # 1. Spatial Encoding (Backbone + Adapter)
+        features = self.encoder(x)
+        features = self.adapter(features)  # (B, hidden_dim, H', W')
+
+        # 2. Path A: Segmentation (Stateless)
+        mask_logits = self.decoder(features)  # (B, 1, H_out, W_out)
+
+        # 3. Path B: Pre-processing (Replicate the Training Logic exactly)
+        feat_reg = features.detach()
+        mask_reg = mask_logits.detach()
+
+        # Resize mask to match feature size for gating
+        feat_h, feat_w = feat_reg.shape[-2:]
+        mask_down = F.interpolate(
+            mask_reg, size=(feat_h, feat_w), mode='bilinear', align_corners=False
+        )
+        mask_prob = torch.sigmoid(mask_down)
+
+        # Mask-Guided Pooling
+        numerator = (feat_reg * mask_prob).sum(dim=(-2, -1))
+        area = mask_prob.sum(dim=(-2, -1)) + 1e-6
+
+        avg_feat = numerator / area
+        area_feat = torch.log(area)
+
+        # Prepare GRU input: (B, 1, Input_Dim)
+        feat_vec = torch.cat([avg_feat, area_feat], dim=1).unsqueeze(1)
+
+        # 4. Temporal Step (GRU)
+        # The GRU takes (Input, h_prev) and returns (Output, h_new)
+        gru_out, h_new = self.gru(feat_vec, h_prev)
+
+        # 5. Regression
+        pred_vol = F.softplus(self.volume_regressor(gru_out))  # (B, 1, 1)
+
+        return {
+            "mask_logits": mask_logits,
+            "pred_vol": pred_vol.squeeze(1),  # Remove time dim: (B, 1)
+            "hidden_state": h_new,
+            "hidden_features": avg_feat  # (B, D)
+        }

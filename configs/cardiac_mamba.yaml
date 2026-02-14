@@ -1,0 +1,42 @@
+model: "cardiac_mamba"
+
+data:
+  name: "echonet"
+  max_retries: 5
+
+loss:
+  name: "TemporalWeakSegLoss"
+  weights:
+    dice: 1.0
+    ef: 0.2
+    volume: 0.2
+    phase: 1.0
+    smooth: 0.1
+    cycle: 0.5
+  distillation:
+    enabled: true
+    weight: 1.0
+    temperature: 1.0
+    alpha: 0.5
+    student_dim: 256
+
+training:
+  epochs: 100
+  batch_size: 32
+  train_batch_size: 64
+  val_batch_size: 64
+  num_workers: 12
+  persistent_workers: True
+  lr: 1.2e-4
+  weight_decay: 1.0e-5
+  patience: 10
+  seed: 42
+
+  save_dir: "/workspace/runs"
+  checkpoint_dir: "/workspace/checkpoints"
+  test_metrics_csv: "/workspace/runs/mamba_metrics.csv"
+  clinical_pairs_csv: "/workspace/runs/mamba_clinical_pairs.csv"
+  resume_path: null
+
+tta:
+  enabled: false

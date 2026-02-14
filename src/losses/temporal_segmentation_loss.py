@@ -28,7 +28,8 @@ class TemporalWeakSegLoss(nn.Module):
         ef_weight: float = 10.0,
         smooth_weight: float = 0.0,
         cycle_weight: float = 0.5,
-        volume_weight: float = 0.1
+        volume_weight: float = 0.1,
+        phase_weight: float = 0.0
     ):
         super().__init__()
         self.dice_weight = dice_weight
@@ -36,14 +37,16 @@ class TemporalWeakSegLoss(nn.Module):
         self.smooth_weight = smooth_weight
         self.cycle_weight = cycle_weight
         self.volume_weight = volume_weight
+        self.phase_weight = phase_weight
 
         self.dice_func = DiceCELoss(sigmoid=True, reduction='mean')
         self.l1 = nn.L1Loss()
+        self.ce = nn.CrossEntropyLoss(ignore_index=-1) # Ignore invalid if any
         self.cycle_loss = CycleConsistencyLoss()
 
         logger.info(
             f"TemporalWeakSegLoss initialized: dice={dice_weight}, ef={ef_weight}, "
-            f"cycle={cycle_weight}, volume={volume_weight}"
+            f"cycle={cycle_weight}, volume={volume_weight}, phase={phase_weight}"
         )
 
     def forward(
@@ -57,7 +60,8 @@ class TemporalWeakSegLoss(nn.Module):
         target_edv: torch.Tensor = None,
         target_esv: torch.Tensor = None,
         pred_edv: torch.Tensor = None,
-        pred_esv: torch.Tensor = None
+        pred_esv: torch.Tensor = None,
+        pred_phase: torch.Tensor = None
     ):
         """
         Args:
@@ -96,12 +100,22 @@ class TemporalWeakSegLoss(nn.Module):
 
         loss_smooth = self._compute_smoothness_loss(torch.sigmoid(pred_logits))
 
+        if self.phase_weight > 0 and pred_phase is not None:
+             # pred_phase: (B, T, 3), frame_mask: (B, T)
+             # Flatten
+             p_phase_flat = pred_phase.reshape(-1, 3)
+             t_phase_flat = frame_mask.reshape(-1).long()
+             loss_phase = self.ce(p_phase_flat, t_phase_flat)
+        else:
+             loss_phase = torch.tensor(0.0, device=pred_logits.device)
+
         total_loss = (
             self.dice_weight * loss_dice +
             self.ef_weight * loss_ef +
             self.smooth_weight * loss_smooth +
             self.cycle_weight * loss_cycle +
-            self.volume_weight * loss_volume
+            self.volume_weight * loss_volume +
+            self.phase_weight * loss_phase
         )
 
         return total_loss, {
@@ -109,7 +123,8 @@ class TemporalWeakSegLoss(nn.Module):
             "ef": loss_ef,
             "cycle": loss_cycle,
             "smooth": loss_smooth,
-            "volume": loss_volume
+            "volume": loss_volume,
+            "phase": loss_phase
         }
 
     def _compute_dice_loss(
