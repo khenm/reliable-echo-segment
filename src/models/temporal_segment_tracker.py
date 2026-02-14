@@ -76,7 +76,7 @@ class TemporalEchoSegmentTracker(nn.Module):
         self.volume_regressor = nn.Sequential(
             nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Linear(64, 2),  # [Generic Vol 1, Generic Vol 2]
+            nn.Linear(64, 1),  # Outputs (B, T, 1) when applied to sequence
         )
 
         logger.info(
@@ -149,22 +149,32 @@ class TemporalEchoSegmentTracker(nn.Module):
             gru_out, _ = nn.utils.rnn.pad_packed_sequence(
                 packed_out, batch_first=True, total_length=x.size(2)
             )
+            video_embedding = gru_out # No pooling! Keep (B, T, Hidden)
+        else:
+            gru_out, _ = self.gru(feat_vec)
+            video_embedding = gru_out
 
-            # Average pooling over valid frames only
-            # Create mask dynamically based on current batch's T
+        # Frame-wise Volume Prediction
+        pred_vol_seq = F.softplus(self.volume_regressor(video_embedding))
+
+        # Masking & Aggregation (Critical for variable lengths)
+        if lengths is not None:
+            # Create boolean mask for valid frames: (B, T, 1)
             mask_t = (
                 torch.arange(x.size(2), device=x.device)[None, :] < lengths[:, None]
             ).float().unsqueeze(-1)
-
-            video_embedding = (gru_out * mask_t).sum(dim=1) / mask_t.sum(dim=1).clamp(min=1e-6)
+            
+            # Apply mask to zero out padding contributions
+            valid_vols = pred_vol_seq * mask_t
+            
+            # EDV = Max Volume
+            pred_edv, _ = valid_vols.max(dim=1)
+            vols_for_min = valid_vols.clone()
+            vols_for_min[mask_t == 0] = float('inf') 
+            pred_esv, _ = vols_for_min.min(dim=1)
         else:
-            gru_out, _ = self.gru(feat_vec)
-            video_embedding = gru_out.mean(dim=1)
-
-        # Volume Regression and Sorting
-        pred_vols = F.softplus(self.volume_regressor(video_embedding))
-        pred_edv, _ = pred_vols.max(dim=1, keepdim=True)
-        pred_esv, _ = pred_vols.min(dim=1, keepdim=True)
+            pred_edv, _ = pred_vol_seq.max(dim=1)
+            pred_esv, _ = pred_vol_seq.min(dim=1)
 
         return {
             "mask_logits": mask_logits,
@@ -172,4 +182,5 @@ class TemporalEchoSegmentTracker(nn.Module):
             "pred_edv": pred_edv,
             "pred_esv": pred_esv,
             "pred_ef": (pred_edv - pred_esv) / (pred_edv + 1e-6),
+            "pred_vol_curve": pred_vol_seq,
         }
