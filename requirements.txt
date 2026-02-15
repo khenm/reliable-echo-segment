@@ -1,5 +1,5 @@
 numpy>=1.26.4
-torch>=2.3.0
+torch==2.5.1
 torchvision
 torchaudio
 monai[all]>=1.4.0
@@ -19,6 +19,3 @@ wandb
 timm
 onnx>=1.16.0
 onnxscript>=0.1.0
-mamba-ssm
-causal-conv1d
-einops
