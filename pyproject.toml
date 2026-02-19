@@ -35,3 +35,7 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src*"]
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu130"
