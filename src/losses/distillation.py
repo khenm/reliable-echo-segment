@@ -29,7 +29,7 @@ def _isolate_and_load(hub_repo: str, model_name: str, **kwargs) -> nn.Module:
     try:
         # 4. Load from Hub (this will add the repo to sys.path)
         # verbose=False to reduce noise, assuming user trusts the repo
-        model = torch.hub.load(hub_repo, model_name, force_reload=False, verbose=False, **kwargs)
+        model = torch.hub.load(hub_repo, model_name, force_reload=False, verbose=False, trust_repo=True, **kwargs)
         return model
     except Exception as e:
         logger.error(f"Failed to load {model_name} from {hub_repo}: {e}")

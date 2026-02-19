@@ -13,7 +13,7 @@ class Mamba2(nn.Module):
         d_conv=4,
         expand=2,
         headdim=64,
-        d_ssm=None, # If not None, override n_heads * headdim? No, usually derived.
+        d_ssm=None,
         ngroups=1,
         A_init_range=(1, 16),
         dt_min=0.001,
@@ -24,7 +24,7 @@ class Mamba2(nn.Module):
         norm_before_gate=False,
         chunk_size=128,
         use_mem_eff_path=True,
-        layer_idx=None,  # Optional, for future use or logging
+        layer_idx=None, 
     ):
         super().__init__()
         self.d_model = d_model
@@ -106,9 +106,6 @@ class Mamba2(nn.Module):
         )
 
         # 4. SSM
-        # Call SSD
-        # x is (B, L, H*P)
-        # Pass z=None to ssd so it returns raw y (or modify ssd to not gate)
         y, last_state = mamba_chunk_scan_combined(
             z=None, 
             x=x, 

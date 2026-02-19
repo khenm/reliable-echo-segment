@@ -219,8 +219,13 @@ __marimo__/
 .ipynb_checkpoints/
 checkpoints
 runs
+
 # Agent files
 .agent/
-tests
+
+# Custome folder
+tests/
 notebooks
-datasets
+datasets/
+references/
+results/
