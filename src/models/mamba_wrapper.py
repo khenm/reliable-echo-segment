@@ -1,140 +1,15 @@
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from src.utils.logging import get_logger
+from src.models.mamba2.block import Mamba2Block
 
 logger = get_logger()
 
-# Try importing the official CUDA-optimized Mamba
-try:
-    from mamba_ssm import Mamba
-    MAMBA_AVAILABLE = True
-    logger.info("Successfully imported mamba_ssm (CUDA).")
-except ImportError:
-    MAMBA_AVAILABLE = False
-    logger.warning("mamba_ssm not found. Using MambaFallback (Pure PyTorch, Slower).")
-
-class MambaFallback(nn.Module):
-    """
-    A pure PyTorch implementation of a Mamba-like block for development on non-CUDA devices (e.g. Mac).
-    This approximates the functionality of the Mamba block but is NOT numerically identical.
-    It uses a GRU-based approximation to mimic the selective state space behavior:
-    1. Processing sequences in parallel (forward).
-    2. Processing streams step-by-step (step).
-
-    Note: This is a dev-proxy. Do not use for production training on Server.
-    """
-    def __init__(self, d_model, d_state=16, d_conv=4, expand=2):
-        super().__init__()
-        self.d_model = d_model
-        self.expand = expand
-        self.d_inner = int(self.expand * self.d_model)
-        
-        # We use a GRU to simulate the recurrent "selection" mechanism of Mamba
-        # Mamba projects up -> Conv1d -> SSM -> project down
-        
-        self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
-
-        self.conv1d = nn.Conv1d(
-            in_channels=self.d_inner,
-            out_channels=self.d_inner,
-            bias=True,
-            kernel_size=d_conv,
-            groups=self.d_inner,
-            padding=d_conv - 1,
-        )
-
-        # The "State Space" part - approximated by a GRU cell for simplicity in fallback
-        # Real Mamba uses A, B, C, Delta parameters. 
-        # Here we just want something that has state and processes sequences.
-        self.gru = nn.GRU(
-            input_size=self.d_inner,
-            hidden_size=self.d_inner,
-            batch_first=True
-        )
-
-        self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
-        self.act = nn.SiLU()
-
-    def forward(self, x):
-        """
-        Args:
-            x: (B, L, D)
-        """
-        B, L, D = x.shape
-        
-        # 1. Project
-        x_and_res = self.in_proj(x)  # (B, L, 2*d_inner)
-        x_in, res = x_and_res.split(self.d_inner, dim=-1)
-        
-        # 2. Conv1d (Causal by manually slicing)
-        x_conv = x_in.transpose(1, 2) # (B, d_inner, L)
-        x_conv = self.conv1d(x_conv)[:, :, :L] # Construct Causal Conv
-        x_conv = self.act(x_conv.transpose(1, 2)) # (B, L, d_inner)
-        
-        # 3. SSM (Approximated by GRU)
-        if torch.is_autocast_enabled():
-            x_ssm, _ = self.gru(x_conv.float())
-            x_ssm = x_ssm.to(x_conv.dtype)
-        else:
-            x_ssm, _ = self.gru(x_conv)
-        
-        # 4. Gating
-        x_out = x_ssm * self.act(res)
-        
-        # 5. Out Project
-        return self.out_proj(x_out)
-
-    def step(self, x, h_prev=None):
-        """
-        Streaming Inference Step.
-        Args:
-           x: (B, 1, D) or (B, D)
-           h_prev: Hidden state (B, 1, d_inner) - GRU format
-        """
-        is_unbatched = x.dim() == 2
-        if is_unbatched:
-            x = x.unsqueeze(1) # (B, 1, D)
-            
-        B, L, D = x.shape
-        assert L == 1, "Step mode only supports sequence length 1"
-        
-        # 1. Project
-        x_and_res = self.in_proj(x)
-        x_in, res = x_and_res.split(self.d_inner, dim=-1)
-        
-        x_conv = self.act(x_in) 
-        
-        # 3. SSM (GRU Step)
-        if h_prev is None:
-            # GRU expects (num_layers, B, hidden)
-            h_prev = torch.zeros(1, B, self.d_inner, device=x.device)
-
-        if torch.is_autocast_enabled():
-            x_ssm, h_new = self.gru(x_conv.float(), h_prev.float())
-            x_ssm = x_ssm.to(x_conv.dtype)
-            h_new = h_new.to(x_conv.dtype)
-        else:
-            x_ssm, h_new = self.gru(x_conv, h_prev)
-        
-        # 4. Gating
-        x_out = x_ssm * self.act(res)
-        
-        # 5. Out Project
-        out = self.out_proj(x_out)
-        
-        return out, h_new
-
-
-from src.models.mamba2.block import Mamba2Block
-
 class MambaBlock(nn.Module):
     """
-    Wrapper that selects either the official Mamba-2 or the Fallback.
+    Wrapper for Mamba-2 Block.
     """
     def __init__(self, d_model, **kwargs):
         super().__init__()
-        # Use Mamba2Block by default as requested
         self.inner = Mamba2Block(dim=d_model, **kwargs)
 
     def forward(self, x):
