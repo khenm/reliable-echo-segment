@@ -30,6 +30,7 @@ dependencies = [
     "timm",
     "onnx>=1.16.0",
     "onnxscript>=0.1.0",
+    "onnxruntime",
     "causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.0/causal_conv1d-1.6.0+cu13torch26.01cxx11abiTRUE-cp312-cp312-linux_x86_64.whl",
     "mamba-ssm @ https://github.com/state-spaces/mamba/releases/download/v2.3.0/mamba_ssm-2.3.0+cu13torch26.01cxx11abiTRUE-cp312-cp312-linux_x86_64.whl",
 ]
