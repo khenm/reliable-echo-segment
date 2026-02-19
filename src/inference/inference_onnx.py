@@ -22,6 +22,8 @@ import json
 from pathlib import Path
 
 import cv2
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import onnxruntime as ort
@@ -714,10 +716,6 @@ def create_volume_plot_frame(
     Returns:
         RGB numpy array of the plot
     """
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    
     base_size = min(plot_width, plot_height)
     title_fontsize = max(6, int(base_size * 0.08))
     label_fontsize = max(5, int(base_size * 0.06))
@@ -777,9 +775,6 @@ def save_final_plot(volumes: list, wealths: list, output_path: str, ef_info: dic
     """
     Save the complete volume/wealth time series as a high-quality plot.
     """
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
     
     fig, ax1 = plt.subplots(figsize=(10, 4), dpi=150)
     
