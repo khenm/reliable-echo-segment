@@ -1,4 +1,6 @@
 import argparse
+import matplotlib
+matplotlib.use('Agg')
 import os
 from src.utils.config_loader import load_config
 from src.utils.dist import setup_dist, cleanup_dist
