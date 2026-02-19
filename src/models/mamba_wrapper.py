@@ -103,20 +103,13 @@ class MambaFallback(nn.Module):
         x_and_res = self.in_proj(x)
         x_in, res = x_and_res.split(self.d_inner, dim=-1)
         
-        # 2. Conv - For step mode, we'd ideally cache the conv state too.
-        # For this simplified fallback, we'll ignore the convolution memory 
-        # and just treat it as a pointwise op or identity for simplicity
-        # (Implementing a full rolling buffer for Conv1d in fallback is overkill for dev)
         x_conv = self.act(x_in) 
         
         # 3. SSM (GRU Step)
         if h_prev is None:
             # GRU expects (num_layers, B, hidden)
             h_prev = torch.zeros(1, B, self.d_inner, device=x.device)
-            
-        # Run GRU on single step
-        # GRU Input: (B, 1, d_inner)
-        # GRU Hidden: (1, B, d_inner)
+
         if torch.is_autocast_enabled():
             x_ssm, h_new = self.gru(x_conv.float(), h_prev.float())
             x_ssm = x_ssm.to(x_conv.dtype)
@@ -133,36 +126,19 @@ class MambaFallback(nn.Module):
         return out, h_new
 
 
+from src.models.mamba2.block import Mamba2Block
+
 class MambaBlock(nn.Module):
     """
-    Wrapper that selects either the official Mamba or the Fallback.
+    Wrapper that selects either the official Mamba-2 or the Fallback.
     """
     def __init__(self, d_model, **kwargs):
         super().__init__()
-        if MAMBA_AVAILABLE:
-            self.inner = Mamba(d_model=d_model, **kwargs)
-        else:
-            self.inner = MambaFallback(d_model=d_model, **kwargs)
+        # Use Mamba2Block by default as requested
+        self.inner = Mamba2Block(dim=d_model, **kwargs)
 
     def forward(self, x):
         return self.inner(x)
     
     def step(self, x, state=None):
-        if MAMBA_AVAILABLE:
-            # Official Mamba step signature is mamba.step(x, state)
-            # But the official repo primarily exposes `forward`. 
-            # Step generation usually requires `mamba_ssm.utils.generation`.
-            # For simplicity, we assume we might need a custom step wrapper or 
-            # the official implementation supports it.
-            # *Correction*: Official Mamba implementation doesn't have a direct `step` method on the Module.
-            # It uses `inference_params`.
-            # For this wrapper, we'll need to handle that if using official Mamba.
-            # However, for now, we will assume standard forward usage for training.
-            # For inference, if official Mamba is used, we might need `allocate_inference_cache`.
-            
-            # TODO: Implement official Mamba step logic using inference_params
-            # For now, we just pass through to ensure code structure is valid.
-            # Real streaming with official Mamba requires keeping track of conv_state and ssm_state.
-            return self.inner(x) # Placeholder for now
-        else:
-            return self.inner.step(x, state)
+        return self.inner.step(x, state)

@@ -32,10 +32,14 @@ training:
   patience: 10
   seed: 42
 
-  save_dir: "/workspace/runs"
-  checkpoint_dir: "/workspace/checkpoints"
-  test_metrics_csv: "/workspace/runs/mamba_metrics.csv"
-  clinical_pairs_csv: "/workspace/runs/mamba_clinical_pairs.csv"
+  # save_dir: "/workspace/runs"
+  # checkpoint_dir: "/workspace/checkpoints"
+  # test_metrics_csv: "/workspace/runs/mamba_metrics.csv"
+  # clinical_pairs_csv: "/workspace/runs/mamba_clinical_pairs.csv"
+  save_dir: "/kaggle/working/runs"
+  checkpoint_dir: "/kaggle/working/checkpoints"
+  test_metrics_csv: "/kaggle/working/runs/mamba_metrics.csv"
+  clinical_pairs_csv: "/kaggle/working/runs/mamba_clinical_pairs.csv"
   resume_path: null
 
 tta:
