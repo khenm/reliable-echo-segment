@@ -10,9 +10,9 @@ Usage:
     python3 scripts/inference.py --inference --model model.onnx --video input.avi
 """
 
+import os
+os.environ['MPLBACKEND'] = 'Agg'
 import argparse
-import matplotlib
-matplotlib.use('Agg')
 import sys
 import os
 

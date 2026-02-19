@@ -1,7 +1,6 @@
-import argparse
-import matplotlib
-matplotlib.use('Agg')
 import os
+os.environ['MPLBACKEND'] = 'Agg'
+import argparse
 import torch
 import pandas as pd
 from tqdm import tqdm

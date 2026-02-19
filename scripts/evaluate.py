@@ -1,7 +1,7 @@
-import argparse
-import matplotlib
-matplotlib.use('Agg')
 import os
+os.environ['MPLBACKEND'] = 'Agg'
+import argparse
+
 from src.utils.config_loader import load_config
 from src.utils.dist import setup_dist, cleanup_dist
 from src.registry import get_dataloaders
