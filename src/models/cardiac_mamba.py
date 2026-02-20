@@ -100,22 +100,24 @@ class CardiacMamba(nn.Module):
             features: (B*T, D) - Pooled feature vector for temporal model
         """
         # x: (N, C, H, W) where N = B*T
-        
-        # Extract features (list if features_only=True)
         enc_feats = self.encoder(x) 
-        bottleneck = enc_feats[-1] # Take the deepest feature map
+        bottleneck = enc_feats[-1]
         
         # Adapter
         adapted = self.adapter(bottleneck) # (N, hidden_dim, H', W')
         
         # Segmentation
         mask_logits = self.decoder(adapted) # (N, 1, H_out, W_out)
+        mask_probs = torch.sigmoid(mask_logits)
         
-        # Global Pooling for Temporal Model
-        # (N, D, H', W') -> (N, D)
-        pooled = F.adaptive_avg_pool2d(adapted, 1).flatten(1)
+        mask_probs_down = F.adaptive_avg_pool2d(mask_probs, adapted.shape[2:])
         
-        return mask_logits, pooled
+        weighted_adapted = adapted * mask_probs_down
+        pooled = F.adaptive_avg_pool2d(weighted_adapted, 1).flatten(1)
+        
+        raw_area = mask_probs.sum(dim=(2, 3))
+        
+        return mask_logits, pooled, raw_area
 
     def forward(self, x: torch.Tensor, lengths: torch.Tensor = None, **kwargs) -> dict:
         """
@@ -134,19 +136,21 @@ class CardiacMamba(nn.Module):
         x_flat = x.transpose(1, 2).reshape(B * T, C, H, W)
         
         # 1. Spatial Processing (Parallel over all frames)
-        mask_logits_flat, tokens_flat = self.forward_spatial(x_flat)
+        mask_logits_flat, tokens_flat, raw_area_flat = self.forward_spatial(x_flat)
         
         # Unfold time
         # mask_logits: (B, T, 1, H_out, W_out)
         mask_logits = mask_logits_flat.view(B, T, 1, *mask_logits_flat.shape[2:])
         # tokens: (B, T, D)
         tokens = tokens_flat.view(B, T, -1)
+        raw_area = raw_area_flat.view(B, T, -1)
         
         # 2. Temporal Processing (Mamba Parallel Scan)
         temporal_out = self.temporal_mamba(tokens) # (B, T, D)
         
         # 3. Heads
         vol_curve = F.softplus(self.vol_head(temporal_out)) # (B, T, 1) -> Positive volume
+        vol_curve = vol_curve * raw_area
         phase_logits = self.phase_head(temporal_out)        # (B, T, 3)
         
         # 4. Aggregation (EDV/ESV from curve)
@@ -191,7 +195,7 @@ class CardiacMamba(nn.Module):
             dict results, next_state
         """
         # 1. Spatial
-        mask_logits, token = self.forward_spatial(x)
+        mask_logits, token, raw_area = self.forward_spatial(x)
         # token: (B, D)
         
         # 2. Temporal Step
@@ -205,6 +209,7 @@ class CardiacMamba(nn.Module):
         
         # 3. Heads
         vol = F.softplus(self.vol_head(temporal_out)) # (B, 1)
+        vol = vol * raw_area
         phase = self.phase_head(temporal_out)         # (B, 3)
         
         return {

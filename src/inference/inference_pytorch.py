@@ -220,6 +220,8 @@ class StreamingPyTorchInference:
         
         masks_list = []
         features_list = []
+        volumes_list = []
+        phases_list = []
         
         T = frames.shape[0]
         
@@ -230,7 +232,11 @@ class StreamingPyTorchInference:
             if "mask_prob" in outputs:
                 masks_list.append(outputs["mask_prob"].squeeze()) 
             if "features" in outputs:
-                features_list.append(outputs["features"].squeeze()) 
+                features_list.append(outputs["features"].squeeze())
+            if "pred_vol" in outputs:
+                volumes_list.append(outputs["pred_vol"].squeeze())
+            if "pred_phase" in outputs:
+                phases_list.append(outputs["pred_phase"].squeeze())
                 
         mask_probs = np.stack(masks_list, axis=0) if masks_list else None
         binary_mask = (mask_probs > threshold).astype(np.uint8) if mask_probs is not None else None
@@ -240,7 +246,7 @@ class StreamingPyTorchInference:
         else:
             features = None
             
-        return binary_mask, mask_probs, features
+        return binary_mask, mask_probs, features, volumes_list, phases_list
 
     def predict(self, input_data: np.ndarray):
         """
@@ -248,10 +254,10 @@ class StreamingPyTorchInference:
         input_data: (1, 3, T, H, W)
         """
         frames_t = input_data[0].transpose(1, 0, 2, 3) # (T, 3, H, W)
-        _, mask_probs, features = self.segment_video(frames_t)
+        _, mask_probs, features, volumes, phases = self.segment_video(frames_t)
         mask_prob_out = mask_probs[np.newaxis, np.newaxis, :, :, :]
         features_out = features[np.newaxis, :, :] if features is not None else None
-        return mask_prob_out, features_out
+        return mask_prob_out, features_out, volumes, phases
 
 def run_inference_pytorch(
     config,
