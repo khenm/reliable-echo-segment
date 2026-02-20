@@ -207,22 +207,16 @@ def export_model(
     
     logger.info(f"Exporting to ONNX (opset {opset_version})...")
     
-    dynamic_shapes = {k: v for k, v in dynamic_axes.items() if k in input_names}
-    export_options = torch.onnx.ExportOptions(
-        opset_version=opset_version,
-        do_constant_folding=True,
-        dynamic_shapes=dynamic_shapes,
-        dynamo=True
-    )
-    
     torch.onnx.export(
         wrapped_model,
         dummy_inputs,
         output_path,
         export_params=True,
+        opset_version=opset_version,
+        do_constant_folding=True,
         input_names=input_names,
         output_names=output_names,
-        export_options=export_options
+        dynamic_axes=dynamic_axes,
     )
     
     logger.info(f"✅ Exported to {output_path}")

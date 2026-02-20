@@ -3,6 +3,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange, repeat
 from .ssd import mamba_chunk_scan_combined
 
 class Mamba2(nn.Module):
