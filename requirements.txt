@@ -1,5 +1,6 @@
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch
 numpy>=1.26.4
-torch>=2.3.0
 torchvision
 torchaudio
 monai[all]>=1.4.0
@@ -17,3 +18,5 @@ scikit-learn
 filelock>=3.15
 wandb
 timm
+onnx>=1.16.0
+onnxscript>=0.1.0

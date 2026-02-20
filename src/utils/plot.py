@@ -1,8 +1,9 @@
 import torch
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib as mpl
 import os
 from skimage.segmentation import find_boundaries
 from skimage import color
@@ -236,6 +237,13 @@ def plot_conformal_segmentation(video, core_mask, shadow_mask, target_mask=None,
         base_img = video[0, 0, frame_idx].detach().cpu().numpy()
     else:
          base_img = video[0, frame_idx].detach().cpu().numpy()
+
+    # Robust Normalization for Display
+    if base_img.max() > base_img.min():
+        base_img = (base_img - base_img.min()) / (base_img.max() - base_img.min())
+    else:
+        # Avoid division by zero for constant images (e.g. padding)
+        pass 
 
     # Core and Shadow inputs are expected to be tensors, likely (B, C, T, H, W) or similar
     # We will handle if they are passed as full tensors

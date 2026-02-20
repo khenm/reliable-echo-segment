@@ -14,7 +14,10 @@ from src.utils.logging import get_logger
 from src.utils.util_ import save_checkpoint, load_full_checkpoint
 from src.models.temporal import TemporalGate
 from src.utils.plot import plot_volume_debug
+from src.utils.dist import is_main_process, reduce_tensor, get_world_size, get_rank
+import torch.distributed as dist
 import wandb
+from src.tta.augmentations import SpectralNormalizer
 
 logger = get_logger()
 
@@ -50,7 +53,7 @@ class Trainer:
         self.is_unet_2d = (self.model_name in ["unet_tcm"])
         self.is_dual_stream = (self.model_name == "dual_stream")
         self.is_skeletal = (self.model_name == "skeletal_tracker")
-        self.is_segmentation = (self.model_name in ["segment_tracker", "temporal_segment_tracker"])
+        self.is_segmentation = (self.model_name in ["segment_tracker", "temporal_segment_tracker", "cardiac_mamba"])
 
     def _setup_optimization(self):
         # Temporal Gate
@@ -79,11 +82,22 @@ class Trainer:
         dev_type = self.device.type if hasattr(self.device, 'type') else str(self.device)
         self.scaler = torch.amp.GradScaler(device=dev_type, enabled=(dev_type == 'cuda'))
 
+        # DDP Wrapping
+        if dist.is_available() and dist.is_initialized():
+            if hasattr(self.model, 'to'):
+                self.model = self.model.to(self.device)
+            self.model = torch.nn.parallel.DistributedDataParallel(
+                self.model, 
+                device_ids=[self.device] if self.device.type == 'cuda' else None,
+                find_unused_parameters=False
+            )
+            logger.info(f"Wrapped model in DDP (Rank {get_rank()})")
+
     def _setup_metrics(self):
         if self.num_classes == 1:
             self.post_pred = AsDiscrete(threshold=0.5)
             if 'dice' in self.metrics:
-                self.metrics['dice'] = DiceMetric(include_background=True, reduction="mean")
+                self.metrics['dice'] = DiceMetric(include_background=False, reduction="mean")
         else:
             self.post_pred = AsDiscrete(argmax=True, to_onehot=self.num_classes)
 
@@ -100,6 +114,10 @@ class Trainer:
         logger.info(f"Starting training from epoch {start_ep}")
         
         for ep in range(start_ep, epochs + 1):
+            # Set epoch for DistributedSampler to ensure shuffling
+            if hasattr(self.ld_tr, 'sampler') and hasattr(self.ld_tr.sampler, 'set_epoch'):
+                self.ld_tr.sampler.set_epoch(ep)
+                
             avg_loss, loss_comps = self._run_epoch(ep, epochs)
             val_result = self._validate()
             
@@ -125,7 +143,7 @@ class Trainer:
     def _run_epoch(self, ep, max_ep):
         self.model.train()
         run_loss = 0.0
-        loss_components = {key: 0.0 for key in self.criterions.keys()}
+        loss_components = {}
         
         pbar = tqdm(self.ld_tr, desc=f"Epoch {ep}/{max_ep}", mininterval=2.0)
         self.opt.zero_grad(set_to_none=True)
@@ -139,30 +157,38 @@ class Trainer:
             
             # Step optimizer every accum_steps
             if (batch_idx + 1) % self.accum_steps == 0:
-                self._debug_gradients(ep)
                 self.scaler.step(self.opt)
                 self.scaler.update()
                 self.opt.zero_grad(set_to_none=True)
             
             run_loss += loss.item()
             for k, v in batch_comps.items():
-                if k in loss_components:
-                    loss_components[k] += v
+                if k not in loss_components:
+                    loss_components[k] = 0.0
+                loss_components[k] += v
             
             # Update Pbar
             postfix = {"loss": f"{loss.item():.4f}"}
             postfix.update({k: f"{v:.4f}" for k, v in batch_comps.items()})
             pbar.set_postfix(postfix)
 
-            if wandb.run is not None:
+            if is_main_process() and wandb.run is not None:
                 wandb.log({"train/loss": loss.item(), **{f"train/{k}": v for k, v in batch_comps.items()}})
 
         # Handle remaining gradients if total batches not divisible by accum_steps
         if len(self.ld_tr) % self.accum_steps != 0:
-            self._debug_gradients(ep)
             self.scaler.step(self.opt)
             self.scaler.update()
             self.opt.zero_grad(set_to_none=True)
+
+        # Sync metrics across processes
+        if dist.is_available() and dist.is_initialized():
+             run_loss_t = torch.tensor(run_loss, device=self.device)
+             run_loss = reduce_tensor(run_loss_t).item()
+             
+             for k in loss_components:
+                 comp_t = torch.tensor(loss_components[k], device=self.device)
+                 loss_components[k] = reduce_tensor(comp_t).item()
 
         avg_loss = run_loss / len(self.ld_tr)
         avg_comps = {k: v / len(self.ld_tr) for k, v in loss_components.items()}
@@ -198,7 +224,9 @@ class Trainer:
         mask_logits = outputs['mask_logits']
         pred_edv = outputs['pred_edv']
         pred_esv = outputs['pred_esv']
+        pred_esv = outputs['pred_esv']
         pred_ef = outputs['pred_ef']
+        pred_phase = outputs.get('pred_phase')
 
         loss = 0.0
         comps = {}
@@ -219,8 +247,22 @@ class Trainer:
 
             # Check if loss function accepts frames (TemporalWeakSegLoss)
             loss_fn = self.criterions['segmentation']
-            # Pass pred_ef for supervision
-            if hasattr(loss_fn, 'cycle_loss'):
+            
+            if hasattr(loss_fn, 'volume_weight'): # Identify our custom loss
+                 l_seg, c_dict = loss_fn(
+                    mask_logits, 
+                    target_masks, 
+                    pred_ef, 
+                    ef_target, 
+                    frame_mask, 
+                    frames=imgs,
+                    target_edv=edv_target,
+                    target_esv=esv_target,
+                    pred_edv=pred_edv,
+                    pred_esv=pred_esv,
+                    pred_phase=pred_phase
+                )
+            elif hasattr(loss_fn, 'cycle_loss'):
                 l_seg, c_dict = loss_fn(
                     mask_logits, target_masks, pred_ef, ef_target, frame_mask, imgs
                 )
@@ -231,23 +273,6 @@ class Trainer:
             loss += l_seg
             comps['segmentation'] = l_seg.item()
             comps.update({k: v.item() for k, v in c_dict.items()})
-            
-        # 2. Direct Volume Regression Loss (L1 on pred_edv/esv)
-        w_vol = self.cfg.get('loss', {}).get('weights', {}).get('volume', 0.0)
-        if w_vol > 0:
-            valid_vol = (edv_target > 0) & (esv_target > 0)
-            if valid_vol.any():
-                l_edv = F.l1_loss(pred_edv[valid_vol], edv_target[valid_vol])
-                l_esv = F.l1_loss(pred_esv[valid_vol], esv_target[valid_vol])
-                loss += w_vol * (l_edv + l_esv)
-                comps['vol_edv'] = l_edv.item()
-                comps['vol_esv'] = l_esv.item()
-                
-        # 3. EF Regression Loss (Direct on physical EF)
-        if 'ef' in self.criterions:
-             l_ef = self.criterions['ef'](pred_ef, ef_target)
-             loss += l_ef
-             comps['ef'] = l_ef.item()
 
         if 'distillation' in self.criterions:
             hidden_features = outputs['hidden_features']
@@ -435,9 +460,9 @@ class Trainer:
 
         outputs = self.model(imgs, lengths=lengths)
         mask_logits = outputs['mask_logits']
-        pred_ef = outputs['pred_ef']
-        pred_edv = outputs['pred_edv']
-        pred_esv = outputs['pred_esv']
+        pred_ef = outputs['pred_ef'].view(-1, 1)
+        pred_edv = outputs['pred_edv'].view(-1, 1)
+        pred_esv = outputs['pred_esv'].view(-1, 1)
 
         # Targets
         ef_target = batch.get("target_ef").to(self.device).view(-1, 1) if "target_ef" in batch else batch.get("target").to(self.device).view(-1, 1)
@@ -597,6 +622,12 @@ class Trainer:
     # --- Utils ---
     
     def _save_checkpoint(self, ep, metric, is_best=False):
+        if not is_main_process():
+            return
+            
+        # Unwrap DDP model
+        model_to_save = self.model.module if hasattr(self.model, 'module') else self.model
+
         rng_state = {
             "torch": torch.get_rng_state(),
             "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
@@ -605,7 +636,7 @@ class Trainer:
         }
         state = {
             'epoch': ep,
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': model_to_save.state_dict(),
             'optimizer_state_dict': self.opt.state_dict(),
             'scaler_state_dict': self.scaler.state_dict(),
             'rng_state': rng_state,
@@ -620,6 +651,8 @@ class Trainer:
         return load_full_checkpoint(path, self.model, optimizer=self.opt, scaler=self.scaler, device=self.device, load_rng=True)
 
     def _log_epoch(self, ep, loss, comps, val_res):
+        if not is_main_process():
+            return
         if isinstance(ep, str):
             msg = f"{ep} loss={loss:.4f} " + " ".join([f"{k}={v:.4f}" for k, v in comps.items()])
         else:
@@ -674,11 +707,6 @@ class Trainer:
                 log_dict["val/dice"] = val_res
             wandb.log(log_dict)
 
-    def _debug_gradients(self, ep):
-        # Optional gradient tracing
-        if self.cfg.get('losses', {}).get('debug', {}).get('trace_gradients'):
-            pass # Simplified out for now.
-
     def evaluate_test(self):
         self.model.eval()
         for m in self.metrics.values(): m.reset()
@@ -717,3 +745,83 @@ class Trainer:
     def get_examples(self, num_examples=3):
         # Placeholder for visualization logic
         return []
+
+    def compute_golden_stats(self):
+        """
+        Phase 2: Offline 'Golden' Calibration.
+        Iterates over Training Loader to compute:
+        1. Average Landmarks (Apex, Basal-L, Basal-R) -> golden_landmarks.pt
+        2. Average Fourier Amplitude -> golden_amplitude.pt
+        """
+        logger.info("Starting Golden Stats Calibration...")
+        self.model.eval()
+        
+        # Accumulators
+        total_landmarks = None
+        landmark_counts = None
+        
+        total_amplitude = None
+        amp_count = 0
+        
+        normalizer = SpectralNormalizer()
+        
+        # Iterate over Training Data
+        # We use a progress bar
+        pbar = tqdm(self.ld_tr, desc="Calibrating Golden Stats")
+        
+        with torch.no_grad():
+            for batch in pbar:
+                # 1. Geometry (Keypoints)
+                kps = batch.get("keypoints")
+                if kps is not None:
+                    kps = kps.to(self.device)
+                    # Shape: (B, N, 2) usually
+                    if total_landmarks is None:
+                        total_landmarks = torch.zeros_like(kps[0])
+                        landmark_counts = torch.zeros(kps.shape[1], device=self.device)
+                    
+                    # Sum over batch
+                    total_landmarks += kps.sum(dim=0)
+                    landmark_counts += kps.shape[0]
+
+                # 2. Texture (Amplitude)
+                # Use video or image
+                imgs = batch.get("video")
+                if imgs is None: imgs = batch.get("image")
+                
+                if imgs is not None:
+                    imgs = imgs.to(self.device)
+                    # Extract Amplitude
+                    amp = normalizer.extract_amplitude(imgs)
+                    
+                    # Handle shapes: (B, C, T, H, W) -> Average over B and T
+                    if amp.ndim == 5:
+                        # Average over T first
+                        amp_frame_avg = amp.mean(dim=2) # (B, C, H, W)
+                        amp_batch_sum = amp_frame_avg.sum(dim=0) # (C, H, W)
+                        curr_count = imgs.shape[0]
+                    else:
+                        # (B, C, H, W)
+                        amp_batch_sum = amp.sum(dim=0)
+                        curr_count = imgs.shape[0]
+                        
+                    if total_amplitude is None:
+                        total_amplitude = torch.zeros_like(amp_batch_sum)
+                    
+                    total_amplitude += amp_batch_sum
+                    amp_count += curr_count
+        
+        # Compute Averages and Save
+        if total_landmarks is not None:
+             # Avoid div by zero
+            golden_landmarks = total_landmarks / landmark_counts.view(-1, 1).clamp(min=1)
+            save_path = os.path.join(self.vault_dir, "golden_landmarks.pt")
+            torch.save(golden_landmarks, save_path)
+            logger.info(f"Saved Golden Landmarks to {save_path}")
+            
+        if total_amplitude is not None:
+            golden_amplitude = total_amplitude / amp_count
+            save_path = os.path.join(self.vault_dir, "golden_amplitude.pt")
+            torch.save(golden_amplitude, save_path)
+            logger.info(f"Saved Golden Amplitude to {save_path}")
+

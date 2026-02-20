@@ -219,6 +219,7 @@ __marimo__/
 .ipynb_checkpoints/
 checkpoints
 runs
+
 # Agent files
 .agent/
 

@@ -1,33 +1,117 @@
+import logging
+from abc import ABC, abstractmethod
+from typing import Any, Dict, List, Optional, Tuple, Union
+import numpy as np
 import torch
 import torch.nn.functional as F
-import numpy as np
-from typing import List, Tuple, Optional, Dict, Union, Any
-import logging
 from tqdm import tqdm
-from abc import ABC, abstractmethod
-
 from src.registry import register_tta_component
 
 logger = logging.getLogger(__name__)
 
+
+def extract_batch_data(batch: Any, device: torch.device) -> Tuple[torch.Tensor, Any, Optional[torch.Tensor]]:
+    """
+    Standardizes data extraction from various batch formats.
+    
+    Returns:
+        inputs, targets, frame_mask (optional)
+    """
+    inputs = None
+    targets = None
+    frame_mask = None
+
+    if isinstance(batch, dict):
+        # Extract Inputs
+        if "video" in batch: 
+            inputs = batch["video"]
+        elif "image" in batch: 
+            inputs = batch["image"]
+        else: 
+            inputs = list(batch.values())[0]
+
+        # Extract Targets
+        if "target" in batch: 
+            targets = batch["target"]
+        elif "label" in batch: 
+            targets = batch["label"]
+        elif "ef" in batch: 
+            targets = batch["ef"]
+        elif "EF" in batch: 
+            targets = batch["EF"]
+        else:
+            # Fallback for target extraction
+            vals = list(batch.values())
+            targets = vals[1] if len(vals) > 1 else None
+
+        frame_mask = batch.get("frame_mask")
+
+    elif isinstance(batch, (list, tuple)):
+        inputs, targets = batch[0], batch[1]
+        if len(batch) > 2:
+            frame_mask = batch[2]
+            
+    else:
+        raise ValueError(f"Unsupported batch type: {type(batch)}")
+
+    if inputs is not None:
+        inputs = inputs.to(device)
+    if targets is not None:
+        targets = targets.to(device)
+    if frame_mask is not None:
+        frame_mask = frame_mask.to(device)
+        
+    return inputs, targets, frame_mask
+
+
+def parse_model_output(out: Any, task: str = 'any') -> torch.Tensor:
+    """
+    Extracts the relevant tensor from complex model outputs (tuple, dict, etc).
+    """
+    if isinstance(out, torch.Tensor):
+        return out
+        
+    if isinstance(out, tuple):
+        # Heuristic Search
+        seg = None
+        reg = None
+        
+        for item in out:
+            if isinstance(item, torch.Tensor):
+                if item.ndim >= 4: 
+                    seg = item
+                elif item.ndim == 2 and item.shape[1] == 1:
+                    reg = item
+
+        if task == 'segmentation':
+            if seg is not None: return seg
+            return out[0] if len(out) > 0 else out
+            
+        elif task == 'regression':
+            if reg is not None: return reg
+            return out[1] if len(out) > 1 else out[0]
+            
+        # Default fallback
+        return out[0]
+
+    if isinstance(out, dict):
+        if task == 'segmentation':
+            return out.get("mask_logits", out.get("logits", out.get("segmentation")))
+        elif task == 'regression':
+            return out.get("pred_ef", out.get("ef", out.get("regression")))
+            
+    return out
+
+
 class BaseConformalCalibrator(ABC):
-    """
-    Abstract Base Class for Conformal Calibrators.
-    """
+    """Abstract Base Class for Conformal Calibrators."""
+    
     def __init__(self, alpha: float = 0.05, gamma: float = 0.01, num_classes: Optional[int] = None, **kwargs: Any):
-        """
-        Args:
-            alpha (float): Target error rate (e.g., 0.05 for 95% coverage).
-            gamma (float): Step size for ACI update.
-            num_classes (int, optional): Total number of classes.
-            **kwargs: Ignored additional arguments.
-        """
         self.target_alpha = alpha
         self.current_alpha = alpha
         self.gamma = gamma
         self.num_classes = num_classes
         
-        # Calibration storage
         self.cal_scores = np.array([])
         self.q_hat: Optional[float] = None
         
@@ -35,27 +119,10 @@ class BaseConformalCalibrator(ABC):
 
     @abstractmethod
     def calibrate(self, valid_loader: torch.utils.data.DataLoader, model: torch.nn.Module, device: torch.device) -> None:
-        """
-        Phase 4a: Offline Calibration (Conformalize the Source).
-        Compute non-conformity scores on validation data.
-        """
         pass
 
     @abstractmethod
     def predict(self, logits: torch.Tensor, martingale_stable: bool = True, audit_score: Optional[float] = None, audit_epsilon: Optional[float] = None) -> Tuple[Any, float]:
-        """
-        Phase 4b: Online Prediction with ACI.
-        
-        Args:
-            logits (torch.Tensor): Prediction logits.
-            martingale_stable (bool): Flag from Auditor. If False, freeze adaptation/ACI.
-            audit_score (float, optional): Current risk score from SelfAuditor.
-            audit_epsilon (float, optional): Expected risk threshold.
-        
-        Returns:
-            prediction (Any): Conformal prediction (Sets, Interval, or Mask).
-            q_val (float): The threshold used.
-        """
         pass
     
     def quantile_from_alpha(self, alpha: float) -> float:
@@ -67,23 +134,16 @@ class BaseConformalCalibrator(ABC):
         q_level = min(max(q_level, 0.0), 1.0)
         return np.quantile(self.cal_scores, q_level, method='linear')
 
-    def _update_alpha(self, error_rate: float):
-        """Standard ACI update rule."""
-        # Update Rule: alpha_{t+1} = alpha_t - gamma * (err - target_alpha)
-        # We subtract because if err > target, we are under-covering, so we need wider intervals.
-        # Wider intervals correspond to higher quantile (1-alpha), which means smaller alpha.
+    def _update_alpha(self, error_rate: float) -> None:
+        """Adaptive Conformal Inference (ACI) update rule."""
         self.current_alpha = self.current_alpha - self.gamma * (error_rate - self.target_alpha)
-        
-        # Clip alpha to sensible range [0.001, 1.0]
         self.current_alpha = np.clip(self.current_alpha, 0.001, 0.999)
 
 
 @register_tta_component("classification_calibrator")
 class ClassificationCalibrator(BaseConformalCalibrator):
-    """
-    Implements Conformal Prediction for classification (Prediction Sets).
-    Uses Adaptive Conformal Inference (ACI) for online adaptation.
-    """
+    """Conformal Prediction for classification (Prediction Sets) using ACI."""
+
     def __init__(self, alpha: float = 0.05, gamma: float = 0.01, num_classes: int = 10, **kwargs: Any):
         super().__init__(alpha=alpha, gamma=gamma, num_classes=num_classes, **kwargs)
 
@@ -93,37 +153,20 @@ class ClassificationCalibrator(BaseConformalCalibrator):
         scores_list = []
         
         with torch.no_grad():
-            pbar = tqdm(valid_loader, desc="Conformal Calibration")
-            for batch in pbar:
-                # Handle varying data loader return formats
-                if isinstance(batch, dict):
-                    if "video" in batch: inputs = batch["video"]
-                    elif "image" in batch: inputs = batch["image"]
-                    else: inputs = list(batch.values())[0]
-
-                    if "target" in batch: targets = batch["target"]
-                    elif "label" in batch: targets = batch["label"]
-                    else: targets = list(batch.values())[1]
-                elif isinstance(batch, (list, tuple)):
-                    inputs, targets = batch[0], batch[1]
-                else:
-                    raise ValueError("DataLoader must return tuple/list or dict")
+            for batch in tqdm(valid_loader, desc="Calibration"):
+                inputs, targets, _ = extract_batch_data(batch, device)
+                if targets is not None:
+                    targets = targets.long()
                 
-                inputs, targets = inputs.to(device), targets.to(device, dtype=torch.long)
-                
-                # Forward pass
                 out = model(inputs)
-                logits = out[0] if isinstance(out, tuple) else out
+                logits = parse_model_output(out)
                 
                 probs = F.softmax(logits, dim=1)
                 
                 # Get probability of the TRUE class
                 true_class_probs = probs.gather(1, targets.unsqueeze(1)).squeeze()
-                
-                # Score = 1 - probability of true class
                 batch_scores = 1.0 - true_class_probs
                 
-                # Ensure 1D for storage
                 batch_scores_np = batch_scores.cpu().numpy()
                 if batch_scores_np.ndim == 0:
                     batch_scores_np = np.expand_dims(batch_scores_np, axis=0)
@@ -136,7 +179,6 @@ class ClassificationCalibrator(BaseConformalCalibrator):
 
         self.cal_scores = np.concatenate(scores_list)
         
-        # Calculate initial quantile
         n = len(self.cal_scores)
         q_level = np.ceil((n + 1) * (1 - self.target_alpha)) / n
         q_level = min(max(q_level, 0.0), 1.0)
@@ -145,11 +187,6 @@ class ClassificationCalibrator(BaseConformalCalibrator):
         logger.info(f"Calibration Complete. N={n}, Initial Quantile (q_hat): {self.q_hat:.4f}")
 
     def predict(self, logits: torch.Tensor, martingale_stable: bool = True, audit_score: Optional[float] = None, audit_epsilon: Optional[float] = None) -> Tuple[List[List[int]], float]:
-        """
-        Returns:
-            prediction_sets (List[List[int]]): List of class indices for each sample.
-            q_val (float): The threshold used.
-        """
         probs = F.softmax(logits, dim=1)
         batch_size = probs.shape[0]
         prediction_sets = []
@@ -163,7 +200,6 @@ class ClassificationCalibrator(BaseConformalCalibrator):
 
         # 2. Construct Sets
         prob_threshold = 1.0 - current_q
-        
         pseudo_labels = torch.argmax(probs, dim=1)
         
         prob_np = probs.detach().cpu().numpy()
@@ -182,66 +218,29 @@ class ClassificationCalibrator(BaseConformalCalibrator):
                 if p_label not in prediction_sets[i]:
                     avg_err += 1.0
             avg_err /= batch_size
-            
             self._update_alpha(avg_err)
 
         return prediction_sets, current_q
-    
-    # Alias for backward compatibility (if called directly)
-    def predict_interval(self, logits, martingale_stable=True, audit_score=None, audit_epsilon=None):
-        return self.predict(logits, martingale_stable, audit_score, audit_epsilon)
 
 
 @register_tta_component("regression_calibrator")
 class RegressionCalibrator(BaseConformalCalibrator):
-    """
-    Implements Conformal Prediction for Regression (EF Estimation).
-    Outputs a prediction interval [y_hat - q, y_hat + q].
-    """
-    def __init__(self, alpha: float = 0.05, gamma: float = 0.01, **kwargs: Any):
-        super().__init__(alpha=alpha, gamma=gamma, **kwargs)
+    """Conformal Prediction for Regression (EF Estimation)."""
 
-    def calibrate(self, valid_loader, model, device):
+    def calibrate(self, valid_loader: torch.utils.data.DataLoader, model: torch.nn.Module, device: torch.device) -> None:
         logger.info("Starting Regression Conformal Calibration...")
         model.eval()
         residuals = []
         
         with torch.no_grad():
             for batch in valid_loader:
-                # Handle varying data formats simply for regression (assuming [0]=input, [1]=target)
-                if isinstance(batch, dict):
-                     print(f"DEBUG: RegCal Batch Keys: {list(batch.keys())}")
-                     if "video" in batch: inputs = batch["video"]
-                     elif "image" in batch: inputs = batch["image"]
-                     else: inputs = list(batch.values())[0]
-
-                     if "target" in batch: targets = batch["target"]
-                     elif "ef" in batch: targets = batch["ef"]
-                     elif "EF" in batch: targets = batch["EF"]
-                     else: 
-                         # Try index 1 of values likely
-                         vals = list(batch.values())
-                         targets = vals[1] if len(vals) > 1 else vals[0]
-                elif isinstance(batch, (list, tuple)):
-                    inputs, targets = batch[0], batch[1]
+                inputs, targets, _ = extract_batch_data(batch, device)
                 
-                inputs, targets = inputs.to(device), targets.to(device)
-                
-                preds = model(inputs)
-                if isinstance(preds, tuple): 
-                    # Smart output extraction if no shim
-                    found = False
-                    for item in preds:
-                        if isinstance(item, torch.Tensor) and item.ndim == 2 and item.shape[1] == 1:
-                            preds = item
-                            found = True
-                            break
-                    if not found: preds = preds[0]
+                preds = parse_model_output(model(inputs), task='regression')
                 
                 # Non-conformity score: Absolute Error
                 batch_residuals = torch.abs(preds.squeeze() - targets.squeeze())
                 
-                # Ensure 1D for iterable extension
                 batch_residuals_np = batch_residuals.cpu().numpy()
                 if batch_residuals_np.ndim == 0:
                      batch_residuals_np = np.expand_dims(batch_residuals_np, axis=0)
@@ -249,11 +248,11 @@ class RegressionCalibrator(BaseConformalCalibrator):
                 residuals.extend(batch_residuals_np)
                 
         self.cal_scores = np.array(residuals)
-        
         n = len(self.cal_scores)
+        
         if n == 0:
              logger.warning("Regression calibration empty.")
-             self.q_hat = 0.5 # Default fallback
+             self.q_hat = 0.5
              return
 
         q_level = np.ceil((n + 1) * (1 - self.target_alpha)) / n
@@ -262,106 +261,65 @@ class RegressionCalibrator(BaseConformalCalibrator):
         logger.info(f"Calibration Complete. Margin (q_hat): +/- {self.q_hat:.4f}")
 
     def predict(self, logits: torch.Tensor, martingale_stable: bool = True, audit_score: Optional[float] = None, audit_epsilon: Optional[float] = None) -> Tuple[Dict[str, Any], float]:
-        """Returns [lower_bound, upper_bound] for EF."""
         preds = logits.detach().cpu().numpy().squeeze()
-        if preds.ndim == 0: preds = np.array([preds]) # Handle batch size 1 scalar
+        if preds.ndim == 0: 
+            preds = np.array([preds])
         
-        # Determine Threshold
         if self.q_hat is None:
              current_q = 0.5
         elif len(self.cal_scores) == 0:
              current_q = self.q_hat
         else:
-             # Use dynamic quantile based on ACI alpha
              current_q = self.quantile_from_alpha(self.current_alpha) 
         
-        # Create Intervals
         lower_bounds = np.maximum(0.0, preds - current_q)
-        upper_bounds = np.minimum(1.0, preds + current_q) # Assuming normalized target
+        upper_bounds = np.minimum(1.0, preds + current_q)
         
         prediction_intervals = list(zip(lower_bounds, upper_bounds))
 
-        # 3. ACI Update via Auditor Proxy
         if martingale_stable and audit_score is not None and audit_epsilon is not None:
-            # Using a binary proxy for robustness
             proxy_error = 1.0 if audit_score > audit_epsilon else 0.0
-            
-            logger.info(f"DEBUG: RegCal Predict - AuditScore={audit_score:.4f}, Epsilon={audit_epsilon:.4f}, ProxyErr={proxy_error}")
-            
-            prev_alpha = self.current_alpha
             self._update_alpha(proxy_error)
-            logger.info(f"DEBUG: Alpha Update: {prev_alpha:.4f} -> {self.current_alpha:.4f}")
 
         return {'intervals': prediction_intervals, 'predictions': preds.tolist()}, current_q
-
-    def predict_interval(self, logits, martingale_stable=True, audit_score=None, audit_epsilon=None):
-        return self.predict(logits, martingale_stable, audit_score, audit_epsilon)
 
 
 @register_tta_component("segmentation_calibrator")
 class SegmentationCalibrator(BaseConformalCalibrator):
-    """
-    Outputs a Core Mask (high confidence) and a Shadow Mask (uncertainty zone).
-    """
-    def __init__(self, alpha: float = 0.05, gamma: float = 0.01, **kwargs: Any):
-        super().__init__(alpha=alpha, gamma=gamma, **kwargs)
+    """Outputs a Core Mask (high confidence) and a Shadow Mask (uncertainty zone)."""
 
-    def calibrate(self, valid_loader, model, device):
-        """
-        Pixel-wise calibration.
-        Score s_ij = 1 - p_ij(y_ij)
-        """
+    def calibrate(self, valid_loader: torch.utils.data.DataLoader, model: torch.nn.Module, device: torch.device) -> None:
         logger.info("Starting Segmentation Conformal Calibration (Pixel-wise)...")
         model.eval()
         scores_list = []
         
-        # Limit calibration samples to avoid OOM for segmentation
-        # max_samples = 100 
-        # curr_samples = 0
-        
         with torch.no_grad():
             for batch in valid_loader:
-                inputs = batch["video"].to(device)
-                targets = batch["label"].to(device)      # Shape: (B, 1, T, H, W)
-                frame_mask = batch["frame_mask"].to(device) # Shape: (B, T)
+                inputs, targets, frame_mask = extract_batch_data(batch, device)
+                if targets is None or frame_mask is None:
+                    continue
                 
-                logits = model(inputs)
-                if isinstance(logits, tuple): 
-                    # Heuristic: Find first tensor with ndim >= 4 (B, C, T, H, W) or (B, C, H, W)
-                    found = False
-                    for item in logits:
-                        if isinstance(item, torch.Tensor) and item.ndim >= 4:
-                            logits = item
-                            found = True
-                            break
-                    if not found:
-                         # Fallback for R2Plus1D legacy if 5D check failed (maybe 4D?)
-                         logits = logits[1] if len(logits) > 1 else logits[0]
+                logits = parse_model_output(model(inputs), task='segmentation')
+                probs = torch.sigmoid(logits)
                 
-                probs = torch.sigmoid(logits) # (B, 1, T, H, W)
-                
-                # 2. Filter out UNLABELED frames using the frame_mask
-                # Flatten the batch and time dimensions: (B*T, 1, H, W)
+                # Filter out UNLABELED frames
                 _, C, _, H, W = probs.shape
                 probs_flat = probs.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
                 targets_flat = targets.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
                 frame_mask_flat = frame_mask.view(-1)
                 
-                # Get indices of frames that actually have ground truth
                 valid_indices = torch.nonzero(frame_mask_flat).squeeze()
-                
                 if valid_indices.numel() == 0:
-                    continue # Skip video if no labeled frames found
+                    continue
                     
                 probs_valid = probs_flat[valid_indices]
                 targets_valid = targets_flat[valid_indices]
 
-                # 3. Calculate Conformal Scores on VALID pixels only
                 # Score = 1 - p(true_class)
                 p_true = torch.where(targets_valid > 0.5, probs_valid, 1.0 - probs_valid)
                 batch_scores = 1.0 - p_true
                 
-                # Subsample pixels to prevent Out-Of-Memory (OOM)
+                # Subsample to avoid OOM
                 flat_scores = batch_scores.flatten()
                 if flat_scores.numel() > 10000:
                     idx = torch.randperm(flat_scores.numel())[:10000]
@@ -370,24 +328,15 @@ class SegmentationCalibrator(BaseConformalCalibrator):
                 scores_list.append(flat_scores.cpu().numpy())
 
     def predict(self, logits: torch.Tensor, martingale_stable: bool = True, audit_score: Optional[float] = None, audit_epsilon: Optional[float] = None) -> Tuple[Tuple[torch.Tensor, torch.Tensor], float]:
-        """
-        Returns:
-            (core_mask, shadow_mask): Tensors
-            q_val: Threshold
-        """
-        probs = torch.sigmoid(logits) # (B, C, H, W)
-        
-        # 1. Determine Threshold (Dynamic Feedback Loop)
+        probs = torch.sigmoid(logits)
         base_q = self.q_hat if self.q_hat is not None else 0.1
         
         sensitivity = 0.05
         if martingale_stable and audit_score is not None:
-            # Dynamic relaxation
             current_q = base_q * (1.0 + sensitivity * np.log1p(audit_score))
         else:
             current_q = 0.99
 
-        # Safety Cap
         current_q = min(current_q, 0.99)
         
         upper_thresh = 1.0 - current_q
@@ -398,101 +347,62 @@ class SegmentationCalibrator(BaseConformalCalibrator):
         
         return (core_mask, shadow_mask), current_q
 
-    def predict_mask(self, logits, martingale_stable=True, audit_score=None, audit_epsilon=None):
-        return self.predict(logits, martingale_stable, audit_score, audit_epsilon)
 
-# Alias for backward compatibility
-ConformalCalibrator = ClassificationCalibrator
+class _SmartShim(torch.nn.Module):
+    """Shim to present a uniform interface for sub-calibrators."""
+    def __init__(self, model: torch.nn.Module, task: str):
+        super().__init__()
+        self.model = model
+        self.task = task
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.model(x)
+        return parse_model_output(out, self.task)
+
 
 @register_tta_component("audit_calibrator")
 class AuditCalibrator(BaseConformalCalibrator):
-    """
-    Wraps multiple calibrators for hybrid models (e.g., Regression + Segmentation).
-    Returns a dictionary of predictions: {'regression': ..., 'segmentation': ...}
-    """
+    """Wraps multiple calibrators for hybrid models."""
+
     def __init__(self, calibrators: Dict[str, BaseConformalCalibrator], **kwargs: Any):
         super().__init__(**kwargs)
         self.calibrators = calibrators
         logger.info(f"Initialized AuditCalibrator with: {list(calibrators.keys())}")
 
-    def calibrate(self, valid_loader, model, device):
-        print("DEBUG: Starting Audit (Hybrid) Calibration...")
+    def calibrate(self, valid_loader: torch.utils.data.DataLoader, model: torch.nn.Module, device: torch.device) -> None:
+        logger.info("Starting Audit (Hybrid) Calibration...")
         for name, cal in self.calibrators.items():
-            print(f"DEBUG: Calibrating sub-component: {name}")
-            # Note: We rely on the sub-calibrator to handle the model's output correctly.
-            # However, standard calibrators expect model(x) -> logits.
-            # If model returns tuple ((ef, seg), features) or (ef, seg), we might need to wrap/shim the model
-            # so the sub-calibrator sees what it expects.
-            
-            # Smart Shim handles tuple unpacking based on shape
-            shim_model = self._create_smart_shim(model, name)
+            logger.info(f"Calibrating sub-component: {name}")
+            shim_model = _SmartShim(model, name)
             cal.calibrate(valid_loader, shim_model, device)
             
     def predict(self, logits: Any, martingale_stable: bool = True, audit_score: Optional[float] = None, audit_epsilon: Optional[float] = None) -> Tuple[Dict[str, Any], float]:
-        """
-        Args:
-            logits: Tuple (ef_pred, seg_pred)
-        """
         results = {}
-        # We assume order matches what we expect or we explicitly unpack
-        # logits is (ef, seg)
         
-        if not isinstance(logits, (tuple, list)):
-            raise ValueError("AuditCalibrator expects tuple/list logits.")
-            
-        # Hardcoded for now based on R2Plus1D dual output: (ef, seg)
+        ef_logit = None
+        seg_logit = None
+        
+        if isinstance(logits, (tuple, list)):
+            ef_logit = logits[0]
+            seg_logit = logits[1]
+        elif isinstance(logits, dict):
+             ef_logit = logits.get("pred_ef", logits.get("ef"))
+             seg_logit = logits.get("mask_logits", logits.get("segmentation"))
         
         q_vals = []
         
-        if 'regression' in self.calibrators:
-            res, q = self.calibrators['regression'].predict(logits[0], martingale_stable, audit_score, audit_epsilon)
+        if 'regression' in self.calibrators and ef_logit is not None:
+            res, q = self.calibrators['regression'].predict(ef_logit, martingale_stable, audit_score, audit_epsilon)
             results['regression'] = res
             q_vals.append(q)
             
-        if 'segmentation' in self.calibrators:
-            res, q = self.calibrators['segmentation'].predict(logits[1], martingale_stable, audit_score, audit_epsilon)
+        if 'segmentation' in self.calibrators and seg_logit is not None:
+            res, q = self.calibrators['segmentation'].predict(seg_logit, martingale_stable, audit_score, audit_epsilon)
             results['segmentation'] = res
             q_vals.append(q)
             
-        # Return max q_val or avg? Usually just return one for logging, or both?
-        # Contract says return float. Let's return the regression one if present, or max.
         final_q = max(q_vals) if q_vals else 0.0
-        
         return results, final_q
 
-    def _create_smart_shim(self, model, task_name):
-        class SmartShim(torch.nn.Module):
-            def __init__(self, m, task):
-                super().__init__()
-                self.model = m
-                self.task = task
-            def forward(self, x):
-                out = self.model(x)
-                if isinstance(out, tuple):
-                    # Dynamic Search
-                    seg = None
-                    reg = None
-                    
-                    # Search through tuple items
-                    for item in out:
-                        if isinstance(item, torch.Tensor):
-                            if item.ndim >= 4: 
-                                seg = item
-                            elif item.ndim == 2 and item.shape[1] == 1:
-                                reg = item
-                    
-                    # Also handle nested tuple if any? Assuming flat tuple from model
-                    
-                    if self.task == 'segmentation':
-                        # Fallback to index 0 (UNet) or index 1 (R2Plus1D) if search failed
-                        if seg is not None: return seg
-                        return out[0] if len(out) > 0 else out
-                        
-                    elif self.task == 'regression':
-                         if reg is not None: return reg
-                         # Fallback: Index 1 (UNet: Seg, EF, Feat) -> EF is idx 1
-                         # Index 0 (R2Plus1D: EF, Seg) -> EF is idx 0
-                         # Safe guess: look for float scalar?
-                         return out[1] if len(out) > 1 else out[0]
-                return out
-        return SmartShim(model, task_name)
+# Alias for backward compatibility
+ConformalCalibrator = ClassificationCalibrator

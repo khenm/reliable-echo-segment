@@ -1,4 +1,4 @@
-model: "temporal_segment_tracker"
+model: "cardiac_mamba"
 
 data:
   name: "echonet"
@@ -10,6 +10,7 @@ loss:
     dice: 1.0
     ef: 0.2
     volume: 0.2
+    phase: 1.0
     smooth: 0.1
     cycle: 0.5
   distillation:
@@ -18,7 +19,6 @@ loss:
     temperature: 1.0
     alpha: 0.5
     student_dim: 256
-
 
 training:
   epochs: 100
@@ -34,8 +34,8 @@ training:
 
   save_dir: "/workspace/runs"
   checkpoint_dir: "/workspace/checkpoints"
-  test_metrics_csv: "/workspace/runs/temporal_metrics.csv"
-  clinical_pairs_csv: "/workspace/runs/temporal_clinical_pairs.csv"
+  test_metrics_csv: "/workspace/runs/mamba_metrics.csv"
+  clinical_pairs_csv: "/workspace/runs/mamba_clinical_pairs.csv"
   resume_path: null
 
 tta:

@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reliable-echo-segment"
+version = "0.1.0"
+description = "Reliable Echo Segmentation"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "numpy>=1.26.4",
+    "torchvision",
+    "torchaudio",
+    "monai[all]>=1.4.0",
+    "nibabel",
+    "scikit-image",
+    "opencv-python-headless",
+    "einops",
+    "tqdm",
+    "tensorboard",
+    "matplotlib",
+    "reportlab",
+    "pandas",
+    "pyyaml",
+    "scikit-learn",
+    "filelock>=3.15",
+    "wandb",
+    "timm",
+    "onnx>=1.16.0",
+    "onnxscript>=0.1.0",
+    "onnxruntime",
+    "causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.0/causal_conv1d-1.6.0+cu13torch26.01cxx11abiTRUE-cp312-cp312-linux_x86_64.whl",
+    "mamba-ssm @ https://github.com/state-spaces/mamba/releases/download/v2.3.0/mamba_ssm-2.3.0+cu13torch26.01cxx11abiTRUE-cp312-cp312-linux_x86_64.whl",
+]
+
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+torchvision = { index = "pytorch" }
+torchaudio = { index = "pytorch" }
+markupsafe = { index = "pypi" }
