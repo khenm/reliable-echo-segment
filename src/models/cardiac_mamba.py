@@ -153,25 +153,31 @@ class CardiacMamba(nn.Module):
         vol_curve = vol_curve * raw_area
         phase_logits = self.phase_head(temporal_out)        # (B, T, 3)
         
-        # 4. Aggregation (EDV/ESV from curve)
+        # 4. Aggregation
+        phase_probs = F.softmax(phase_logits, dim=-1)
+        
+        prob_es = phase_probs[:, :, 1] # (B, T)
+        prob_ed = phase_probs[:, :, 2] # (B, T)
+        
+        vols = vol_curve.squeeze(-1) # (B, T)
+        
         if lengths is not None:
-            # Mask: (B, T, 1)
-            mask_t = (torch.arange(T, device=x.device)[None, :] < lengths[:, None]).float().unsqueeze(-1)
-            valid_vols = vol_curve * mask_t
+            # Mask out invalid frames so they don't contribute
+            mask_t = (torch.arange(T, device=x.device)[None, :] < lengths[:, None]).float()
+            prob_es = prob_es * mask_t
+            prob_ed = prob_ed * mask_t
             
-            # Simple Min/Max for training logs (inference uses sophisticated phase logic)
-            pred_edv, _ = valid_vols.max(dim=1)
-            pred_edv = pred_edv.squeeze(-1)
-            
-            vols_for_min = valid_vols.clone()
-            vols_for_min[mask_t == 0] = float('inf')
-            pred_esv, _ = vols_for_min.min(dim=1)
-            pred_esv = pred_esv.squeeze(-1)
+            # Normalize probabilities over the valid sequence length
+            prob_es = prob_es / (prob_es.sum(dim=1, keepdim=True) + 1e-6)
+            prob_ed = prob_ed / (prob_ed.sum(dim=1, keepdim=True) + 1e-6)
         else:
-            pred_edv, _ = vol_curve.max(dim=1)
-            pred_edv = pred_edv.squeeze(-1)
-            pred_esv, _ = vol_curve.min(dim=1)
-            pred_esv = pred_esv.squeeze(-1)
+            # Normalize probabilities over the whole temporal sequence
+            prob_es = prob_es / (prob_es.sum(dim=1, keepdim=True) + 1e-6)
+            prob_ed = prob_ed / (prob_ed.sum(dim=1, keepdim=True) + 1e-6)
+
+        # Soft Expected Volumes
+        pred_edv = torch.sum(prob_ed * vols, dim=1) # (B,)
+        pred_esv = torch.sum(prob_es * vols, dim=1) # (B,)
 
         return {
             "mask_logits": mask_logits.transpose(1, 2), 
