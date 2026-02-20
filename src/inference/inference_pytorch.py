@@ -196,15 +196,24 @@ class StreamingPyTorchInference:
             else:
                 raise AttributeError(f"Model {type(self.model).__name__} lacks 'forward_step' or 'step' method.")
             
-            mask_logits = outputs["mask_logits"]
-            pred_vol = outputs["pred_vol"]
+            mask_logits = outputs.get("mask_logits")
+            pred_vol = outputs.get("pred_vol")
+            pred_phase = outputs.get("pred_phase", None)
             features = outputs.get("hidden_features", None)
             
-            mask_prob = torch.sigmoid(mask_logits)
+            mask_prob = torch.sigmoid(mask_logits) if mask_logits is not None else None
             
-        feat_np = features.cpu().numpy() if features is not None else None
-        
-        return mask_prob.cpu().numpy(), pred_vol.cpu().numpy(), feat_np
+        result = {}
+        if mask_prob is not None:
+            result["mask_prob"] = mask_prob.cpu().numpy()
+        if pred_vol is not None:
+            result["pred_vol"] = pred_vol.cpu().numpy()
+        if pred_phase is not None:
+            result["pred_phase"] = pred_phase.cpu().numpy()
+        if features is not None:
+            result["features"] = features.cpu().numpy()
+            
+        return result
 
     def segment_video(self, frames: np.ndarray, threshold: float = 0.5):
         self.reset_state()
@@ -216,14 +225,15 @@ class StreamingPyTorchInference:
         
         for t in range(T):
             frame = frames[t]
-            mask_prob, vol, feat = self.predict_step(frame)
+            outputs = self.predict_step(frame)
             
-            masks_list.append(mask_prob.squeeze()) 
-            if feat is not None:
-                features_list.append(feat.squeeze()) 
+            if "mask_prob" in outputs:
+                masks_list.append(outputs["mask_prob"].squeeze()) 
+            if "features" in outputs:
+                features_list.append(outputs["features"].squeeze()) 
                 
-        mask_probs = np.stack(masks_list, axis=0) 
-        binary_mask = (mask_probs > threshold).astype(np.uint8)
+        mask_probs = np.stack(masks_list, axis=0) if masks_list else None
+        binary_mask = (mask_probs > threshold).astype(np.uint8) if mask_probs is not None else None
         
         if features_list:
             features = np.stack(features_list, axis=0) 

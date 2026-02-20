@@ -211,4 +211,5 @@ class CardiacMamba(nn.Module):
             "mask_logits": mask_logits, # (B, 1, H, W)
             "pred_vol": vol,
             "pred_phase": phase,
+            "hidden_features": temporal_out
         }, next_state

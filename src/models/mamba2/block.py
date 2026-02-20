@@ -187,7 +187,7 @@ class Mamba2(nn.Module):
         dt = F.softplus(dt + self.dt_bias).squeeze(1) # (B, H)
         
         # A: (H) -> dA: (B, H)
-        dA = torch.exp(self.A_log * dt) # (B, H)
+        dA = torch.exp(-torch.exp(self.A_log.float()) * dt) # (B, H)
         
         # B_ssm: (B, 1, G*N) -> (B, H, 1, N)
         B_reshaped = B_ssm.view(b, l, self.ngroups, self.d_state)
