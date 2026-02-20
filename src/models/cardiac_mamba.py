@@ -115,7 +115,7 @@ class CardiacMamba(nn.Module):
         weighted_adapted = adapted * mask_probs_down
         pooled = F.adaptive_avg_pool2d(weighted_adapted, 1).flatten(1)
         
-        raw_area = mask_probs.sum(dim=(2, 3))
+        raw_area = mask_probs.sum(dim=(2, 3)) / (mask_probs.shape[2] * mask_probs.shape[3])
         
         return mask_logits, pooled, raw_area
 
