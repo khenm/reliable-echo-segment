@@ -1,8 +1,9 @@
 import torch
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib as mpl
 import os
 from skimage.segmentation import find_boundaries
 from skimage import color

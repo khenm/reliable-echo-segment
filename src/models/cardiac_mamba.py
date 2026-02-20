@@ -36,6 +36,7 @@ class CardiacMamba(nn.Module):
             d_state=model_cfg.get('d_state', 16),
             d_conv=model_cfg.get('d_conv', 4),
             expand=model_cfg.get('expand', 2),
+            chunk_size=model_cfg.get('chunk_size', 32),
         )
 
     def __init__(
@@ -47,6 +48,7 @@ class CardiacMamba(nn.Module):
         d_state: int = 16,
         d_conv: int = 4,
         expand: int = 2,
+        chunk_size: int = 32,
     ):
         super().__init__()
         
@@ -81,6 +83,7 @@ class CardiacMamba(nn.Module):
             d_state=d_state,
             d_conv=d_conv,
             expand=expand,
+            chunk_size=chunk_size,
         )
 
         # 4. Heads
@@ -167,14 +170,7 @@ class CardiacMamba(nn.Module):
             pred_esv = pred_esv.squeeze(-1)
 
         return {
-            "mask_logits": mask_logits.transpose(1, 2), # Return (B, T, 1, H, W) -> wait, existing code might expect (B, 1, T, H, W)?
-                                                       # Check trainer. usually (B, T, 1, H, W) matches "image" format more naturally but
-                                                       # TemporalEchoSegmentTracker returns (B, T, 1, H, W) then transposes?
-                                                       # Line 140 in old model: .transpose(1, 2) makes it (B, 1, T, H, W) or similar?
-                                                       # Actually typical video format: (B, C, T, H, W). 
-                                                       # Let's align with existing output: (B, T, 1, H, W) if loss expects it. 
-                                                       # Update: TemporalEchoSegmentTracker returns logits as (B, T, 1, H, W) -> transpose(1, 2) -> (B, 1, T, H, W).
-                                                       # We will return (B, 1, T, H, W) to match.
+            "mask_logits": mask_logits.transpose(1, 2), 
             "pred_vol_curve": vol_curve,
             "pred_phase": phase_logits,
             "pred_edv": pred_edv,
