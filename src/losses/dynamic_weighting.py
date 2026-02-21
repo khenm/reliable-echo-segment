@@ -31,7 +31,7 @@ class HomoscedasticUncertaintyWeighting(nn.Module):
         
         for k, var in self.log_vars.items():
             if k in losses_dict:
-                precision = torch.exp(-var)
+                precision = torch.exp(-torch.clamp(var, min=-4.0, max=4.0))
                 total_loss += 0.5 * precision * losses_dict[k] + 0.5 * var
                 
                 # Store the effective weight for logging

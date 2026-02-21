@@ -115,6 +115,14 @@ class Trainer:
                 find_unused_parameters=False
             )
             logger.info(f"Wrapped model in DDP (Rank {get_rank()})")
+            
+            if self.dynamic_weighter is not None:
+                self.dynamic_weighter = torch.nn.parallel.DistributedDataParallel(
+                    self.dynamic_weighter,
+                    device_ids=[self.device] if self.device.type == 'cuda' else None,
+                    find_unused_parameters=False
+                )
+                logger.info(f"Wrapped dynamic weighter in DDP (Rank {get_rank()})")
 
     def _setup_metrics(self):
         if self.num_classes == 1:
@@ -272,7 +280,7 @@ class Trainer:
             loss_fn = self.criterions['segmentation']
             
             if hasattr(loss_fn, 'volume_weight'): # Identify our custom loss
-                 l_seg, c_dict = loss_fn(
+                l_seg, c_dict = loss_fn(
                     mask_logits, 
                     target_masks, 
                     pred_ef, 
@@ -679,7 +687,8 @@ class Trainer:
             'best_metric': metric
         }
         if self.dynamic_weighter is not None:
-            state['dynamic_weighter_state_dict'] = self.dynamic_weighter.state_dict()
+            dw_state = self.dynamic_weighter.module.state_dict() if hasattr(self.dynamic_weighter, 'module') else self.dynamic_weighter.state_dict()
+            state['dynamic_weighter_state_dict'] = dw_state
             
         if is_best:
             save_checkpoint(self.vault_path, state)
