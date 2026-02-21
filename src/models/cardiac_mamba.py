@@ -149,7 +149,7 @@ class CardiacMamba(nn.Module):
         temporal_out = self.temporal_mamba(tokens) # (B, T, D)
         
         # 3. Heads
-        vol_input = torch.cat([temporal_out, raw_area], dim=-1)
+        vol_input = torch.cat([temporal_out, raw_area], dim=-1) # (B, T, D + 1)
         vol_curve = F.softplus(self.vol_head(vol_input)) # (B, T, 1) -> Positive volume
         phase_logits = self.phase_head(temporal_out)        # (B, T, 3)
         
