@@ -112,7 +112,7 @@ class Trainer:
             self.model = torch.nn.parallel.DistributedDataParallel(
                 self.model, 
                 device_ids=[self.device] if self.device.type == 'cuda' else None,
-                find_unused_parameters=True
+                find_unused_parameters=False
             )
             logger.info(f"Wrapped model in DDP (Rank {get_rank()})")
             
@@ -259,6 +259,7 @@ class Trainer:
         pred_raw_area = outputs.get('pred_raw_area')
         pred_vol_curve = outputs.get('pred_vol_curve')
         pred_phase_vel = outputs.get('pred_phase_vel')
+        pred_phase = outputs['pred_phase']
 
         loss = 0.0
         comps = {}
@@ -291,7 +292,8 @@ class Trainer:
                     pred_esv=pred_esv,
                     pred_raw_area=pred_raw_area,
                     pred_vol_curve=pred_vol_curve,
-                    pred_phase_vel=pred_phase_vel
+                    pred_phase_vel=pred_phase_vel,
+                    pred_phase=pred_phase
                 )
             elif hasattr(loss_fn, 'cycle_loss'):
                 # Legacy fallback, unlikely to be used with DeepMind config

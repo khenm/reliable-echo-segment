@@ -42,19 +42,8 @@ class FourierVolumeHead(nn.Module):
             nn.Linear(128, 1 + 2 * K)
         )
 
-    def forward(self, tokens, is_streaming=False, prev_phase=None):
-        B, T, D = tokens.shape
-        raw_vel = self.phase_vel_head(tokens)
-        phase_vel = raw_vel * (2 * math.pi / self.timescale)
-        
-        if not is_streaming:
-            phase = torch.cumsum(phase_vel, dim=1)
-        else:
-            if prev_phase is None:
-                prev_phase = torch.zeros(B, 1, 1, device=tokens.device)
-            phase = prev_phase + phase_vel
-
-        coeffs = self.coeff_head(tokens.mean(dim=1))
+    def generate_wave(self, coeffs, phase, T):
+        """Helper to reconstruct the wave from coefficients and phase."""
         a0 = F.softplus(coeffs[:, :1])
         harmonics = coeffs[:, 1:]
         
@@ -64,7 +53,23 @@ class FourierVolumeHead(nn.Module):
             bn = harmonics[:, 2*(n-1)+1 : 2*(n-1)+2].unsqueeze(1)
             vol_curve = vol_curve + an * torch.cos(n * phase) + bn * torch.sin(n * phase)
             
-        return torch.relu(vol_curve), phase, phase_vel, coeffs
+        return torch.relu(vol_curve)
+
+    def forward(self, tokens, is_streaming=False, prev_phase=None, coeff_ema=None):
+        B, T, D = tokens.shape
+        raw_vel = self.phase_vel_head(tokens)
+        phase_vel = raw_vel * (2 * math.pi / self.timescale)
+        
+        if not is_streaming:
+            phase = torch.cumsum(phase_vel, dim=1)
+            coeffs = self.coeff_head(tokens.mean(dim=1))
+        else:
+            phase = (torch.zeros(B, 1, 1, device=tokens.device) if prev_phase is None else prev_phase) + phase_vel
+            curr_coeffs = self.coeff_head(tokens.mean(dim=1))
+            coeffs = curr_coeffs if coeff_ema is None else (0.95 * coeff_ema + 0.05 * curr_coeffs)
+            
+        vol_curve = self.generate_wave(coeffs, phase, T)
+        return vol_curve, phase, phase_vel, coeffs
 
 @register_model("cardiac_mamba")
 class CardiacMamba(nn.Module):
@@ -209,35 +214,14 @@ class CardiacMamba(nn.Module):
         phase_logits = self.phase_head(temporal_out)        # (B, T, 3)
         
         # 4. Aggregation
-        # Phase anchor mapping
-        phase_probs = F.softmax(phase_logits, dim=-1)
-        
-        prob_es = phase_probs[:, :, 1] # (B, T)
-        prob_ed = phase_probs[:, :, 2] # (B, T)
-        
         vols = vol_curve.squeeze(-1) # (B, T)
-
-        # Soft Expected Volumes (kept for metrics if needed, but primary supervision through curve)
         if lengths is not None:
             mask_t = (torch.arange(T, device=x.device)[None, :] < lengths[:, None]).float()
-            prob_es_norm = prob_es * mask_t
-            prob_ed_norm = prob_ed * mask_t
-            
-            prob_es_norm = prob_es_norm / (prob_es_norm.sum(dim=1, keepdim=True) + 1e-6)
-            prob_ed_norm = prob_ed_norm / (prob_ed_norm.sum(dim=1, keepdim=True) + 1e-6)
-            
-            vols_masked = vols * mask_t
-            
-            # Use max/min of the curve over valid sequence for ESV/EDV
-            # Treat 0s as infinites for min, 0s as 0s for max
             vols_max = torch.where(mask_t > 0, vols, torch.tensor(-1e9, device=vols.device))
             vols_min = torch.where(mask_t > 0, vols, torch.tensor(1e9, device=vols.device))
             pred_edv = vols_max.max(dim=1)[0]
             pred_esv = vols_min.min(dim=1)[0]
         else:
-            prob_es_norm = prob_es / (prob_es.sum(dim=1, keepdim=True) + 1e-6)
-            prob_ed_norm = prob_ed / (prob_ed.sum(dim=1, keepdim=True) + 1e-6)
-            
             pred_edv = vols.max(dim=1)[0]
             pred_esv = vols.min(dim=1)[0]
             
@@ -287,39 +271,13 @@ class CardiacMamba(nn.Module):
         
         temporal_out = temporal_out_seq # Keeping sequence dim (B, 1, D) for Fourier Head
         
-        # 3. Heads
-        # To maintain stable Fourier volume during streaming, we mock the tokens mean 
-        # using the EMA of coefficients instead of recomputing from mean of past tokens.
-        
-        # Manually compute current packet
-        B, T, D = temporal_out.shape
-        raw_vel = self.fourier_vol_head.phase_vel_head(temporal_out)
-        phase_vel = raw_vel * (2 * math.pi / self.fourier_vol_head.timescale)
-        
-        if prev_phase is None:
-            prev_phase = torch.zeros(B, 1, 1, device=x.device)
-        phase = prev_phase + phase_vel
-        
-        # We need coeffs. For streaming stability, compute current coeffs and EMA them
-        curr_coeffs = self.fourier_vol_head.coeff_head(temporal_out.mean(dim=1))
-        
-        alpha = 0.05
-        if coeff_ema is None:
-            coeff_ema = curr_coeffs
-        else:
-            coeff_ema = (1 - alpha) * coeff_ema + alpha * curr_coeffs
-            
-        # Unpack EMA coeffs
-        a0 = F.softplus(coeff_ema[:, :1])
-        harmonics = coeff_ema[:, 1:]
-        
-        vol_curve = a0.unsqueeze(1).repeat(1, T, 1)
-        for n in range(1, self.fourier_vol_head.K + 1):
-            an = harmonics[:, 2*(n-1) : 2*(n-1)+1].unsqueeze(1)
-            bn = harmonics[:, 2*(n-1)+1 : 2*(n-1)+2].unsqueeze(1)
-            vol_curve = vol_curve + an * torch.cos(n * phase) + bn * torch.sin(n * phase)
-            
-        vol = torch.relu(vol_curve)
+        vol_curve, phase, phase_vel, coeff_ema = self.fourier_vol_head(
+            temporal_out, 
+            is_streaming=True, 
+            prev_phase=prev_phase, 
+            coeff_ema=coeff_ema
+        )
+        vol = vol_curve
         
         # Anchor Phase classification head
         temporal_out_flat = temporal_out.squeeze(1) # (B, D)

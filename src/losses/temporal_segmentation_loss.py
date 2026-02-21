@@ -16,16 +16,19 @@ class TemporalWeakSegLoss(nn.Module):
         dice_weight: float = 1.0,
         volume_weight: float = 1.0,      # Increased importance
         phase_geom_weight: float = 5.0,  # High weight to tether the system
-        multi_beat_weight: float = 0.1
+        multi_beat_weight: float = 0.1,
+        phase_weight: float = 1.0
     ):
         super().__init__()
         self.dice_weight = dice_weight
         self.volume_weight = volume_weight
         self.phase_geom_weight = phase_geom_weight
         self.multi_beat_weight = multi_beat_weight
+        self.phase_weight = phase_weight
 
         self.dice_func = DiceCELoss(sigmoid=True, reduction='mean')
         self.mse = nn.MSELoss()
+        self.ce_loss = nn.CrossEntropyLoss()
 
     def forward(
         self,
@@ -38,7 +41,8 @@ class TemporalWeakSegLoss(nn.Module):
         pred_esv: torch.Tensor,
         pred_raw_area: torch.Tensor,  # From detached mask_probs
         pred_vol_curve: torch.Tensor, # From Fourier Head
-        pred_phase_vel: torch.Tensor  # For rhythm stability
+        pred_phase_vel: torch.Tensor,  # For rhythm stability
+        pred_phase: torch.Tensor = None
     ):
         # 1. Spatial Anchor (Dice)
         loss_dice = self._compute_dice_loss(pred_logits, target_masks, frame_mask)
@@ -54,18 +58,27 @@ class TemporalWeakSegLoss(nn.Module):
         # Prevents the 'clock' from skipping beats
         loss_rhythm = pred_phase_vel.var(dim=1).mean()
 
+        # 5. Phase Classification (Cross Entropy)
+        loss_phase = torch.tensor(0.0, device=pred_logits.device)
+        if pred_phase is not None and frame_mask is not None:
+            # pred_phase -> (B, T, 3) -> (B*T, 3)
+            # frame_mask -> (B, T) -> (B*T,) (with values 0, 1, 2)
+            loss_phase = self.ce_loss(pred_phase.view(-1, 3), frame_mask.view(-1).long())
+
         total_loss = (
             self.dice_weight * loss_dice +
             self.volume_weight * loss_vol +
             self.phase_geom_weight * loss_phase_geom +
-            self.multi_beat_weight * loss_rhythm
+            self.multi_beat_weight * loss_rhythm +
+            self.phase_weight * loss_phase
         )
 
         return total_loss, {
             "dice": loss_dice,
             "volume": loss_vol,
             "phase_geom": loss_phase_geom,
-            "multi_beat": loss_rhythm
+            "multi_beat": loss_rhythm,
+            "phase": loss_phase
         }
 
     def _compute_alignment_loss(self, area, vol):
