@@ -56,6 +56,20 @@ class Trainer:
         self.is_segmentation = (self.model_name in ["segment_tracker", "temporal_segment_tracker", "cardiac_mamba"])
 
     def _setup_optimization(self):
+        # Dynamic Weighting
+        self.dynamic_weighter = None
+        loss_cfg = self.cfg.get('loss', {})
+        if loss_cfg.get('dynamic_weighting', False):
+            from src.losses.dynamic_weighting import HomoscedasticUncertaintyWeighting
+            weights = loss_cfg.get('weights', {}).copy()
+            # Include distillation if enabled
+            distill_cfg = loss_cfg.get('distillation', {})
+            if distill_cfg.get('enabled', False) and 'distillation' not in weights:
+                weights['distillation'] = distill_cfg.get('weight', 1.0)
+            
+            self.dynamic_weighter = HomoscedasticUncertaintyWeighting(weights).to(self.device)
+            logger.info(f"Initialized HomoscedasticUncertaintyWeighting with manual weights: {weights}")
+
         # Temporal Gate
         if self.cfg.get('losses', {}).get('temporal', {}).get('enable'):
             tc_cfg = self.cfg['losses']['temporal']
@@ -73,10 +87,19 @@ class Trainer:
         if self.accum_steps > 1:
             logger.info(f"Gradient Accumulation: {self.accum_steps} steps (effective batch size: {effective_train})")
 
+        opt_groups = [
+            {"params": self.model.parameters(), "weight_decay": self.cfg['training']['weight_decay']}
+        ]
+        
+        if self.dynamic_weighter is not None:
+            opt_groups.append({
+                "params": self.dynamic_weighter.parameters(), 
+                "weight_decay": 0.0
+            })
+
         self.opt = torch.optim.AdamW(
-            self.model.parameters(), 
-            lr=self.cfg['training']['lr'], 
-            weight_decay=self.cfg['training']['weight_decay']
+            opt_groups, 
+            lr=self.cfg['training']['lr']
         )
         
         dev_type = self.device.type if hasattr(self.device, 'type') else str(self.device)
@@ -240,6 +263,7 @@ class Trainer:
         esv_target = batch.get("target_esv").to(self.device).view(-1, 1)
 
         # 1. Segmentation Loss
+        unweighted_comps = {}
         if 'segmentation' in self.criterions and target_masks is not None:
             target_masks = target_masks.to(self.device)
             if frame_mask is not None:
@@ -270,15 +294,28 @@ class Trainer:
                 l_seg, c_dict = loss_fn(
                     mask_logits, target_masks, pred_ef, ef_target, frame_mask
                 )
-            loss += l_seg
-            comps['segmentation'] = l_seg.item()
-            comps.update({k: v.item() for k, v in c_dict.items()})
+            
+            if self.dynamic_weighter is not None:
+                unweighted_comps.update(c_dict)
+            else:
+                loss += l_seg
+                comps['segmentation'] = l_seg.item()
+                comps.update({k: v.item() for k, v in c_dict.items()})
 
         if 'distillation' in self.criterions:
             hidden_features = outputs['hidden_features']
             l_distill = self.criterions['distillation'](hidden_features, imgs)
-            loss += l_distill
-            comps['distillation'] = l_distill.item()
+            if self.dynamic_weighter is not None:
+                unweighted_comps['distillation'] = l_distill
+            else:
+                loss += l_distill
+                comps['distillation'] = l_distill.item()
+
+        if self.dynamic_weighter is not None:
+            combined_loss, eff_weights = self.dynamic_weighter(unweighted_comps)
+            loss += combined_loss
+            comps.update({k: v.item() if isinstance(v, torch.Tensor) else v for k, v in unweighted_comps.items()})
+            comps.update({f"{k}_w": w for k, w in eff_weights.items()})
 
         return loss, comps
 
@@ -642,6 +679,9 @@ class Trainer:
             'rng_state': rng_state,
             'best_metric': metric
         }
+        if self.dynamic_weighter is not None:
+            state['dynamic_weighter_state_dict'] = self.dynamic_weighter.state_dict()
+            
         if is_best:
             save_checkpoint(self.vault_path, state)
             logger.info(f"Saved Best Checkpoint: {self.vault_path}")
