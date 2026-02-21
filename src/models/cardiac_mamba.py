@@ -87,7 +87,7 @@ class CardiacMamba(nn.Module):
         )
 
         # 4. Heads
-        self.vol_head = nn.Linear(hidden_dim, 1)
+        self.vol_head = nn.Linear(hidden_dim + 1, 1)
         self.phase_head = nn.Linear(hidden_dim, 3) # [Background, ES, ED]
 
         logger.info(f"CardiacMamba initialized with backbone={backbone}")
@@ -112,7 +112,7 @@ class CardiacMamba(nn.Module):
         
         mask_probs_down = F.adaptive_avg_pool2d(mask_probs, adapted.shape[2:])
         
-        weighted_adapted = adapted * mask_probs_down
+        weighted_adapted = adapted * (mask_probs_down + 0.1)
         pooled = F.adaptive_avg_pool2d(weighted_adapted, 1).flatten(1)
         
         raw_area = mask_probs.sum(dim=(2, 3)) / (mask_probs.shape[2] * mask_probs.shape[3])
@@ -149,8 +149,8 @@ class CardiacMamba(nn.Module):
         temporal_out = self.temporal_mamba(tokens) # (B, T, D)
         
         # 3. Heads
-        vol_curve = F.softplus(self.vol_head(temporal_out)) # (B, T, 1) -> Positive volume
-        vol_curve = vol_curve * raw_area
+        vol_input = torch.cat([temporal_out, raw_area], dim=-1)
+        vol_curve = F.softplus(self.vol_head(vol_input)) # (B, T, 1) -> Positive volume
         phase_logits = self.phase_head(temporal_out)        # (B, T, 3)
         
         # 4. Aggregation
@@ -214,8 +214,8 @@ class CardiacMamba(nn.Module):
         temporal_out = temporal_out_seq.squeeze(1) # (B, D)
         
         # 3. Heads
-        vol = F.softplus(self.vol_head(temporal_out)) # (B, 1)
-        vol = vol * raw_area
+        vol_input = torch.cat([temporal_out, raw_area.view(-1, 1)], dim=-1)
+        vol = F.softplus(self.vol_head(vol_input)) # (B, 1)
         phase = self.phase_head(temporal_out)         # (B, 3)
         
         return {

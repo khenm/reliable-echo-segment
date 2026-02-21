@@ -247,7 +247,6 @@ class Trainer:
         mask_logits = outputs['mask_logits']
         pred_edv = outputs['pred_edv']
         pred_esv = outputs['pred_esv']
-        pred_esv = outputs['pred_esv']
         pred_ef = outputs['pred_ef']
         pred_phase = outputs.get('pred_phase')
 
