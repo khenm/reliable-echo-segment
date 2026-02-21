@@ -41,7 +41,7 @@ class TemporalWeakSegLoss(nn.Module):
 
         self.dice_func = DiceCELoss(sigmoid=True, reduction='mean')
         self.l1 = nn.L1Loss()
-        self.ce = nn.CrossEntropyLoss(weights=torch.tensor([0.1, 1.0, 1.0]),ignore_index=-1) # Ignore invalid if any
+        self.ce = nn.CrossEntropyLoss(weight=torch.tensor([0.1, 1.0, 1.0]).to('cuda'), ignore_index=-1) # Ignore invalid if any
         self.cycle_loss = CycleConsistencyLoss()
 
         logger.info(
