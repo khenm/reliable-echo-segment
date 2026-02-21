@@ -6,6 +6,7 @@ data:
 
 loss:
   name: "TemporalWeakSegLoss"
+  dynamic_weighting: true
   weights:
     dice: 1.0
     ef: 0.2

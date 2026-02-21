@@ -41,7 +41,7 @@ class TemporalWeakSegLoss(nn.Module):
 
         self.dice_func = DiceCELoss(sigmoid=True, reduction='mean')
         self.l1 = nn.L1Loss()
-        self.ce = nn.CrossEntropyLoss(ignore_index=-1) # Ignore invalid if any
+        self.ce = nn.CrossEntropyLoss(weight=torch.tensor([0.1, 1.0, 1.0]).to('cuda'), ignore_index=-1) # Ignore invalid if any
         self.cycle_loss = CycleConsistencyLoss()
 
         logger.info(
@@ -94,20 +94,20 @@ class TemporalWeakSegLoss(nn.Module):
             loss_cycle = torch.tensor(0.0, device=pred_logits.device)
 
         if self.volume_weight > 0 and target_edv is not None and target_esv is not None and pred_edv is not None and pred_esv is not None:
-             loss_volume = self._compute_volume_loss(pred_edv, pred_esv, target_edv, target_esv)
+            loss_volume = self._compute_volume_loss(pred_edv, pred_esv, target_edv, target_esv)
         else:
-             loss_volume = torch.tensor(0.0, device=pred_logits.device)
+            loss_volume = torch.tensor(0.0, device=pred_logits.device)
 
         loss_smooth = self._compute_smoothness_loss(torch.sigmoid(pred_logits))
 
         if self.phase_weight > 0 and pred_phase is not None:
-             # pred_phase: (B, T, 3), frame_mask: (B, T)
-             # Flatten
-             p_phase_flat = pred_phase.reshape(-1, 3)
-             t_phase_flat = frame_mask.reshape(-1).long()
-             loss_phase = self.ce(p_phase_flat, t_phase_flat)
+            # pred_phase: (B, T, 3), frame_mask: (B, T)
+            # Flatten
+            p_phase_flat = pred_phase.reshape(-1, 3)
+            t_phase_flat = frame_mask.reshape(-1).long()
+            loss_phase = self.ce(p_phase_flat, t_phase_flat)
         else:
-             loss_phase = torch.tensor(0.0, device=pred_logits.device)
+            loss_phase = torch.tensor(0.0, device=pred_logits.device)
 
         total_loss = (
             self.dice_weight * loss_dice +
