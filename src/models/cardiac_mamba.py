@@ -1,14 +1,70 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 import timm
 
 from src.registry import register_model
 from src.utils.logging import get_logger
 from src.models.segment_tracker import SegmentationDecoder
-from src.models.mamba_wrapper import MambaBlock
+from src.models.mamba2.block import Mamba2Block
 
 logger = get_logger()
+
+class MambaBlock(nn.Module):
+    """
+    Wrapper for Mamba-2 Block.
+    """
+    def __init__(self, d_model, **kwargs):
+        super().__init__()
+        self.inner = Mamba2Block(dim=d_model, **kwargs)
+
+    def forward(self, x):
+        return self.inner(x)
+    
+    def step(self, x, state=None):
+        return self.inner.step(x, state)
+
+class FourierVolumeHead(nn.Module):
+    def __init__(self, hidden_dim, K=3):
+        super().__init__()
+        self.K = K
+        self.timescale = nn.Parameter(torch.tensor([15.0]))
+        self.phase_vel_head = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Sigmoid()
+        )
+        self.coeff_head = nn.Sequential(
+            nn.Linear(hidden_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1 + 2 * K)
+        )
+
+    def forward(self, tokens, is_streaming=False, prev_phase=None):
+        B, T, D = tokens.shape
+        raw_vel = self.phase_vel_head(tokens)
+        phase_vel = raw_vel * (2 * math.pi / self.timescale)
+        
+        if not is_streaming:
+            phase = torch.cumsum(phase_vel, dim=1)
+        else:
+            if prev_phase is None:
+                prev_phase = torch.zeros(B, 1, 1, device=tokens.device)
+            phase = prev_phase + phase_vel
+
+        coeffs = self.coeff_head(tokens.mean(dim=1))
+        a0 = F.softplus(coeffs[:, :1])
+        harmonics = coeffs[:, 1:]
+        
+        vol_curve = a0.unsqueeze(1).repeat(1, T, 1)
+        for n in range(1, self.K + 1):
+            an = harmonics[:, 2*(n-1) : 2*(n-1)+1].unsqueeze(1)
+            bn = harmonics[:, 2*(n-1)+1 : 2*(n-1)+2].unsqueeze(1)
+            vol_curve = vol_curve + an * torch.cos(n * phase) + bn * torch.sin(n * phase)
+            
+        return torch.relu(vol_curve), phase, phase_vel, coeffs
 
 @register_model("cardiac_mamba")
 class CardiacMamba(nn.Module):
@@ -87,7 +143,7 @@ class CardiacMamba(nn.Module):
         )
 
         # 4. Heads
-        self.vol_head = nn.Linear(hidden_dim + 1, 1)
+        self.fourier_vol_head = FourierVolumeHead(hidden_dim, K=3)
         self.phase_head = nn.Linear(hidden_dim, 3) # [Background, ES, ED]
 
         logger.info(f"CardiacMamba initialized with backbone={backbone}")
@@ -112,7 +168,7 @@ class CardiacMamba(nn.Module):
         
         mask_probs_down = F.adaptive_avg_pool2d(mask_probs, adapted.shape[2:])
         
-        weighted_adapted = adapted * (mask_probs_down + 0.1)
+        weighted_adapted = adapted * (mask_probs_down.detach() + 0.1)
         pooled = F.adaptive_avg_pool2d(weighted_adapted, 1).flatten(1)
         
         raw_area = mask_probs.sum(dim=(2, 3)) / (mask_probs.shape[2] * mask_probs.shape[3])
@@ -149,39 +205,47 @@ class CardiacMamba(nn.Module):
         temporal_out = self.temporal_mamba(tokens) # (B, T, D)
         
         # 3. Heads
-        vol_input = torch.cat([temporal_out, raw_area], dim=-1) # (B, T, D + 1)
-        vol_curve = F.softplus(self.vol_head(vol_input)) # (B, T, 1) -> Positive volume
+        vol_curve, phase, phase_vel, coeffs = self.fourier_vol_head(temporal_out)
         phase_logits = self.phase_head(temporal_out)        # (B, T, 3)
         
         # 4. Aggregation
+        # Phase anchor mapping
         phase_probs = F.softmax(phase_logits, dim=-1)
         
         prob_es = phase_probs[:, :, 1] # (B, T)
         prob_ed = phase_probs[:, :, 2] # (B, T)
         
         vols = vol_curve.squeeze(-1) # (B, T)
-        
+
+        # Soft Expected Volumes (kept for metrics if needed, but primary supervision through curve)
         if lengths is not None:
-            # Mask out invalid frames so they don't contribute
             mask_t = (torch.arange(T, device=x.device)[None, :] < lengths[:, None]).float()
-            prob_es = prob_es * mask_t
-            prob_ed = prob_ed * mask_t
+            prob_es_norm = prob_es * mask_t
+            prob_ed_norm = prob_ed * mask_t
             
-            # Normalize probabilities over the valid sequence length
-            prob_es = prob_es / (prob_es.sum(dim=1, keepdim=True) + 1e-6)
-            prob_ed = prob_ed / (prob_ed.sum(dim=1, keepdim=True) + 1e-6)
+            prob_es_norm = prob_es_norm / (prob_es_norm.sum(dim=1, keepdim=True) + 1e-6)
+            prob_ed_norm = prob_ed_norm / (prob_ed_norm.sum(dim=1, keepdim=True) + 1e-6)
+            
+            vols_masked = vols * mask_t
+            
+            # Use max/min of the curve over valid sequence for ESV/EDV
+            # Treat 0s as infinites for min, 0s as 0s for max
+            vols_max = torch.where(mask_t > 0, vols, torch.tensor(-1e9, device=vols.device))
+            vols_min = torch.where(mask_t > 0, vols, torch.tensor(1e9, device=vols.device))
+            pred_edv = vols_max.max(dim=1)[0]
+            pred_esv = vols_min.min(dim=1)[0]
         else:
-            # Normalize probabilities over the whole temporal sequence
-            prob_es = prob_es / (prob_es.sum(dim=1, keepdim=True) + 1e-6)
-            prob_ed = prob_ed / (prob_ed.sum(dim=1, keepdim=True) + 1e-6)
-
-        # Soft Expected Volumes
-        pred_edv = torch.sum(prob_ed * vols, dim=1) # (B,)
-        pred_esv = torch.sum(prob_es * vols, dim=1) # (B,)
-
+            prob_es_norm = prob_es / (prob_es.sum(dim=1, keepdim=True) + 1e-6)
+            prob_ed_norm = prob_ed / (prob_ed.sum(dim=1, keepdim=True) + 1e-6)
+            
+            pred_edv = vols.max(dim=1)[0]
+            pred_esv = vols.min(dim=1)[0]
+            
         return {
             "mask_logits": mask_logits.transpose(1, 2), 
             "pred_vol_curve": vol_curve,
+            "pred_raw_area": raw_area,
+            "pred_phase_vel": phase_vel,
             "pred_phase": phase_logits,
             "pred_edv": pred_edv,
             "pred_esv": pred_esv,
@@ -195,32 +259,82 @@ class CardiacMamba(nn.Module):
         
         Args:
             x: Single frame (B, C, H, W)
-            state: Hidden state from previous step (Mamba state)
+            state: Dictionary containing Mamba hidden state, phase, and moving average coeffs
             
         Returns:
             dict results, next_state
         """
+        if state is None:
+            state = {
+                'mamba_state': None,
+                'prev_phase': None,
+                'coeff_ema': None
+            }
+            
+        mamba_state = state.get('mamba_state')
+        prev_phase = state.get('prev_phase')
+        coeff_ema = state.get('coeff_ema')
+
         # 1. Spatial
         mask_logits, token, raw_area = self.forward_spatial(x)
         # token: (B, D)
         
         # 2. Temporal Step
-        # Mamba step might need (B, 1, D)
         token_seq = token.unsqueeze(1) # (B, 1, D)
         
-        temporal_out_seq, next_state = self.temporal_mamba.step(token_seq, state)
+        temporal_out_seq, next_mamba_state = self.temporal_mamba.step(token_seq, mamba_state)
         # temporal_out_seq: (B, 1, D)
         
-        temporal_out = temporal_out_seq.squeeze(1) # (B, D)
+        temporal_out = temporal_out_seq # Keeping sequence dim (B, 1, D) for Fourier Head
         
         # 3. Heads
-        vol_input = torch.cat([temporal_out, raw_area.view(-1, 1)], dim=-1)
-        vol = F.softplus(self.vol_head(vol_input)) # (B, 1)
-        phase = self.phase_head(temporal_out)         # (B, 3)
+        # To maintain stable Fourier volume during streaming, we mock the tokens mean 
+        # using the EMA of coefficients instead of recomputing from mean of past tokens.
+        
+        # Manually compute current packet
+        B, T, D = temporal_out.shape
+        raw_vel = self.fourier_vol_head.phase_vel_head(temporal_out)
+        phase_vel = raw_vel * (2 * math.pi / self.fourier_vol_head.timescale)
+        
+        if prev_phase is None:
+            prev_phase = torch.zeros(B, 1, 1, device=x.device)
+        phase = prev_phase + phase_vel
+        
+        # We need coeffs. For streaming stability, compute current coeffs and EMA them
+        curr_coeffs = self.fourier_vol_head.coeff_head(temporal_out.mean(dim=1))
+        
+        alpha = 0.05
+        if coeff_ema is None:
+            coeff_ema = curr_coeffs
+        else:
+            coeff_ema = (1 - alpha) * coeff_ema + alpha * curr_coeffs
+            
+        # Unpack EMA coeffs
+        a0 = F.softplus(coeff_ema[:, :1])
+        harmonics = coeff_ema[:, 1:]
+        
+        vol_curve = a0.unsqueeze(1).repeat(1, T, 1)
+        for n in range(1, self.fourier_vol_head.K + 1):
+            an = harmonics[:, 2*(n-1) : 2*(n-1)+1].unsqueeze(1)
+            bn = harmonics[:, 2*(n-1)+1 : 2*(n-1)+2].unsqueeze(1)
+            vol_curve = vol_curve + an * torch.cos(n * phase) + bn * torch.sin(n * phase)
+            
+        vol = torch.relu(vol_curve)
+        
+        # Anchor Phase classification head
+        temporal_out_flat = temporal_out.squeeze(1) # (B, D)
+        phase_logits = self.phase_head(temporal_out_flat) # (B, 3)
+        
+        next_state = {
+            'mamba_state': next_mamba_state,
+            'prev_phase': phase,
+            'coeff_ema': coeff_ema
+        }
         
         return {
             "mask_logits": mask_logits, # (B, 1, H, W)
-            "pred_vol": vol,
-            "pred_phase": phase,
-            "hidden_features": temporal_out
+            "pred_vol": vol.squeeze(1), # (B, 1)
+            "pred_phase": phase_logits,
+            "pred_phase_vel": phase_vel.squeeze(1),
+            "hidden_features": temporal_out_flat
         }, next_state

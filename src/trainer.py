@@ -112,7 +112,7 @@ class Trainer:
             self.model = torch.nn.parallel.DistributedDataParallel(
                 self.model, 
                 device_ids=[self.device] if self.device.type == 'cuda' else None,
-                find_unused_parameters=False
+                find_unused_parameters=True
             )
             logger.info(f"Wrapped model in DDP (Rank {get_rank()})")
             
@@ -256,7 +256,9 @@ class Trainer:
         pred_edv = outputs['pred_edv']
         pred_esv = outputs['pred_esv']
         pred_ef = outputs['pred_ef']
-        pred_phase = outputs.get('pred_phase')
+        pred_raw_area = outputs.get('pred_raw_area')
+        pred_vol_curve = outputs.get('pred_vol_curve')
+        pred_phase_vel = outputs.get('pred_phase_vel')
 
         loss = 0.0
         comps = {}
@@ -265,9 +267,8 @@ class Trainer:
         frame_mask = batch.get("frame_mask")
         
         # Targets
-        ef_target = batch.get("target_ef").to(self.device).view(-1, 1) if "target_ef" in batch else batch.get("target").to(self.device).view(-1, 1)
-        edv_target = batch.get("target_edv").to(self.device).view(-1, 1)
-        esv_target = batch.get("target_esv").to(self.device).view(-1, 1)
+        edv_target = batch.get("target_edv").to(self.device).view(-1, 1) if batch.get("target_edv") is not None else None
+        esv_target = batch.get("target_esv").to(self.device).view(-1, 1) if batch.get("target_esv") is not None else None
 
         # 1. Segmentation Loss
         unweighted_comps = {}
@@ -281,25 +282,25 @@ class Trainer:
             
             if hasattr(loss_fn, 'volume_weight'): # Identify our custom loss
                 l_seg, c_dict = loss_fn(
-                    mask_logits, 
-                    target_masks, 
-                    pred_ef, 
-                    ef_target, 
-                    frame_mask, 
-                    frames=imgs,
+                    pred_logits=mask_logits, 
+                    target_masks=target_masks, 
+                    frame_mask=frame_mask, 
                     target_edv=edv_target,
                     target_esv=esv_target,
                     pred_edv=pred_edv,
                     pred_esv=pred_esv,
-                    pred_phase=pred_phase
+                    pred_raw_area=pred_raw_area,
+                    pred_vol_curve=pred_vol_curve,
+                    pred_phase_vel=pred_phase_vel
                 )
             elif hasattr(loss_fn, 'cycle_loss'):
+                # Legacy fallback, unlikely to be used with DeepMind config
                 l_seg, c_dict = loss_fn(
-                    mask_logits, target_masks, pred_ef, ef_target, frame_mask, imgs
+                    mask_logits, target_masks, pred_ef, frame_mask, imgs
                 )
             else:
                 l_seg, c_dict = loss_fn(
-                    mask_logits, target_masks, pred_ef, ef_target, frame_mask
+                    mask_logits, target_masks, pred_ef, frame_mask
                 )
             
             if self.dynamic_weighter is not None:
