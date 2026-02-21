@@ -100,22 +100,24 @@ class CardiacMamba(nn.Module):
             features: (B*T, D) - Pooled feature vector for temporal model
         """
         # x: (N, C, H, W) where N = B*T
-        
-        # Extract features (list if features_only=True)
         enc_feats = self.encoder(x) 
-        bottleneck = enc_feats[-1] # Take the deepest feature map
+        bottleneck = enc_feats[-1]
         
         # Adapter
         adapted = self.adapter(bottleneck) # (N, hidden_dim, H', W')
         
         # Segmentation
         mask_logits = self.decoder(adapted) # (N, 1, H_out, W_out)
+        mask_probs = torch.sigmoid(mask_logits)
         
-        # Global Pooling for Temporal Model
-        # (N, D, H', W') -> (N, D)
-        pooled = F.adaptive_avg_pool2d(adapted, 1).flatten(1)
+        mask_probs_down = F.adaptive_avg_pool2d(mask_probs, adapted.shape[2:])
         
-        return mask_logits, pooled
+        weighted_adapted = adapted * mask_probs_down
+        pooled = F.adaptive_avg_pool2d(weighted_adapted, 1).flatten(1)
+        
+        raw_area = mask_probs.sum(dim=(2, 3)) / (mask_probs.shape[2] * mask_probs.shape[3])
+        
+        return mask_logits, pooled, raw_area
 
     def forward(self, x: torch.Tensor, lengths: torch.Tensor = None, **kwargs) -> dict:
         """
@@ -134,40 +136,48 @@ class CardiacMamba(nn.Module):
         x_flat = x.transpose(1, 2).reshape(B * T, C, H, W)
         
         # 1. Spatial Processing (Parallel over all frames)
-        mask_logits_flat, tokens_flat = self.forward_spatial(x_flat)
+        mask_logits_flat, tokens_flat, raw_area_flat = self.forward_spatial(x_flat)
         
         # Unfold time
         # mask_logits: (B, T, 1, H_out, W_out)
         mask_logits = mask_logits_flat.view(B, T, 1, *mask_logits_flat.shape[2:])
         # tokens: (B, T, D)
         tokens = tokens_flat.view(B, T, -1)
+        raw_area = raw_area_flat.view(B, T, -1)
         
         # 2. Temporal Processing (Mamba Parallel Scan)
         temporal_out = self.temporal_mamba(tokens) # (B, T, D)
         
         # 3. Heads
         vol_curve = F.softplus(self.vol_head(temporal_out)) # (B, T, 1) -> Positive volume
+        vol_curve = vol_curve * raw_area
         phase_logits = self.phase_head(temporal_out)        # (B, T, 3)
         
-        # 4. Aggregation (EDV/ESV from curve)
+        # 4. Aggregation
+        phase_probs = F.softmax(phase_logits, dim=-1)
+        
+        prob_es = phase_probs[:, :, 1] # (B, T)
+        prob_ed = phase_probs[:, :, 2] # (B, T)
+        
+        vols = vol_curve.squeeze(-1) # (B, T)
+        
         if lengths is not None:
-            # Mask: (B, T, 1)
-            mask_t = (torch.arange(T, device=x.device)[None, :] < lengths[:, None]).float().unsqueeze(-1)
-            valid_vols = vol_curve * mask_t
+            # Mask out invalid frames so they don't contribute
+            mask_t = (torch.arange(T, device=x.device)[None, :] < lengths[:, None]).float()
+            prob_es = prob_es * mask_t
+            prob_ed = prob_ed * mask_t
             
-            # Simple Min/Max for training logs (inference uses sophisticated phase logic)
-            pred_edv, _ = valid_vols.max(dim=1)
-            pred_edv = pred_edv.squeeze(-1)
-            
-            vols_for_min = valid_vols.clone()
-            vols_for_min[mask_t == 0] = float('inf')
-            pred_esv, _ = vols_for_min.min(dim=1)
-            pred_esv = pred_esv.squeeze(-1)
+            # Normalize probabilities over the valid sequence length
+            prob_es = prob_es / (prob_es.sum(dim=1, keepdim=True) + 1e-6)
+            prob_ed = prob_ed / (prob_ed.sum(dim=1, keepdim=True) + 1e-6)
         else:
-            pred_edv, _ = vol_curve.max(dim=1)
-            pred_edv = pred_edv.squeeze(-1)
-            pred_esv, _ = vol_curve.min(dim=1)
-            pred_esv = pred_esv.squeeze(-1)
+            # Normalize probabilities over the whole temporal sequence
+            prob_es = prob_es / (prob_es.sum(dim=1, keepdim=True) + 1e-6)
+            prob_ed = prob_ed / (prob_ed.sum(dim=1, keepdim=True) + 1e-6)
+
+        # Soft Expected Volumes
+        pred_edv = torch.sum(prob_ed * vols, dim=1) # (B,)
+        pred_esv = torch.sum(prob_es * vols, dim=1) # (B,)
 
         return {
             "mask_logits": mask_logits.transpose(1, 2), 
@@ -191,7 +201,7 @@ class CardiacMamba(nn.Module):
             dict results, next_state
         """
         # 1. Spatial
-        mask_logits, token = self.forward_spatial(x)
+        mask_logits, token, raw_area = self.forward_spatial(x)
         # token: (B, D)
         
         # 2. Temporal Step
@@ -205,10 +215,12 @@ class CardiacMamba(nn.Module):
         
         # 3. Heads
         vol = F.softplus(self.vol_head(temporal_out)) # (B, 1)
+        vol = vol * raw_area
         phase = self.phase_head(temporal_out)         # (B, 3)
         
         return {
             "mask_logits": mask_logits, # (B, 1, H, W)
             "pred_vol": vol,
             "pred_phase": phase,
+            "hidden_features": temporal_out
         }, next_state

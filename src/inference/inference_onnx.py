@@ -1012,19 +1012,16 @@ def process_video(
     
     # Inference
     start = time.perf_counter()
-    binary_masks, prob_masks, features = inference_engine.segment_video(frames_array)
+    binary_masks, prob_masks, features, volumes_list, phases_list = inference_engine.segment_video(frames_array)
     end = time.perf_counter()
     
     fps = len(frames) / (end - start)
     
-    # Compute Volumes & Wealth
-    volumes = []
+    # Use returned volumes and compute Wealth
+    volumes = volumes_list
     wealths = []
     
     for t in range(len(prob_masks)):
-        vol = compute_volume_from_mask(prob_masks[t])
-        volumes.append(vol)
-        
         feat_t = features[t] if features is not None else None
         w = auditor.update(prob_masks[t], feat_t, is_logits=False)
         wealths.append(w)
