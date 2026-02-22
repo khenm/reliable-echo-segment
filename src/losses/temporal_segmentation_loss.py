@@ -17,7 +17,8 @@ class TemporalWeakSegLoss(nn.Module):
         volume_weight: float = 1.0,      # Increased importance
         phase_geom_weight: float = 5.0,  # High weight to tether the system
         multi_beat_weight: float = 0.1,
-        phase_weight: float = 1.0
+        phase_weight: float = 1.0,
+        ef_weight: float = 0.1
     ):
         super().__init__()
         self.dice_weight = dice_weight
@@ -25,6 +26,7 @@ class TemporalWeakSegLoss(nn.Module):
         self.phase_geom_weight = phase_geom_weight
         self.multi_beat_weight = multi_beat_weight
         self.phase_weight = phase_weight
+        self.ef_weight = ef_weight
 
         self.dice_func = DiceCELoss(sigmoid=True, reduction='mean')
         self.mse = nn.MSELoss()
@@ -42,7 +44,9 @@ class TemporalWeakSegLoss(nn.Module):
         pred_raw_area: torch.Tensor,  # From detached mask_probs
         pred_vol_curve: torch.Tensor, # From Fourier Head
         pred_phase_vel: torch.Tensor,  # For rhythm stability
-        pred_phase: torch.Tensor = None
+        pred_phase: torch.Tensor = None,
+        target_ef: torch.Tensor = None,
+        pred_ef: torch.Tensor = None
     ):
         # 1. Spatial Anchor (Dice)
         loss_dice = self._compute_dice_loss(pred_logits, target_masks, frame_mask)
@@ -65,21 +69,33 @@ class TemporalWeakSegLoss(nn.Module):
             # frame_mask -> (B, T) -> (B*T,) (with values 0, 1, 2)
             loss_phase = self.ce_loss(pred_phase.view(-1, 3), frame_mask.view(-1).long())
 
+        # 6. Ejection Fraction (MSE)
+        loss_ef = torch.tensor(0.0, device=pred_logits.device)
+        if self.ef_weight > 0 and pred_ef is not None and target_ef is not None:
+             valid_ef = target_ef >= 0
+             if valid_ef.any():
+                 loss_ef = self.mse(pred_ef[valid_ef], target_ef[valid_ef])
+
         total_loss = (
             self.dice_weight * loss_dice +
             self.volume_weight * loss_vol +
             self.phase_geom_weight * loss_phase_geom +
             self.multi_beat_weight * loss_rhythm +
-            self.phase_weight * loss_phase
+            self.phase_weight * loss_phase +
+            self.ef_weight * loss_ef
         )
 
-        return total_loss, {
+        loss_dict = {
             "dice": loss_dice,
             "volume": loss_vol,
             "phase_geom": loss_phase_geom,
             "multi_beat": loss_rhythm,
             "phase": loss_phase
         }
+        if self.ef_weight > 0:
+            loss_dict["ef"] = loss_ef
+
+        return total_loss, loss_dict
 
     def _compute_alignment_loss(self, area, vol):
         """Standardized Min-Max Alignment."""
