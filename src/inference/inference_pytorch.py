@@ -93,20 +93,33 @@ class PyTorchSegmentationInference:
                     features = output["features"]
                 else:
                     features = torch.zeros((input_tensor.shape[0], 1, input_tensor.shape[2]), device=input_tensor.device)
+                
+                pred_vol_curve = output.get("pred_vol_curve")
+                pred_phase = output.get("pred_phase")
+                pred_phase_vel = output.get("pred_phase_vel")
             else:
                 mask_logits = output[0]
                 features = output[-1]
+                pred_vol_curve = None
+                pred_phase = None
+                pred_phase_vel = None
                 
             mask_prob = torch.sigmoid(mask_logits)
             
-        return mask_prob.cpu().numpy(), features.cpu().numpy()
+        return (
+            mask_prob.cpu().numpy(), 
+            features.cpu().numpy(),
+            pred_vol_curve.cpu().numpy() if pred_vol_curve is not None else None,
+            pred_phase.cpu().numpy() if pred_phase is not None else None,
+            pred_phase_vel.cpu().numpy() if pred_phase_vel is not None else None
+        )
 
     def segment_video(self, frames: np.ndarray, threshold: float = 0.5):
         """
         Extract masks, probs, and features from a batch of frames.
         """
         input_data = self.preprocess(frames)
-        mask_prob, features = self.predict(input_data)
+        mask_prob, features, pred_vol, pred_phase, pred_phase_vel = self.predict(input_data)
         
         mask_prob_squeezed = mask_prob.squeeze(0).squeeze(0)
         binary_mask = (mask_prob_squeezed > threshold).astype(np.uint8)
@@ -131,7 +144,24 @@ class PyTorchSegmentationInference:
                  else:
                      features = None
                      
-        return binary_mask, mask_prob_squeezed, features
+        volumes_list = []
+        if pred_vol is not None:
+            volumes_list = (pred_vol.squeeze() * 300.0).tolist()
+            if not isinstance(volumes_list, list): volumes_list = [volumes_list]
+            
+        phases_list = []
+        if pred_phase is not None:
+            p_sq = pred_phase.squeeze()
+            if p_sq.ndim == 0: phases_list = [p_sq.item()]
+            else: phases_list = p_sq.tolist()
+            
+        phase_vel_list = []
+        if pred_phase_vel is not None:
+            pv_sq = pred_phase_vel.squeeze()
+            if pv_sq.ndim == 0: phase_vel_list = [pv_sq.item()]
+            else: phase_vel_list = pv_sq.tolist()
+                     
+        return binary_mask, mask_prob_squeezed, features, volumes_list, phases_list, phase_vel_list
 
 
 class StreamingPyTorchInference:
@@ -199,6 +229,7 @@ class StreamingPyTorchInference:
             mask_logits = outputs.get("mask_logits")
             pred_vol = outputs.get("pred_vol")
             pred_phase = outputs.get("pred_phase", None)
+            pred_phase_vel = outputs.get("pred_phase_vel", None)
             features = outputs.get("hidden_features", None)
             
             mask_prob = torch.sigmoid(mask_logits) if mask_logits is not None else None
@@ -210,8 +241,15 @@ class StreamingPyTorchInference:
             result["pred_vol"] = pred_vol.cpu().numpy()
         if pred_phase is not None:
             result["pred_phase"] = pred_phase.cpu().numpy()
+        if pred_phase_vel is not None:
+            result["pred_phase_vel"] = pred_phase_vel.cpu().numpy()
         if features is not None:
             result["features"] = features.cpu().numpy()
+            
+        if self.hidden_state and isinstance(self.hidden_state, dict):
+            coeff_ema = self.hidden_state.get("coeff_ema")
+            if coeff_ema is not None:
+                result["coeff_ema"] = coeff_ema.cpu().numpy()
             
         return result
 
@@ -222,6 +260,8 @@ class StreamingPyTorchInference:
         features_list = []
         volumes_list = []
         phases_list = []
+        phase_vel_list = []
+        coeff_ema_list = []
         
         T = frames.shape[0]
         
@@ -234,9 +274,13 @@ class StreamingPyTorchInference:
             if "features" in outputs:
                 features_list.append(outputs["features"].squeeze())
             if "pred_vol" in outputs:
-                volumes_list.append(outputs["pred_vol"].squeeze())
+                volumes_list.append(float(outputs["pred_vol"].squeeze()) * 300.0)
             if "pred_phase" in outputs:
                 phases_list.append(outputs["pred_phase"].squeeze())
+            if "pred_phase_vel" in outputs:
+                phase_vel_list.append(outputs["pred_phase_vel"].squeeze())
+            if "coeff_ema" in outputs:
+                coeff_ema_list.append(outputs["coeff_ema"].squeeze())
                 
         mask_probs = np.stack(masks_list, axis=0) if masks_list else None
         binary_mask = (mask_probs > threshold).astype(np.uint8) if mask_probs is not None else None
@@ -246,7 +290,7 @@ class StreamingPyTorchInference:
         else:
             features = None
             
-        return binary_mask, mask_probs, features, volumes_list, phases_list
+        return binary_mask, mask_probs, features, volumes_list, phases_list, phase_vel_list
 
     def predict(self, input_data: np.ndarray):
         """
@@ -254,10 +298,10 @@ class StreamingPyTorchInference:
         input_data: (1, 3, T, H, W)
         """
         frames_t = input_data[0].transpose(1, 0, 2, 3) # (T, 3, H, W)
-        _, mask_probs, features, volumes, phases = self.segment_video(frames_t)
+        _, mask_probs, features, volumes, phases, phase_vels = self.segment_video(frames_t)
         mask_prob_out = mask_probs[np.newaxis, np.newaxis, :, :, :]
         features_out = features[np.newaxis, :, :] if features is not None else None
-        return mask_prob_out, features_out, volumes, phases
+        return mask_prob_out, features_out, volumes, phases, phase_vels
 
 def run_inference_pytorch(
     config,

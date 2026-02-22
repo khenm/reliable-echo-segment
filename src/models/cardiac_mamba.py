@@ -150,6 +150,14 @@ class CardiacMamba(nn.Module):
         # 4. Heads
         self.fourier_vol_head = FourierVolumeHead(hidden_dim, K=3)
         self.phase_head = nn.Linear(hidden_dim, 3) # [Background, ES, ED]
+        
+        # 5. Mask Refinement
+        self.refinement_conv = nn.Sequential(
+            nn.Conv2d(hidden_dim + 1, 16, kernel_size=3, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(16, 1, kernel_size=1)
+        )
 
         logger.info(f"CardiacMamba initialized with backbone={backbone}")
 
@@ -199,15 +207,31 @@ class CardiacMamba(nn.Module):
         # 1. Spatial Processing (Parallel over all frames)
         mask_logits_flat, tokens_flat, raw_area_flat = self.forward_spatial(x_flat)
         
-        # Unfold time
-        # mask_logits: (B, T, 1, H_out, W_out)
-        mask_logits = mask_logits_flat.view(B, T, 1, *mask_logits_flat.shape[2:])
+        # Unfold time for Mamba
         # tokens: (B, T, D)
         tokens = tokens_flat.view(B, T, -1)
         raw_area = raw_area_flat.view(B, T, -1)
         
         # 2. Temporal Processing (Mamba Parallel Scan)
         temporal_out = self.temporal_mamba(tokens) # (B, T, D)
+        
+        # 2.5 Mask Refinement
+        # Broadcast temporal features to spatial dimensions
+        temporal_out_spatial = temporal_out.view(B*T, -1).unsqueeze(-1).unsqueeze(-1) # (B*T, D, 1, 1)
+        temporal_out_spatial = temporal_out_spatial.expand(-1, -1, mask_logits_flat.shape[2], mask_logits_flat.shape[3]) # (B*T, D, H, W)
+        
+        # Combine draft mask and temporal features
+        refined_input = torch.cat([mask_logits_flat, temporal_out_spatial], dim=1) # (B*T, D+1, H, W)
+        
+        # Generate final refined masks
+        final_mask_logits_flat = self.refinement_conv(refined_input) # (B*T, 1, H, W)
+        
+        # Unfold time
+        # mask_logits: (B, T, 1, H_out, W_out)
+        mask_logits = final_mask_logits_flat.view(B, T, 1, *final_mask_logits_flat.shape[2:])
+        # tokens: (B, T, D)
+        tokens = tokens_flat.view(B, T, -1)
+        raw_area = raw_area_flat.view(B, T, -1)
         
         # 3. Heads
         vol_curve, phase, phase_vel, coeffs = self.fourier_vol_head(temporal_out)
@@ -270,6 +294,12 @@ class CardiacMamba(nn.Module):
         # temporal_out_seq: (B, 1, D)
         
         temporal_out = temporal_out_seq # Keeping sequence dim (B, 1, D) for Fourier Head
+        
+        # 2.5 Mask Refinement
+        temporal_out_spatial = temporal_out.view(x.shape[0], -1).unsqueeze(-1).unsqueeze(-1) # (B, D, 1, 1)
+        temporal_out_spatial = temporal_out_spatial.expand(-1, -1, mask_logits.shape[2], mask_logits.shape[3]) # (B, D, H, W)
+        refined_input = torch.cat([mask_logits, temporal_out_spatial], dim=1) # (B, D+1, H, W)
+        mask_logits = self.refinement_conv(refined_input) # (B, 1, H, W)
         
         vol_curve, phase, phase_vel, coeff_ema = self.fourier_vol_head(
             temporal_out, 
