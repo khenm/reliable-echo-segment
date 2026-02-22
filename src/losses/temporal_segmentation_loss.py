@@ -65,16 +65,16 @@ class TemporalWeakSegLoss(nn.Module):
         # 5. Phase Classification (Cross Entropy)
         loss_phase = torch.tensor(0.0, device=pred_logits.device)
         if pred_phase is not None and frame_mask is not None:
-            # pred_phase -> (B, T, 3) -> (B*T, 3)
-            # frame_mask -> (B, T) -> (B*T,) (with values 0, 1, 2)
             loss_phase = self.ce_loss(pred_phase.view(-1, 3), frame_mask.view(-1).long())
 
         # 6. Ejection Fraction (MSE)
         loss_ef = torch.tensor(0.0, device=pred_logits.device)
         if self.ef_weight > 0 and pred_ef is not None and target_ef is not None:
-             valid_ef = target_ef >= 0
-             if valid_ef.any():
-                 loss_ef = self.mse(pred_ef[valid_ef], target_ef[valid_ef])
+            p_ef = pred_ef.view(-1)
+            t_ef = target_ef.view(-1)
+            valid_ef = t_ef >= 0
+            if valid_ef.any():
+                loss_ef = self.mse(p_ef[valid_ef], t_ef[valid_ef])
 
         total_loss = (
             self.dice_weight * loss_dice +
