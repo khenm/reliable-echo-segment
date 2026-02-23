@@ -40,12 +40,13 @@ def ssd_minimal_discrete(u, A, B, C, block_len=64, initial_states=None):
 
     # 2. Intra-chunk attention
     A_cumsum = torch.cumsum(A_chunked, dim=-1)
+    diff = A_cumsum[:, :, :, :, None] - A_cumsum[:, :, :, None, :]
+    mask = torch.tril(torch.ones(block_len, block_len, device=u.device))
+    diff = torch.where(mask == 1, diff, torch.tensor(-float('inf'), device=diff.device))
     
     # 1-Semiseparable Mask
     # L[i,j] = exp(A_i - A_j)
-    L = torch.exp(A_cumsum[:, :, :, :, None] - A_cumsum[:, :, :, None, :])
-    mask = torch.tril(torch.ones(block_len, block_len, device=u.device))
-    L = L * mask 
+    L = torch.exp(diff)
 
     # Intra-chunk output
     # M = (C @ B^T) * L
@@ -161,10 +162,10 @@ def mamba_chunk_scan_combined(z, x, B, C, dt, dt_bias, A, D, chunk_size=128, d_s
     
     return out, last_state
 
-# Compile the core logic for Blackwell/Hopper optimization
-try:
-    ssd_minimal_discrete = torch.compile(ssd_minimal_discrete, fullgraph=True)
-    mamba_chunk_scan_combined = torch.compile(mamba_chunk_scan_combined)
-except Exception as e:
-    import logging
-    logging.warning(f"SSD: torch.compile failed or not available, using eager mode. {e}")
+# Global compilation is disabled to prevent recompilation loops with varying hierarchical head sizes
+# try:
+#     ssd_minimal_discrete = torch.compile(ssd_minimal_discrete, fullgraph=True)
+#     mamba_chunk_scan_combined = torch.compile(mamba_chunk_scan_combined)
+# except Exception as e:
+#     import logging
+#     logging.warning(f"SSD: torch.compile failed or not available, using eager mode. {e}")

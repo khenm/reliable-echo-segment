@@ -284,11 +284,7 @@ def get_criterions(cfg):
         criterions['segmentation'] = build_loss(
             "TemporalWeakSegLoss",
             dice_weight=weights.get('dice', 1.0),
-            ef_weight=weights.get('ef', 10.0),
-            smooth_weight=weights.get('smooth', 1.0),
-            cycle_weight=weights.get('cycle', 0.5),
-            volume_weight=weights.get('volume', 0.1),
-            phase_weight=weights.get('phase', 0.0)
+            volume_weight=weights.get('volume', 1.0),
         )
 
         distill_cfg = cfg.get('loss', {}).get('distillation', {})

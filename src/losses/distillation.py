@@ -3,6 +3,7 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 
 from src.registry import register_loss
 from src.utils.logging import get_logger
@@ -27,9 +28,14 @@ def _isolate_and_load(hub_repo: str, model_name: str, **kwargs) -> nn.Module:
             cached_src_modules[key] = sys.modules.pop(key)
             
     try:
-        # 4. Load from Hub (this will add the repo to sys.path)
-        # verbose=False to reduce noise, assuming user trusts the repo
-        model = torch.hub.load(hub_repo, model_name, force_reload=False, verbose=False, trust_repo=True, **kwargs)
+        if dist.is_available() and dist.is_initialized():
+            if dist.get_rank() == 0:
+                model = torch.hub.load(hub_repo, model_name, force_reload=False, verbose=False, trust_repo=True, **kwargs)
+            dist.barrier()
+            if dist.get_rank() != 0:
+                model = torch.hub.load(hub_repo, model_name, force_reload=False, verbose=False, trust_repo=True, **kwargs)
+        else:
+            model = torch.hub.load(hub_repo, model_name, force_reload=False, verbose=False, trust_repo=True, **kwargs)
         return model
     except Exception as e:
         logger.error(f"Failed to load {model_name} from {hub_repo}: {e}")

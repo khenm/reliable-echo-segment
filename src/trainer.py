@@ -256,7 +256,6 @@ class Trainer:
         pred_edv = outputs['pred_edv']
         pred_esv = outputs['pred_esv']
         pred_ef = outputs['pred_ef']
-        pred_phase = outputs.get('pred_phase')
 
         loss = 0.0
         comps = {}
@@ -265,9 +264,13 @@ class Trainer:
         frame_mask = batch.get("frame_mask")
         
         # Targets
-        ef_target = batch.get("target_ef").to(self.device).view(-1, 1) if "target_ef" in batch else batch.get("target").to(self.device).view(-1, 1)
-        edv_target = batch.get("target_edv").to(self.device).view(-1, 1)
-        esv_target = batch.get("target_esv").to(self.device).view(-1, 1)
+        edv_target = batch.get("target_edv").to(self.device).view(-1, 1) if batch.get("target_edv") is not None else None
+        esv_target = batch.get("target_esv").to(self.device).view(-1, 1) if batch.get("target_esv") is not None else None
+        ef_target = batch.get("target_ef").to(self.device).view(-1, 1) if "target_ef" in batch else batch.get("target").to(self.device).view(-1, 1) if "target" in batch else None
+
+        # Prevent DDP unused parameters error by ensuring all heads receive gradients
+        if 'pred_phase' in outputs:
+            loss += 0.0 * outputs['pred_phase'].sum()
 
         # 1. Segmentation Loss
         unweighted_comps = {}
@@ -281,25 +284,22 @@ class Trainer:
             
             if hasattr(loss_fn, 'volume_weight'): # Identify our custom loss
                 l_seg, c_dict = loss_fn(
-                    mask_logits, 
-                    target_masks, 
-                    pred_ef, 
-                    ef_target, 
-                    frame_mask, 
-                    frames=imgs,
+                    pred_logits=mask_logits, 
+                    target_masks=target_masks, 
+                    frame_mask=frame_mask, 
                     target_edv=edv_target,
                     target_esv=esv_target,
                     pred_edv=pred_edv,
                     pred_esv=pred_esv,
-                    pred_phase=pred_phase
                 )
             elif hasattr(loss_fn, 'cycle_loss'):
+                # Legacy fallback, unlikely to be used with DeepMind config
                 l_seg, c_dict = loss_fn(
-                    mask_logits, target_masks, pred_ef, ef_target, frame_mask, imgs
+                    mask_logits, target_masks, pred_ef, frame_mask, imgs
                 )
             else:
                 l_seg, c_dict = loss_fn(
-                    mask_logits, target_masks, pred_ef, ef_target, frame_mask
+                    mask_logits, target_masks, pred_ef, frame_mask
                 )
             
             if self.dynamic_weighter is not None:
@@ -701,25 +701,33 @@ class Trainer:
     def _log_epoch(self, ep, loss, comps, val_res):
         if not is_main_process():
             return
+            
+        train_strs = [f"{k}={v:.4f}" for k, v in comps.items()]
         if isinstance(ep, str):
-            msg = f"{ep} loss={loss:.4f} " + " ".join([f"{k}={v:.4f}" for k, v in comps.items()])
+            msg_train = f"{ep} Train loss={loss:.4f} " + " ".join(train_strs)
+            msg_val = f"{ep} Valid "
         else:
-            msg = f"E{ep:03d} loss={loss:.4f} " + " ".join([f"{k}={v:.4f}" for k, v in comps.items()])
+            msg_train = f"E{ep:03d} Train loss={loss:.4f} " + " ".join(train_strs)
+            msg_val = f"E{ep:03d} Valid "
+            
+        logger.info(msg_train)
+        
         if isinstance(val_res, tuple):
             if self.is_segmentation:
                 # (dice, mae, rmse, r2, mae_edv, rmse_edv, r2_edv, mae_esv, rmse_esv, r2_esv)
-                msg += f" valDice={val_res[0]:.4f} valMAE={val_res[1]:.4f} valRMSE={val_res[2]:.4f} valR2={val_res[3]:.4f}"
-                msg += f" valMAE_EDV={val_res[4]:.4f} valRMSE_EDV={val_res[5]:.4f} valR2_EDV={val_res[6]:.4f}"
-                msg += f" valMAE_ESV={val_res[7]:.4f} valRMSE_ESV={val_res[8]:.4f} valR2_ESV={val_res[9]:.4f}"
+                msg_val += f"Dice={val_res[0]:.4f} MAE={val_res[1]:.4f} RMSE={val_res[2]:.4f} R2={val_res[3]:.4f} "
+                msg_val += f"MAE_EDV={val_res[4]:.4f} RMSE_EDV={val_res[5]:.4f} R2_EDV={val_res[6]:.4f} "
+                msg_val += f"MAE_ESV={val_res[7]:.4f} RMSE_ESV={val_res[8]:.4f} R2_ESV={val_res[9]:.4f}"
             elif self.is_skeletal:
-                 msg += f" valMAE={val_res[1]:.4f} valDice={val_res[2]:.4f} valSkel={val_res[3]:.4f} valRMSE={val_res[4]:.4f} valR2={val_res[5]:.4f}"
+                msg_val += f"MAE={val_res[1]:.4f} Dice={val_res[2]:.4f} Skel={val_res[3]:.4f} RMSE={val_res[4]:.4f} R2={val_res[5]:.4f}"
             elif self.is_regression or self.is_dual_stream:
-                 msg += f" valMAE={val_res[1]:.4f} valDice={val_res[2]:.4f} valRMSE={val_res[3]:.4f} valR2={val_res[4]:.4f}"
+                msg_val += f"MAE={val_res[1]:.4f} Dice={val_res[2]:.4f} RMSE={val_res[3]:.4f} R2={val_res[4]:.4f}"
             else:
-                msg += f" valMAE={val_res[1]:.4f} valDice={val_res[2]:.4f}"
+                msg_val += f"MAE={val_res[1]:.4f} Dice={val_res[2]:.4f}"
         else:
-            msg += f" valDice={val_res:.4f}"
-        logger.info(msg)
+            msg_val += f"Dice={val_res:.4f}"
+            
+        logger.info(msg_val)
         
         if wandb.run is not None:
             log_dict = {"val/loss": loss}

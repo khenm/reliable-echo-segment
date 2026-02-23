@@ -9,11 +9,7 @@ loss:
   dynamic_weighting: true
   weights:
     dice: 1.0
-    ef: 0.2
-    volume: 0.2
-    phase: 1.0
-    smooth: 0.1
-    cycle: 0.5
+    volume: 1.0
   distillation:
     enabled: true
     weight: 1.0
@@ -23,7 +19,7 @@ loss:
 
 training:
   epochs: 100
-  batch_size: 32
+  batch_size: 4
   train_batch_size: 64
   val_batch_size: 64
   num_workers: 12

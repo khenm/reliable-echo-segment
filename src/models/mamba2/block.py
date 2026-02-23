@@ -46,12 +46,15 @@ class Mamba2(nn.Module):
         
         self.in_proj = nn.Linear(self.d_model, self.d_in_proj, bias=bias)
         
+        # Conv1d only applies to x, B, and C
+        self.d_conv_proj = self.d_inner + 2 * self.ngroups * self.d_state
+        
         self.conv1d = nn.Conv1d(
-            in_channels=self.d_in_proj,
-            out_channels=self.d_in_proj,
+            in_channels=self.d_conv_proj,
+            out_channels=self.d_conv_proj,
             bias=conv_bias,
             kernel_size=d_conv,
-            groups=self.d_in_proj,
+            groups=self.d_conv_proj,
             padding=d_conv - 1,
         )
         
@@ -81,7 +84,7 @@ class Mamba2(nn.Module):
         # Out projection
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias)
 
-    def forward(self, u, inference_params=None):
+    def forward(self, u, inference_params=None, **kwargs):
         """
         u: (batch, seqlen, dim)
         """
@@ -90,23 +93,37 @@ class Mamba2(nn.Module):
         # 1. Project
         zxbcdt = self.in_proj(u) # (B, L, D_in_proj)
         
-        # 2. Conv1d
-        # Rearrange for conv
-        zxbcdt = zxbcdt.transpose(1, 2) # (B, D, L)
-        zxbcdt = self.conv1d(zxbcdt)[:, :, :seqlen] # Causal padding means we slice off the end
-        zxbcdt = zxbcdt.transpose(1, 2) # (B, L, D)
-        
+        # 2. Split out z and dt from the conv path
         d_inner = self.d_inner
         n_g_state = self.ngroups * self.d_state
         
-        # Split logic
-        z, x, B, C, dt = torch.split(
+        z, xBC, dt = torch.split(
             zxbcdt, 
-            [d_inner, d_inner, n_g_state, n_g_state, self.nheads],
+            [d_inner, d_inner + 2 * n_g_state, self.nheads],
             dim=-1
         )
 
-        # 4. SSM
+        # 3. Conv1d and Activation (Only on x, B, C)
+        xBC = xBC.transpose(1, 2) 
+        xBC = self.conv1d(xBC)[:, :, :seqlen] 
+        xBC = xBC.transpose(1, 2)
+        xBC = F.silu(xBC) # Added missing SiLU activation
+        
+        x, B, C = torch.split(
+            xBC,
+            [d_inner, n_g_state, n_g_state],
+            dim=-1
+        )
+
+        # 4. Sequence Padding for Chunking
+        padlen = (self.chunk_size - (seqlen % self.chunk_size)) % self.chunk_size
+        if padlen > 0:
+            x = F.pad(x, (0, 0, 0, padlen))
+            B = F.pad(B, (0, 0, 0, padlen))
+            C = F.pad(C, (0, 0, 0, padlen))
+            dt = F.pad(dt, (0, 0, 0, padlen))
+
+        # 5. SSM
         y, last_state = mamba_chunk_scan_combined(
             z=None, 
             x=x, 
@@ -120,9 +137,13 @@ class Mamba2(nn.Module):
             d_state=self.d_state
         )
         
-        # 5. Output Project
+        # Slice off the padding if we added any
+        if padlen > 0:
+            y = y[:, :seqlen, :]
+
+        # 6. Output Project
         # Correct Order: Norm(y) -> Gate(y * silu(z)) -> OutProj
-        y = self.norm(y) 
+        y = self.norm(y.to(self.norm.weight.dtype)) 
         out = y * F.silu(z)
         out = self.out_proj(out)
         
@@ -147,32 +168,39 @@ class Mamba2(nn.Module):
         if state is None:
             # h_prev shape: (B, nheads, d_state, headdim)
             h_prev = torch.zeros(B, self.nheads, self.d_state, self.headdim, device=u.device, dtype=u.dtype)
-            # conv_state shape: (B, d_in_proj, d_conv)
-            conv_state = torch.zeros(B, self.d_in_proj, self.d_conv, device=u.device, dtype=u.dtype)
+            # conv_state shape: (B, d_conv_proj, d_conv)
+            conv_state = torch.zeros(B, self.d_conv_proj, self.d_conv, device=u.device, dtype=u.dtype)
         else:
             h_prev, conv_state = state
 
         # 1. Project
         zxbcdt = self.in_proj(u) # (B, 1, D_in)
         
-        xt = zxbcdt.transpose(1, 2) # (B, D_in, 1)
+        # 2. Split out z and dt from the conv path
+        d_inner = self.d_inner
+        n_g_state = self.ngroups * self.d_state
+        
+        z, xBC, dt = torch.split(
+            zxbcdt, 
+            [d_inner, d_inner + 2 * n_g_state, self.nheads],
+            dim=-1
+        )
+        
+        xt = xBC.transpose(1, 2) # (B, D_conv_proj, 1)
         conv_state = torch.cat([conv_state[:, :, 1:], xt], dim=2)
         
-        # (B, D_in, K) * (D_in, 1, K) -> (B, D_in, K) -> sum(2) -> (B, D_in)
+        # (B, D_conv_proj, K) * (D_conv_proj, 1, K) -> (B, D_conv_proj, K) -> sum(2) -> (B, D_conv_proj)
         x_conv = torch.sum(conv_state * self.conv1d.weight.squeeze(1).unsqueeze(0), dim=-1)
         if self.conv1d.bias is not None:
              x_conv = x_conv + self.conv1d.bias
              
-        # Reshape back to (B, 1, D_in) for split
-        zxbcdt = x_conv.unsqueeze(1) # (B, 1, D_in)
+        # Reshape back to (B, 1, D_conv_proj) for split
+        xBC = F.silu(x_conv).unsqueeze(1) # (B, 1, D_conv_proj)
 
         # 3. Split
-        d_inner = self.d_inner
-        n_g_state = self.ngroups * self.d_state
-        
-        z, x, B_ssm, C_ssm, dt = torch.split(
-            zxbcdt, 
-            [d_inner, d_inner, n_g_state, n_g_state, self.nheads],
+        x, B_ssm, C_ssm = torch.split(
+            xBC, 
+            [d_inner, n_g_state, n_g_state],
             dim=-1
         )
         
@@ -233,7 +261,7 @@ class Mamba2(nn.Module):
         y = rearrange(y, "b h l p -> b l (h p)")
         
         # Norm + Gating
-        y = self.norm(y)
+        y = self.norm(y.to(self.norm.weight.dtype))
         out = y * F.silu(z)
         out = self.out_proj(out)
         
@@ -249,7 +277,7 @@ class Mamba2Block(nn.Module):
     def forward(self, x, inference_params=None):
         # Validation / simple residual
         residual = x
-        x = self.norm(x)
+        x = self.norm(x.to(self.norm.weight.dtype))
         x = self.mixer(x, inference_params=inference_params)
         return x + residual
 
@@ -257,6 +285,6 @@ class Mamba2Block(nn.Module):
         # Validation / simple residual
         # x: (B, 1, D)
         residual = x
-        x = self.norm(x)
+        x = self.norm(x.to(self.norm.weight.dtype))
         x, next_state = self.mixer.step(x, state)
         return x + residual, next_state

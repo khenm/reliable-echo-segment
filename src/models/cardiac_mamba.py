@@ -1,36 +1,84 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import timm
+import math
 
 from src.registry import register_model
 from src.utils.logging import get_logger
-from src.models.segment_tracker import SegmentationDecoder
-from src.models.mamba_wrapper import MambaBlock
+from src.models.mamba2.block import Mamba2Block
+from src.models.mamba2.vss import PureMambaEncoder, PureMambaDecoder
 
 logger = get_logger()
+
+class MambaBlock(nn.Module):
+    """
+    Wrapper for Mamba-2 Block.
+    """
+    def __init__(self, d_model, **kwargs):
+        super().__init__()
+        self.inner = Mamba2Block(dim=d_model, **kwargs)
+
+    def forward(self, x):
+        return self.inner(x)
+    
+    def step(self, x, state=None):
+        return self.inner.step(x, state)
+
+class FourierVolumeHead(nn.Module):
+    def __init__(self, hidden_dim, K=3):
+        super().__init__()
+        self.K = K
+        self.timescale = nn.Parameter(torch.tensor([15.0]))
+        self.phase_vel_head = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Sigmoid()
+        )
+        self.coeff_head = nn.Sequential(
+            nn.Linear(hidden_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1 + 2 * K)
+        )
+
+    def generate_wave(self, coeffs, phase, T):
+        """Helper to reconstruct the wave from coefficients and phase."""
+        a0 = F.softplus(coeffs[:, :1])
+        harmonics = coeffs[:, 1:]
+        
+        vol_curve = a0.unsqueeze(1).repeat(1, T, 1)
+        for n in range(1, self.K + 1):
+            an = harmonics[:, 2*(n-1) : 2*(n-1)+1].unsqueeze(1)
+            bn = harmonics[:, 2*(n-1)+1 : 2*(n-1)+2].unsqueeze(1)
+            vol_curve = vol_curve + an * torch.cos(n * phase) + bn * torch.sin(n * phase)
+            
+        return torch.relu(vol_curve)
+
+    def forward(self, tokens, is_streaming=False, prev_phase=None, coeff_ema=None):
+        B, T, D = tokens.shape
+        raw_vel = self.phase_vel_head(tokens)
+        phase_vel = raw_vel * (2 * math.pi / (torch.abs(self.timescale) + 1e-6))
+        
+        if not is_streaming:
+            phase = torch.cumsum(phase_vel, dim=1)
+            coeffs = self.coeff_head(tokens.mean(dim=1))
+        else:
+            phase = (torch.zeros(B, 1, 1, device=tokens.device) if prev_phase is None else prev_phase) + phase_vel
+            curr_coeffs = self.coeff_head(tokens.mean(dim=1))
+            coeffs = curr_coeffs if coeff_ema is None else (0.95 * coeff_ema + 0.05 * curr_coeffs)
+            
+        vol_curve = self.generate_wave(coeffs, phase, T)
+        return vol_curve, phase, phase_vel, coeffs
 
 @register_model("cardiac_mamba")
 class CardiacMamba(nn.Module):
     """
-    Streaming Cardiac Model using Mamba (State Space Models).
-    
-    Architecture:
-    1. Spatial Backbone (2D CNN): Extracts features per frame.
-    2. Segmentation Head (2D U-Net): Generates masks per frame.
-    3. Temporal Module (Mamba): Processes sequence of features to predict volume and phase.
-    
-    Capabilities:
-    - Parallel Training: Sees whole clip, gradients flow through time in log(N).
-    - Streaming Inference: Updates hidden state frame-by-frame, constant memory.
+    Streaming Cardiac Model using a Unified Pure Mamba Architecture.
     """
-
     @classmethod
     def from_config(cls, cfg: dict) -> "CardiacMamba":
         model_cfg = cfg.get('model', {})
         return cls(
-            backbone=model_cfg.get('backbone', 'efficientnet_b0'),
-            pretrained=model_cfg.get('pretrained', True),
             hidden_dim=model_cfg.get('hidden_dim', 256),
             output_size=model_cfg.get('output_size', 112),
             d_state=model_cfg.get('d_state', 16),
@@ -41,8 +89,6 @@ class CardiacMamba(nn.Module):
 
     def __init__(
         self,
-        backbone: str = 'efficientnet_b0',
-        pretrained: bool = True,
         hidden_dim: int = 256,
         output_size: int = 112,
         d_state: int = 16,
@@ -52,32 +98,35 @@ class CardiacMamba(nn.Module):
     ):
         super().__init__()
         
-        # 1. Spatial Encoder (Backbone)
-        self.encoder = timm.create_model(
-            backbone,
-            pretrained=pretrained,
-            num_classes=0,
-            global_pool='', # Keep spatial dims
-            features_only=True # Return list of features for U-Net
-        )
+        self.output_size = output_size
         
-        # Get feature info
-        feature_info = self.encoder.feature_info.info
-        encoder_channels = [x['num_chs'] for x in feature_info]
-        self.feature_dim = encoder_channels[-1]
+        # 1. Spatial Encoder (Pure Mamba)
+        self.encoder = PureMambaEncoder(
+            in_channels=3,
+            embed_dim=96,
+            depths=[2, 2, 4, 2],
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=expand,
+            chunk_size=chunk_size
+        )
+        self.feature_dim = self.encoder.feature_dims[-1]
 
-        # Adapter to hidden_dim
-        self.adapter = nn.Conv2d(self.feature_dim, hidden_dim, kernel_size=1)
+        # Clean Linear Adapter mapping spatial bottleneck -> temporal token
+        self.temporal_adapter = nn.Linear(self.feature_dim, hidden_dim)
 
-        # 2. Segmentation Decoder (Frame-wise)
-        self.decoder = SegmentationDecoder(
-            hidden_dim=hidden_dim, 
-            output_size=output_size, 
-            spatial_input=True
+        # 2. Segmentation Decoder (Frame-wise Native Projection)
+        self.decoder = PureMambaDecoder(
+            encoder_channels=self.encoder.feature_dims, 
+            output_channels=1,
+            depths=[1, 1, 1, 1],
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=expand,
+            chunk_size=chunk_size
         )
 
         # 3. Temporal Module (Mamba)
-        # Mamba takes (B, L, D)
         self.temporal_mamba = MambaBlock(
             d_model=hidden_dim,
             d_state=d_state,
@@ -86,102 +135,64 @@ class CardiacMamba(nn.Module):
             chunk_size=chunk_size,
         )
 
-        # 4. Heads
-        self.vol_head = nn.Linear(hidden_dim + 1, 1)
-        self.phase_head = nn.Linear(hidden_dim, 3) # [Background, ES, ED]
+        # 4. Multi-Task Heads
+        self.fourier_vol_head = FourierVolumeHead(hidden_dim, K=3)
+        self.phase_head = nn.Linear(hidden_dim, 3) 
 
-        logger.info(f"CardiacMamba initialized with backbone={backbone}")
+        logger.info(f"CardiacMamba initialized with PureMamba backbone")
 
     def forward_spatial(self, x):
-        """
-        Processes a batch of frames (B*T) spatially.
-        Returns:
-            mask_logits: (B*T, 1, H, W)
-            features: (B*T, D) - Pooled feature vector for temporal model
-        """
-        # x: (N, C, H, W) where N = B*T
         enc_feats = self.encoder(x) 
-        bottleneck = enc_feats[-1]
+        bottleneck = enc_feats[-1] 
         
-        # Adapter
-        adapted = self.adapter(bottleneck) # (N, hidden_dim, H', W')
+        mask_logits = self.decoder(enc_feats)
         
-        # Segmentation
-        mask_logits = self.decoder(adapted) # (N, 1, H_out, W_out)
         mask_probs = torch.sigmoid(mask_logits)
+        mask_downsampled = F.adaptive_avg_pool2d(mask_probs, bottleneck.shape[2:])
         
-        mask_probs_down = F.adaptive_avg_pool2d(mask_probs, adapted.shape[2:])
+        attended_bottleneck = bottleneck * mask_downsampled
+        pooled = F.adaptive_avg_pool2d(attended_bottleneck, 1).flatten(1) 
+        temporal_tokens = self.temporal_adapter(pooled)          
         
-        weighted_adapted = adapted * (mask_probs_down + 0.1)
-        pooled = F.adaptive_avg_pool2d(weighted_adapted, 1).flatten(1)
-        
-        raw_area = mask_probs.sum(dim=(2, 3)) / (mask_probs.shape[2] * mask_probs.shape[3])
-        
-        return mask_logits, pooled, raw_area
+        if self.output_size is not None and mask_logits.shape[-1] != self.output_size:
+            mask_logits = F.interpolate(
+                mask_logits, 
+                size=(self.output_size, self.output_size), 
+                mode='bilinear', 
+                align_corners=False
+            )
+            
+        return mask_logits, temporal_tokens
 
     def forward(self, x: torch.Tensor, lengths: torch.Tensor = None, **kwargs) -> dict:
-        """
-        Parallel Training Forward Pass.
-        
-        Args:
-            x: (B, C, T, H, W)
-            lengths: (B,) number of valid frames
-            
-        Returns:
-            dict with logs, including 'pred_vol_curve', 'pred_phase', 'mask_logits'
-        """
         B, C, T, H, W = x.shape
-        
-        # Fold time into batch
         x_flat = x.transpose(1, 2).reshape(B * T, C, H, W)
         
-        # 1. Spatial Processing (Parallel over all frames)
-        mask_logits_flat, tokens_flat, raw_area_flat = self.forward_spatial(x_flat)
+        mask_logits_flat, tokens_flat = self.forward_spatial(x_flat)
         
-        # Unfold time
-        # mask_logits: (B, T, 1, H_out, W_out)
         mask_logits = mask_logits_flat.view(B, T, 1, *mask_logits_flat.shape[2:])
-        # tokens: (B, T, D)
         tokens = tokens_flat.view(B, T, -1)
-        raw_area = raw_area_flat.view(B, T, -1)
         
-        # 2. Temporal Processing (Mamba Parallel Scan)
-        temporal_out = self.temporal_mamba(tokens) # (B, T, D)
+        temporal_out = self.temporal_mamba(tokens) 
         
-        # 3. Heads
-        vol_input = torch.cat([temporal_out, raw_area], dim=-1) # (B, T, D + 1)
-        vol_curve = F.softplus(self.vol_head(vol_input)) # (B, T, 1) -> Positive volume
-        phase_logits = self.phase_head(temporal_out)        # (B, T, 3)
+        vol_curve, phase, phase_vel, coeffs = self.fourier_vol_head(temporal_out)
+        phase_logits = self.phase_head(temporal_out)
         
-        # 4. Aggregation
-        phase_probs = F.softmax(phase_logits, dim=-1)
-        
-        prob_es = phase_probs[:, :, 1] # (B, T)
-        prob_ed = phase_probs[:, :, 2] # (B, T)
-        
-        vols = vol_curve.squeeze(-1) # (B, T)
-        
+        vols = vol_curve.squeeze(-1)
         if lengths is not None:
-            # Mask out invalid frames so they don't contribute
             mask_t = (torch.arange(T, device=x.device)[None, :] < lengths[:, None]).float()
-            prob_es = prob_es * mask_t
-            prob_ed = prob_ed * mask_t
-            
-            # Normalize probabilities over the valid sequence length
-            prob_es = prob_es / (prob_es.sum(dim=1, keepdim=True) + 1e-6)
-            prob_ed = prob_ed / (prob_ed.sum(dim=1, keepdim=True) + 1e-6)
+            vols_max = torch.where(mask_t > 0, vols, torch.tensor(-1e9, device=vols.device))
+            vols_min = torch.where(mask_t > 0, vols, torch.tensor(1e9, device=vols.device))
+            pred_edv = vols_max.max(dim=1)[0]
+            pred_esv = vols_min.min(dim=1)[0]
         else:
-            # Normalize probabilities over the whole temporal sequence
-            prob_es = prob_es / (prob_es.sum(dim=1, keepdim=True) + 1e-6)
-            prob_ed = prob_ed / (prob_ed.sum(dim=1, keepdim=True) + 1e-6)
-
-        # Soft Expected Volumes
-        pred_edv = torch.sum(prob_ed * vols, dim=1) # (B,)
-        pred_esv = torch.sum(prob_es * vols, dim=1) # (B,)
-
+            pred_edv = vols.max(dim=1)[0]
+            pred_esv = vols.min(dim=1)[0]
+            
         return {
             "mask_logits": mask_logits.transpose(1, 2), 
             "pred_vol_curve": vol_curve,
+            "pred_phase_vel": phase_vel,
             "pred_phase": phase_logits,
             "pred_edv": pred_edv,
             "pred_esv": pred_esv,
@@ -190,37 +201,39 @@ class CardiacMamba(nn.Module):
         }
 
     def step(self, x: torch.Tensor, state=None):
-        """
-        Streaming Inference Step.
-        
-        Args:
-            x: Single frame (B, C, H, W)
-            state: Hidden state from previous step (Mamba state)
+        if state is None:
+            state = {'mamba_state': None, 'prev_phase': None, 'coeff_ema': None}
             
-        Returns:
-            dict results, next_state
-        """
+        mamba_state = state.get('mamba_state')
+        prev_phase = state.get('prev_phase')
+        coeff_ema = state.get('coeff_ema')
+
         # 1. Spatial
-        mask_logits, token, raw_area = self.forward_spatial(x)
-        # token: (B, D)
+        mask_logits, token = self.forward_spatial(x)
         
         # 2. Temporal Step
-        # Mamba step might need (B, 1, D)
-        token_seq = token.unsqueeze(1) # (B, 1, D)
-        
-        temporal_out_seq, next_state = self.temporal_mamba.step(token_seq, state)
-        # temporal_out_seq: (B, 1, D)
-        
-        temporal_out = temporal_out_seq.squeeze(1) # (B, D)
+        token_seq = token.unsqueeze(1) 
+        temporal_out_seq, next_mamba_state = self.temporal_mamba.step(token_seq, mamba_state)
+        temporal_out = temporal_out_seq 
         
         # 3. Heads
-        vol_input = torch.cat([temporal_out, raw_area.view(-1, 1)], dim=-1)
-        vol = F.softplus(self.vol_head(vol_input)) # (B, 1)
-        phase = self.phase_head(temporal_out)         # (B, 3)
+        vol_curve, phase, phase_vel, coeff_ema = self.fourier_vol_head(
+            temporal_out, is_streaming=True, prev_phase=prev_phase, coeff_ema=coeff_ema
+        )
+        
+        temporal_out_flat = temporal_out.squeeze(1) 
+        phase_logits = self.phase_head(temporal_out_flat) 
+        
+        next_state = {
+            'mamba_state': next_mamba_state,
+            'prev_phase': phase,
+            'coeff_ema': coeff_ema
+        }
         
         return {
-            "mask_logits": mask_logits, # (B, 1, H, W)
-            "pred_vol": vol,
-            "pred_phase": phase,
-            "hidden_features": temporal_out
+            "mask_logits": mask_logits, 
+            "pred_vol": vol_curve.squeeze(1), 
+            "pred_phase": phase_logits,
+            "pred_phase_vel": phase_vel.squeeze(1),
+            "hidden_features": temporal_out_flat
         }, next_state

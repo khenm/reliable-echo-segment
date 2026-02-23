@@ -382,16 +382,7 @@ class ONNXSegmentationInference:
                      # Unexpected shape
                      features = None
         
-        # We need raw logits for entropy, but if model outputs Sigmoid(logits), 
-        # we can invert it or just use probabilities for entropy calc (works fine).
-        # Wrapper currently returns Sigmoid(logits). 
-        # For Auditor _compute_entropy binary, it takes logits or probabilities if carefully handled.
-        # My implementation of _compute_entropy above does expit(logits). 
-        # If input is already PROBS, we should change that.
-        # Let's adjust `process_video` to pass logits if possible, OR
-        # Change Auditor to accept probs.
-        
-        return binary_mask, mask_prob_squeezed, features
+        return binary_mask, mask_prob_squeezed, features, [], [], []
 
 
 class StreamingONNXInference:
@@ -523,6 +514,7 @@ class StreamingONNXInference:
             mask_prob, vol, feat = self.predict_step(frame)
             
             masks_list.append(mask_prob.squeeze()) # (H, W)
+            vols_list.append(float(vol) * 300.0) # Scale back the normalized volume
             if feat is not None:
                 features_list.append(feat.squeeze()) # (D,)
                 
@@ -535,7 +527,10 @@ class StreamingONNXInference:
         else:
             features = None
             
-        return binary_mask, mask_probs, features
+        phases_list = [] # ONNX export doesn't currently output phase
+        phase_vel_list = []
+            
+        return binary_mask, mask_probs, features, vols_list, phases_list, phase_vel_list
 
     def predict(self, input_data: np.ndarray):
         """
@@ -549,7 +544,7 @@ class StreamingONNXInference:
         # (1, 3, T, H, W) -> (T, 3, H, W)
         frames_t = input_data[0].transpose(1, 0, 2, 3) 
         
-        _, mask_probs, features = self.segment_video(frames_t)
+        _, mask_probs, features, vols, phases, pvels = self.segment_video(frames_t)
         
         # mask_probs: (T, H, W) -> (1, 1, T, H, W)
         mask_prob_out = mask_probs[np.newaxis, np.newaxis, :, :, :]
@@ -908,7 +903,9 @@ def run_calibration(inference_engine, csv_path, audit_stats_path="audit_stats.js
         
         # Inference
         try:
-            _, mask_probs, features = inference_engine.segment_video(frames_arr)
+            outputs = inference_engine.segment_video(frames_arr)
+            mask_probs = outputs[1]
+            features = outputs[2]
             
             # Features - only usable if (T, D) shaped
             if features is not None and features.ndim == 2 and features.shape[1] > 1:
@@ -1012,8 +1009,43 @@ def process_video(
     
     # Inference
     start = time.perf_counter()
-    binary_masks, prob_masks, features, volumes_list, phases_list = inference_engine.segment_video(frames_array)
+    outputs = inference_engine.segment_video(frames_array)
     end = time.perf_counter()
+    
+    if len(outputs) >= 6:
+        binary_masks, prob_masks, features, volumes_list, phases_list, phase_vels_list = outputs[:6]
+    elif len(outputs) == 5:
+        binary_masks, prob_masks, features, volumes_list, phases_list = outputs
+        phase_vels_list = []
+    elif len(outputs) == 3:
+        binary_masks, prob_masks, features = outputs
+        volumes_list = []
+        phases_list = []
+        phase_vels_list = []
+    else:
+        binary_masks, prob_masks, features = outputs[0], outputs[1], None
+        volumes_list = []
+        phases_list = []
+        phase_vels_list = []
+        
+    if phase_vels_list:
+        phase_vels_arr = np.array(phase_vels_list)
+        if phase_vels_arr.ndim > 0 and len(phase_vels_arr) > 1:
+            pv_var = float(np.var(phase_vels_arr))
+            logger.info(f"Phase Velocity Variance: {pv_var:.6f}")
+            if pv_var > 0.05: # Threshold for irregular rhythm notification
+                logger.warning(f"Irregular cardiac rhythm detected: phase velocity variance {pv_var:.6f} > 0.05")
+                
+            # Log to audit stats
+            if os.path.exists(audit_stats_path):
+                try:
+                    with open(audit_stats_path, 'r') as f:
+                        stats = json.load(f)
+                    stats["last_video_pv_var"] = pv_var
+                    with open(audit_stats_path, 'w') as f:
+                        json.dump(stats, f)
+                except Exception as e:
+                    pass
     
     fps = len(frames) / (end - start)
     
