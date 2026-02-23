@@ -256,10 +256,6 @@ class Trainer:
         pred_edv = outputs['pred_edv']
         pred_esv = outputs['pred_esv']
         pred_ef = outputs['pred_ef']
-        pred_raw_area = outputs.get('pred_raw_area')
-        pred_vol_curve = outputs.get('pred_vol_curve')
-        pred_phase_vel = outputs.get('pred_phase_vel')
-        pred_phase = outputs['pred_phase']
 
         loss = 0.0
         comps = {}
@@ -271,6 +267,10 @@ class Trainer:
         edv_target = batch.get("target_edv").to(self.device).view(-1, 1) if batch.get("target_edv") is not None else None
         esv_target = batch.get("target_esv").to(self.device).view(-1, 1) if batch.get("target_esv") is not None else None
         ef_target = batch.get("target_ef").to(self.device).view(-1, 1) if "target_ef" in batch else batch.get("target").to(self.device).view(-1, 1) if "target" in batch else None
+
+        # Prevent DDP unused parameters error by ensuring all heads receive gradients
+        if 'pred_phase' in outputs:
+            loss += 0.0 * outputs['pred_phase'].sum()
 
         # 1. Segmentation Loss
         unweighted_comps = {}
@@ -291,11 +291,6 @@ class Trainer:
                     target_esv=esv_target,
                     pred_edv=pred_edv,
                     pred_esv=pred_esv,
-                    pred_vol_curve=pred_vol_curve,
-                    pred_phase_vel=pred_phase_vel,
-                    pred_phase=pred_phase,
-                    target_ef=ef_target,
-                    pred_ef=pred_ef
                 )
             elif hasattr(loss_fn, 'cycle_loss'):
                 # Legacy fallback, unlikely to be used with DeepMind config

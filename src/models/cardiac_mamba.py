@@ -143,23 +143,25 @@ class CardiacMamba(nn.Module):
         logger.info(f"CardiacMamba initialized with PureMamba backbone")
 
     def forward_spatial(self, x):
-        """
-        Processes a batch of frames (B*T) spatially.
-        Returns:
-            mask_logits: (B*T, 1, H, W)
-            tokens: (B*T, D) - Globally pooled token for temporal model
-        """
         enc_feats = self.encoder(x) 
-        bottleneck = enc_feats[-1] # (N, feature_dim, H, W)
+        bottleneck = enc_feats[-1] 
         
-        # Pure Spatial to Token transition: Global Average Pool -> Linear
-        pooled = F.adaptive_avg_pool2d(bottleneck, 1).flatten(1) # (N, feature_dim)
-        temporal_tokens = self.temporal_adapter(pooled)          # (N, hidden_dim)
-        
-        # Pure native segmentation projection
         mask_logits = self.decoder(enc_feats)
+        
+        mask_probs = torch.sigmoid(mask_logits)
+        mask_downsampled = F.adaptive_avg_pool2d(mask_probs, bottleneck.shape[2:])
+        
+        attended_bottleneck = bottleneck * mask_downsampled
+        pooled = F.adaptive_avg_pool2d(attended_bottleneck, 1).flatten(1) 
+        temporal_tokens = self.temporal_adapter(pooled)          
+        
         if self.output_size is not None and mask_logits.shape[-1] != self.output_size:
-            mask_logits = F.interpolate(mask_logits, size=(self.output_size, self.output_size), mode='bilinear', align_corners=False)
+            mask_logits = F.interpolate(
+                mask_logits, 
+                size=(self.output_size, self.output_size), 
+                mode='bilinear', 
+                align_corners=False
+            )
             
         return mask_logits, temporal_tokens
 
@@ -167,21 +169,16 @@ class CardiacMamba(nn.Module):
         B, C, T, H, W = x.shape
         x_flat = x.transpose(1, 2).reshape(B * T, C, H, W)
         
-        # 1. Spatial Processing
         mask_logits_flat, tokens_flat = self.forward_spatial(x_flat)
         
-        # Unfold time
         mask_logits = mask_logits_flat.view(B, T, 1, *mask_logits_flat.shape[2:])
         tokens = tokens_flat.view(B, T, -1)
         
-        # 2. Temporal Processing (Mamba Parallel Scan)
-        temporal_out = self.temporal_mamba(tokens) # (B, T, D)
+        temporal_out = self.temporal_mamba(tokens) 
         
-        # 3. Heads
         vol_curve, phase, phase_vel, coeffs = self.fourier_vol_head(temporal_out)
         phase_logits = self.phase_head(temporal_out)
         
-        # 4. Aggregation
         vols = vol_curve.squeeze(-1)
         if lengths is not None:
             mask_t = (torch.arange(T, device=x.device)[None, :] < lengths[:, None]).float()

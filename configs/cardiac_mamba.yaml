@@ -10,10 +10,6 @@ loss:
   weights:
     dice: 1.0
     volume: 1.0
-    phase_geom: 1.0
-    multi_beat: 0.1
-    phase: 1.0
-    ef: 0.1
   distillation:
     enabled: true
     weight: 1.0
@@ -23,7 +19,7 @@ loss:
 
 training:
   epochs: 100
-  batch_size: 32
+  batch_size: 4
   train_batch_size: 64
   val_batch_size: 64
   num_workers: 12

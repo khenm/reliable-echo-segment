@@ -162,10 +162,10 @@ def mamba_chunk_scan_combined(z, x, B, C, dt, dt_bias, A, D, chunk_size=128, d_s
     
     return out, last_state
 
-# Compile the core logic for Blackwell/Hopper optimization
-try:
-    ssd_minimal_discrete = torch.compile(ssd_minimal_discrete, fullgraph=True)
-    mamba_chunk_scan_combined = torch.compile(mamba_chunk_scan_combined)
-except Exception as e:
-    import logging
-    logging.warning(f"SSD: torch.compile failed or not available, using eager mode. {e}")
+# Global compilation is disabled to prevent recompilation loops with varying hierarchical head sizes
+# try:
+#     ssd_minimal_discrete = torch.compile(ssd_minimal_discrete, fullgraph=True)
+#     mamba_chunk_scan_combined = torch.compile(mamba_chunk_scan_combined)
+# except Exception as e:
+#     import logging
+#     logging.warning(f"SSD: torch.compile failed or not available, using eager mode. {e}")
