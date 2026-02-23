@@ -1,6 +1,4 @@
 name: "cardiac_mamba"
-backbone: "efficientnet_b0"
-pretrained: true
 hidden_dim: 256
 output_size: 112
 d_state: 16

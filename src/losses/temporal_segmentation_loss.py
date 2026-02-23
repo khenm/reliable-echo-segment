@@ -41,7 +41,6 @@ class TemporalWeakSegLoss(nn.Module):
         target_esv: torch.Tensor,
         pred_edv: torch.Tensor,
         pred_esv: torch.Tensor,
-        pred_raw_area: torch.Tensor,  # From detached mask_probs
         pred_vol_curve: torch.Tensor, # From Fourier Head
         pred_phase_vel: torch.Tensor,  # For rhythm stability
         pred_phase: torch.Tensor = None,
@@ -56,6 +55,7 @@ class TemporalWeakSegLoss(nn.Module):
 
         # 3. Phase-Geometry Alignment (Min-Max Normalized)
         # Ensures 'Max Area' == 'Max Volume'
+        pred_raw_area = torch.sigmoid(pred_logits.detach()).sum(dim=(3, 4)) / (pred_logits.shape[3] * pred_logits.shape[4])
         loss_phase_geom = self._compute_alignment_loss(pred_raw_area, pred_vol_curve)
 
         # 4. Rhythm Stability (Minimize Phase Velocity Variance)
@@ -63,18 +63,18 @@ class TemporalWeakSegLoss(nn.Module):
         loss_rhythm = pred_phase_vel.var(dim=1).mean()
 
         # 5. Phase Classification (Cross Entropy)
-        loss_phase = torch.tensor(0.0, device=pred_logits.device)
+        loss_phase = 0.0 * pred_phase.sum() if pred_phase is not None else torch.tensor(0.0, device=pred_logits.device)
         if pred_phase is not None and frame_mask is not None:
-            loss_phase = self.ce_loss(pred_phase.view(-1, 3), frame_mask.view(-1).long())
+            loss_phase = loss_phase + self.ce_loss(pred_phase.view(-1, 3), frame_mask.view(-1).long())
 
         # 6. Ejection Fraction (MSE)
-        loss_ef = torch.tensor(0.0, device=pred_logits.device)
+        loss_ef = 0.0 * pred_ef.sum() if pred_ef is not None else torch.tensor(0.0, device=pred_logits.device)
         if self.ef_weight > 0 and pred_ef is not None and target_ef is not None:
             p_ef = pred_ef.view(-1)
             t_ef = target_ef.view(-1)
             valid_ef = t_ef >= 0
             if valid_ef.any():
-                loss_ef = self.mse(p_ef[valid_ef], t_ef[valid_ef])
+                loss_ef = loss_ef + self.mse(p_ef[valid_ef], t_ef[valid_ef])
 
         total_loss = (
             self.dice_weight * loss_dice +
@@ -130,7 +130,7 @@ class TemporalWeakSegLoss(nn.Module):
         valid_indices = mask_flat > 0.5
 
         if valid_indices.sum() == 0:
-            return torch.tensor(0.0, device=pred_logits.device)
+            return 0.0 * pred_logits.sum()
 
         return self.dice_func(
             pred_flat[valid_indices],
@@ -166,4 +166,4 @@ class TemporalWeakSegLoss(nn.Module):
         if len(loss_vol) > 0:
             return torch.stack(loss_vol).mean()
         else:
-            return torch.tensor(0.0, device=pred_edv.device)
+            return 0.0 * pred_edv.sum() + 0.0 * pred_esv.sum()

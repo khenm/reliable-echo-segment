@@ -291,7 +291,6 @@ class Trainer:
                     target_esv=esv_target,
                     pred_edv=pred_edv,
                     pred_esv=pred_esv,
-                    pred_raw_area=pred_raw_area,
                     pred_vol_curve=pred_vol_curve,
                     pred_phase_vel=pred_phase_vel,
                     pred_phase=pred_phase,
