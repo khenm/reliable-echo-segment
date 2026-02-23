@@ -285,8 +285,6 @@ def get_criterions(cfg):
             "TemporalWeakSegLoss",
             dice_weight=weights.get('dice', 1.0),
             volume_weight=weights.get('volume', 1.0),
-            phase_geom_weight=weights.get('phase_geom', 5.0),
-            multi_beat_weight=weights.get('multi_beat', 0.1)
         )
 
         distill_cfg = cfg.get('loss', {}).get('distillation', {})

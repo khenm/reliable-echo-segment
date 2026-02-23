@@ -75,7 +75,6 @@ class CardiacMamba(nn.Module):
     """
     Streaming Cardiac Model using a Unified Pure Mamba Architecture.
     """
-
     @classmethod
     def from_config(cls, cfg: dict) -> "CardiacMamba":
         model_cfg = cfg.get('model', {})
