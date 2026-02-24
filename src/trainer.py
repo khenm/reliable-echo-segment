@@ -127,8 +127,7 @@ class Trainer:
     def _setup_metrics(self):
         if self.num_classes == 1:
             self.post_pred = AsDiscrete(threshold=0.5)
-            if 'dice' in self.metrics:
-                self.metrics['dice'] = DiceMetric(include_background=False, reduction="mean")
+            # Removed the self.metrics['dice'] override so it respects what's configured in runner.py
         else:
             self.post_pred = AsDiscrete(argmax=True, to_onehot=self.num_classes)
 
@@ -270,9 +269,6 @@ class Trainer:
         esv_target = batch.get("target_esv").to(self.device).view(-1, 1) if batch.get("target_esv") is not None else None
         ef_target = batch.get("target_ef").to(self.device).view(-1, 1) if "target_ef" in batch else batch.get("target").to(self.device).view(-1, 1) if "target" in batch else None
 
-        # Prevent DDP unused parameters error by ensuring all heads receive gradients
-        if 'pred_phase' in outputs:
-            loss += 0.0 * outputs['pred_phase'].sum()
 
         # 1. Segmentation Loss
         unweighted_comps = {}

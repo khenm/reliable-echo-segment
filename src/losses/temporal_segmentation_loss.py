@@ -38,7 +38,7 @@ class TemporalWeakSegLoss(nn.Module):
         **kwargs
     ):
         """
-        Accepts **kwargs to gracefully handle legacy pipeline arguments (e.g., pred_phase, pred_vol_curve)
+        Accepts **kwargs to gracefully handle legacy pipeline arguments (e.g., pred_vol_curve)
         during the architectural transition without breaking the forward pass.
         """
         loss_dice = self._compute_dice_loss(pred_logits, target_masks, frame_mask)
@@ -47,8 +47,8 @@ class TemporalWeakSegLoss(nn.Module):
         total_loss = (self.dice_weight * loss_dice) + (self.volume_weight * loss_vol)
 
         loss_dict = {
-            "dice": loss_dice,
-            "volume": loss_vol,
+            "dice_loss": loss_dice,
+            "volume_loss": loss_vol,
         }
 
         return total_loss, loss_dict

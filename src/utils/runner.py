@@ -332,7 +332,7 @@ def get_metrics(cfg):
         metrics['rmse_esv'] = RMSE(reduction="mean")
         metrics['r2_esv'] = R2Score()
         
-        metrics['dice'] = DiceMetric(include_background=True, reduction="mean")
+        metrics['dice'] = DiceMetric(include_background=include_bg, reduction="mean")
     else:
         metrics['dice'] = DiceMetric(include_background=include_bg, reduction="mean")
     return metrics

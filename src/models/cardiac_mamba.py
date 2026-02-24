@@ -52,7 +52,7 @@ class FourierVolumeHead(nn.Module):
             bn = harmonics[:, 2*(n-1)+1 : 2*(n-1)+2].unsqueeze(1)
             vol_curve = vol_curve + an * torch.cos(n * phase) + bn * torch.sin(n * phase)
             
-        return torch.relu(vol_curve)
+        return F.softplus(vol_curve)
 
     def forward(self, tokens, is_streaming=False, prev_phase=None, coeff_ema=None):
         B, T, D = tokens.shape
@@ -137,7 +137,6 @@ class CardiacMamba(nn.Module):
 
         # 4. Multi-Task Heads
         self.fourier_vol_head = FourierVolumeHead(hidden_dim, K=3)
-        self.phase_head = nn.Linear(hidden_dim, 3) 
 
         logger.info(f"CardiacMamba initialized with PureMamba backbone")
 
@@ -176,27 +175,23 @@ class CardiacMamba(nn.Module):
         temporal_out = self.temporal_mamba(tokens) 
         
         vol_curve, phase, phase_vel, coeffs = self.fourier_vol_head(temporal_out)
-        phase_logits = self.phase_head(temporal_out)
         
         vols = vol_curve.squeeze(-1)
         if lengths is not None:
-            mask_t = (torch.arange(T, device=x.device)[None, :] < lengths[:, None]).float()
-            vols_max = torch.where(mask_t > 0, vols, torch.tensor(-1e9, device=vols.device))
-            vols_min = torch.where(mask_t > 0, vols, torch.tensor(1e9, device=vols.device))
-            pred_edv = vols_max.max(dim=1)[0]
-            pred_esv = vols_min.min(dim=1)[0]
+            mask_t = (torch.arange(T, device=x.device)[None, :] < lengths[:, None])
+            pred_edv = self.differentiable_reduce(vols, mask=mask_t, is_max=True, tau=10.0)
+            pred_esv = self.differentiable_reduce(vols, mask=mask_t, is_max=False, tau=10.0)
         else:
-            pred_edv = vols.max(dim=1)[0]
-            pred_esv = vols.min(dim=1)[0]
+            pred_edv = self.differentiable_reduce(vols, mask=None, is_max=True, tau=10.0)
+            pred_esv = self.differentiable_reduce(vols, mask=None, is_max=False, tau=10.0)
             
         return {
             "mask_logits": mask_logits.transpose(1, 2), 
             "pred_vol_curve": vol_curve,
             "pred_phase_vel": phase_vel,
-            "pred_phase": phase_logits,
             "pred_edv": pred_edv,
             "pred_esv": pred_esv,
-            "pred_ef": (pred_edv - pred_esv) / (pred_edv + 1e-6),
+            "pred_ef": (pred_edv - pred_esv) / torch.clamp(pred_edv, min=1.0),
             "hidden_features": temporal_out
         }
 
@@ -222,7 +217,6 @@ class CardiacMamba(nn.Module):
         )
         
         temporal_out_flat = temporal_out.squeeze(1) 
-        phase_logits = self.phase_head(temporal_out_flat) 
         
         next_state = {
             'mamba_state': next_mamba_state,
@@ -233,7 +227,22 @@ class CardiacMamba(nn.Module):
         return {
             "mask_logits": mask_logits, 
             "pred_vol": vol_curve.squeeze(1), 
-            "pred_phase": phase_logits,
             "pred_phase_vel": phase_vel.squeeze(1),
             "hidden_features": temporal_out_flat
         }, next_state
+
+    def differentiable_reduce(self, vols, mask=None, is_max=True, tau=1.0):
+        """
+        Computes a differentiable soft-maximum or soft-minimum across the sequence.
+        tau (temperature): Controls the sharpness of the approximation. 
+                        Lower tau = closer to hard max/min.
+        """
+        # Invert the signal for minimum
+        logits = vols / tau if is_max else -vols / tau
+        
+        if mask is not None:
+            logits = logits.masked_fill(mask == 0, -1e9)
+            
+        attn_weights = F.softmax(logits, dim=1)
+        soft_val = torch.sum(attn_weights * vols, dim=1)
+        return soft_val

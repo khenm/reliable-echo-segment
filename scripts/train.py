@@ -18,7 +18,7 @@ def run_train(cfg, device):
     
     if cfg.get('wandb', {}).get('enable', True):
         if wandb.run is not None:
-            wandb.watch(model, log="gradients", log_freq=100)
+            wandb.watch(model, log="all", log_freq=50)
     
     criterions = get_criterions(cfg)
     metrics = get_metrics(cfg)
@@ -41,7 +41,7 @@ def main():
     if 'wandb' not in cfg: cfg['wandb'] = {}
     cfg['wandb']['enable'] = args.wandb
     
-    # Set pretrain mode
+    # Set pretrain & debug mode
     if 'training' not in cfg: cfg['training'] = {}
     cfg['training']['pretrain'] = args.pretrain
 
