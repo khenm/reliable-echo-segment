@@ -115,24 +115,22 @@ class EchoNetVideoDataset(Dataset):
             for start in range(0, total_frames, stride):
                 end = start + self.max_clip_len
                 
-                # Pretrain Filtering Logic
-                if self.pretrain:
-                    if fname not in self.meta_lookup:
-                        continue
+                if fname not in self.meta_lookup:
+                    continue
                         
-                    meta = self.meta_lookup[fname]
-                    ed_frame = int(meta.get("EDFrame", -1))
-                    es_frame = int(meta.get("ESFrame", -1))
+                meta = self.meta_lookup[fname]
+                ed_frame = int(meta.get("EDFrame", -1))
+                es_frame = int(meta.get("ESFrame", -1))
                     
-                    if ed_frame == -1 or es_frame == -1:
-                        continue
+                if ed_frame == -1 or es_frame == -1:
+                    continue
                         
-                    # Check if BOTH frames are within [start, end)
-                    has_ed = (start <= ed_frame < end)
-                    has_es = (start <= es_frame < end)
+                # Check if BOTH frames are within [start, end)
+                has_ed = (start <= ed_frame < end)
+                has_es = (start <= es_frame < end)
                     
-                    if not (has_ed and has_es):
-                        continue
+                if not (has_ed and has_es):
+                    continue
                         
                 # Smart Padding Logic
                 if end > total_frames:

@@ -127,8 +127,7 @@ class Trainer:
     def _setup_metrics(self):
         if self.num_classes == 1:
             self.post_pred = AsDiscrete(threshold=0.5)
-            if 'dice' in self.metrics:
-                self.metrics['dice'] = DiceMetric(include_background=False, reduction="mean")
+            # Removed the self.metrics['dice'] override so it respects what's configured in runner.py
         else:
             self.post_pred = AsDiscrete(argmax=True, to_onehot=self.num_classes)
 
@@ -188,6 +187,8 @@ class Trainer:
             
             # Step optimizer every accum_steps
             if (batch_idx + 1) % self.accum_steps == 0:
+                self.scaler.unscale_(self.opt)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.scaler.step(self.opt)
                 self.scaler.update()
                 self.opt.zero_grad(set_to_none=True)
@@ -268,9 +269,6 @@ class Trainer:
         esv_target = batch.get("target_esv").to(self.device).view(-1, 1) if batch.get("target_esv") is not None else None
         ef_target = batch.get("target_ef").to(self.device).view(-1, 1) if "target_ef" in batch else batch.get("target").to(self.device).view(-1, 1) if "target" in batch else None
 
-        # Prevent DDP unused parameters error by ensuring all heads receive gradients
-        if 'pred_phase' in outputs:
-            loss += 0.0 * outputs['pred_phase'].sum()
 
         # 1. Segmentation Loss
         unweighted_comps = {}
@@ -291,6 +289,8 @@ class Trainer:
                     target_esv=esv_target,
                     pred_edv=pred_edv,
                     pred_esv=pred_esv,
+                    pred_ef=pred_ef,
+                    target_ef=ef_target,
                 )
             elif hasattr(loss_fn, 'cycle_loss'):
                 # Legacy fallback, unlikely to be used with DeepMind config
@@ -320,7 +320,7 @@ class Trainer:
 
         if self.dynamic_weighter is not None:
             combined_loss, eff_weights = self.dynamic_weighter(unweighted_comps)
-            loss += combined_loss
+            loss = loss + combined_loss.squeeze()
             comps.update({k: v.item() if isinstance(v, torch.Tensor) else v for k, v in unweighted_comps.items()})
             comps.update({f"{k}_w": w for k, w in eff_weights.items()})
 

@@ -19,10 +19,14 @@ class TemporalWeakSegLoss(nn.Module):
         self,
         dice_weight: float = 1.0,
         volume_weight: float = 1.0,
+        ef_weight: float = 1.0,
+        sv_weight: float = 1.0,
     ):
         super().__init__()
         self.dice_weight = dice_weight
         self.volume_weight = volume_weight
+        self.ef_weight = ef_weight
+        self.sv_weight = sv_weight
         
         self.dice_func = DiceCELoss(sigmoid=True, reduction='mean')
 
@@ -35,10 +39,12 @@ class TemporalWeakSegLoss(nn.Module):
         target_esv: torch.Tensor,
         pred_edv: torch.Tensor,
         pred_esv: torch.Tensor,
+        pred_ef: torch.Tensor = None,
+        target_ef: torch.Tensor = None,
         **kwargs
     ):
         """
-        Accepts **kwargs to gracefully handle legacy pipeline arguments (e.g., pred_phase, pred_vol_curve)
+        Accepts **kwargs to gracefully handle legacy pipeline arguments (e.g., pred_vol_curve)
         during the architectural transition without breaking the forward pass.
         """
         loss_dice = self._compute_dice_loss(pred_logits, target_masks, frame_mask)
@@ -47,9 +53,16 @@ class TemporalWeakSegLoss(nn.Module):
         total_loss = (self.dice_weight * loss_dice) + (self.volume_weight * loss_vol)
 
         loss_dict = {
-            "dice": loss_dice,
-            "volume": loss_vol,
+            "dice_loss": loss_dice,
+            "volume_loss": loss_vol,
         }
+
+        if self.ef_weight > 0.0 and pred_ef is not None and target_ef is not None:
+            valid_ef = target_ef >= 0
+            if valid_ef.any():
+                loss_ef = F.l1_loss(pred_ef.view(-1)[valid_ef.view(-1)], target_ef.view(-1)[valid_ef.view(-1)])
+                total_loss += (self.ef_weight * loss_ef)
+                loss_dict["ef_loss"] = loss_ef
 
         return total_loss, loss_dict
 
@@ -105,8 +118,21 @@ class TemporalWeakSegLoss(nn.Module):
             
         if valid_esv.any():
             loss_vol.append(F.l1_loss(p_esv[valid_esv], t_esv[valid_esv]))
-            
+
+        # Calculate base volume loss (EDV & ESV mean)
         if len(loss_vol) > 0:
-            return torch.stack(loss_vol).mean()
-        
-        return 0.0 * pred_edv.sum() + 0.0 * pred_esv.sum()
+            base_vol_loss = torch.stack(loss_vol).mean()
+        else:
+            return 0.0 * pred_edv.sum() + 0.0 * pred_esv.sum()
+
+        # Calculate Stroke Volume Loss
+        valid_sv = valid_edv & valid_esv
+        if valid_sv.any():
+            p_sv = p_edv[valid_sv] - p_esv[valid_sv]
+            t_sv = t_edv[valid_sv] - t_esv[valid_sv]
+            loss_sv = F.l1_loss(p_sv, t_sv)
+            total_vol_loss = base_vol_loss + (self.sv_weight * loss_sv)
+        else:
+            total_vol_loss = base_vol_loss
+            
+        return total_vol_loss

@@ -285,6 +285,8 @@ def get_criterions(cfg):
             "TemporalWeakSegLoss",
             dice_weight=weights.get('dice', 1.0),
             volume_weight=weights.get('volume', 1.0),
+            ef_weight=weights.get('ef', 1.0),
+            sv_weight=weights.get('sv', 1.0),
         )
 
         distill_cfg = cfg.get('loss', {}).get('distillation', {})
@@ -332,7 +334,7 @@ def get_metrics(cfg):
         metrics['rmse_esv'] = RMSE(reduction="mean")
         metrics['r2_esv'] = R2Score()
         
-        metrics['dice'] = DiceMetric(include_background=True, reduction="mean")
+        metrics['dice'] = DiceMetric(include_background=include_bg, reduction="mean")
     else:
         metrics['dice'] = DiceMetric(include_background=include_bg, reduction="mean")
     return metrics
