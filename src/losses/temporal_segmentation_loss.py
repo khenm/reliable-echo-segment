@@ -48,7 +48,7 @@ class TemporalWeakSegLoss(nn.Module):
         during the architectural transition without breaking the forward pass.
         """
         loss_dice = self._compute_dice_loss(pred_logits, target_masks, frame_mask)
-        loss_vol = self._compute_volume_loss(pred_edv, pred_esv, target_edv, target_esv)
+        loss_vol, vol_loss_dict = self._compute_volume_loss(pred_edv, pred_esv, target_edv, target_esv)
 
         total_loss = (self.dice_weight * loss_dice) + (self.volume_weight * loss_vol)
 
@@ -56,6 +56,10 @@ class TemporalWeakSegLoss(nn.Module):
             "dice_loss": loss_dice,
             "volume_loss": loss_vol,
         }
+        
+        # Add volume sub-components to loss dict for logging
+        if vol_loss_dict:
+            loss_dict.update(vol_loss_dict)
 
         if self.ef_weight > 0.0 and pred_ef is not None and target_ef is not None:
             valid_ef = target_ef >= 0
@@ -112,18 +116,29 @@ class TemporalWeakSegLoss(nn.Module):
         valid_esv = t_esv >= 0
         
         loss_vol = []
+        l_edv_item = 0.0 * pred_edv.sum()
+        l_esv_item = 0.0 * pred_esv.sum()
+        l_sv_item = 0.0 * pred_edv.sum()
         
         if valid_edv.any():
-            loss_vol.append(F.l1_loss(p_edv[valid_edv], t_edv[valid_edv]))
+            l_edv = F.l1_loss(p_edv[valid_edv], t_edv[valid_edv])
+            loss_vol.append(l_edv)
+            l_edv_item = l_edv
             
         if valid_esv.any():
-            loss_vol.append(F.l1_loss(p_esv[valid_esv], t_esv[valid_esv]))
+            l_esv = F.l1_loss(p_esv[valid_esv], t_esv[valid_esv])
+            loss_vol.append(l_esv)
+            l_esv_item = l_esv
 
         # Calculate base volume loss (EDV & ESV mean)
         if len(loss_vol) > 0:
             base_vol_loss = torch.stack(loss_vol).mean()
         else:
-            return 0.0 * pred_edv.sum() + 0.0 * pred_esv.sum()
+            return 0.0 * pred_edv.sum() + 0.0 * pred_esv.sum(), {
+                "edv_loss": l_edv_item,
+                "esv_loss": l_esv_item,
+                "sv_loss": l_sv_item
+            }
 
         # Calculate Stroke Volume Loss
         valid_sv = valid_edv & valid_esv
@@ -132,7 +147,12 @@ class TemporalWeakSegLoss(nn.Module):
             t_sv = t_edv[valid_sv] - t_esv[valid_sv]
             loss_sv = F.l1_loss(p_sv, t_sv)
             total_vol_loss = base_vol_loss + (self.sv_weight * loss_sv)
+            l_sv_item = loss_sv
         else:
             total_vol_loss = base_vol_loss
             
-        return total_vol_loss
+        return total_vol_loss, {
+            "edv_loss": l_edv_item,
+            "esv_loss": l_esv_item,
+            "sv_loss": l_sv_item
+        }
