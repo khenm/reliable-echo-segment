@@ -233,15 +233,17 @@ class CardiacMamba(nn.Module):
         """
         Computes a differentiable soft-maximum and soft-minimum across the sequence.
         tau (temperature): Controls the sharpness of the approximation. 
-                        Lower tau = closer to hard max/min.
         """
-        logits_max = vols / tau
-        logits_min = -vols / tau
+        vols_centered = vols - vols.mean(dim=1, keepdim=True)
+        
+        logits_max = vols_centered / tau
+        logits_min = -vols_centered / tau
         
         if mask is not None:
             mask_fill = (mask == 0)
-            logits_max = logits_max.masked_fill(mask_fill, -1e9)
-            logits_min = logits_min.masked_fill(mask_fill, -1e9)
+            safe_min = torch.finfo(logits_max.dtype).min
+            logits_max = logits_max.masked_fill(mask_fill, safe_min)
+            logits_min = logits_min.masked_fill(mask_fill, safe_min)
             
         attn_weights_max = F.softmax(logits_max, dim=1)
         soft_val_max = torch.sum(attn_weights_max * vols, dim=1)

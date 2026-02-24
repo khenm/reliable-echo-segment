@@ -87,8 +87,27 @@ class Trainer:
         if self.accum_steps > 1:
             logger.info(f"Gradient Accumulation: {self.accum_steps} steps (effective batch size: {effective_train})")
 
+        opt_groups = []
+        decay_params = []
+        no_decay_params = []
+        
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
+            
+            is_ssm_param = any(name.endswith(suffix) for suffix in ['.A_log', '.dt_bias', '.D'])
+            
+            is_1d_tensor = param.ndim < 2 
+            
+            if is_ssm_param or is_1d_tensor:
+                no_decay_params.append(param)
+            else:
+                decay_params.append(param)
+                
+        base_lr = self.cfg['training']['lr']
         opt_groups = [
-            {"params": self.model.parameters(), "weight_decay": self.cfg['training']['weight_decay']}
+            {"params": decay_params, "weight_decay": self.cfg['training']['weight_decay']},
+            {"params": no_decay_params, "weight_decay": 0.0, "lr": base_lr * 0.1}
         ]
         
         if self.dynamic_weighter is not None:
@@ -99,7 +118,7 @@ class Trainer:
 
         self.opt = torch.optim.AdamW(
             opt_groups, 
-            lr=self.cfg['training']['lr']
+            lr=base_lr
         )
         
         dev_type = self.device.type if hasattr(self.device, 'type') else str(self.device)

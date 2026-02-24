@@ -10,7 +10,7 @@ loss:
   weights:
     dice: 1.0
     volume: 1.0
-    sv: 2.0
+    sv: 1.0
     ef: 1.0
   distillation:
     enabled: false
