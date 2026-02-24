@@ -289,6 +289,8 @@ class Trainer:
                     target_esv=esv_target,
                     pred_edv=pred_edv,
                     pred_esv=pred_esv,
+                    pred_ef=pred_ef,
+                    target_ef=ef_target,
                 )
             elif hasattr(loss_fn, 'cycle_loss'):
                 # Legacy fallback, unlikely to be used with DeepMind config

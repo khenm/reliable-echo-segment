@@ -19,11 +19,13 @@ class TemporalWeakSegLoss(nn.Module):
         self,
         dice_weight: float = 1.0,
         volume_weight: float = 1.0,
+        ef_weight: float = 1.0,
         sv_weight: float = 1.0,
     ):
         super().__init__()
         self.dice_weight = dice_weight
         self.volume_weight = volume_weight
+        self.ef_weight = ef_weight
         self.sv_weight = sv_weight
         
         self.dice_func = DiceCELoss(sigmoid=True, reduction='mean')
@@ -37,6 +39,8 @@ class TemporalWeakSegLoss(nn.Module):
         target_esv: torch.Tensor,
         pred_edv: torch.Tensor,
         pred_esv: torch.Tensor,
+        pred_ef: torch.Tensor = None,
+        target_ef: torch.Tensor = None,
         **kwargs
     ):
         """
@@ -44,19 +48,21 @@ class TemporalWeakSegLoss(nn.Module):
         during the architectural transition without breaking the forward pass.
         """
         loss_dice = self._compute_dice_loss(pred_logits, target_masks, frame_mask)
-        loss_vol, loss_edv, loss_esv, loss_sv = self._compute_volume_loss(
-            pred_edv, pred_esv, target_edv, target_esv
-        )
+        loss_vol = self._compute_volume_loss(pred_edv, pred_esv, target_edv, target_esv)
 
         total_loss = (self.dice_weight * loss_dice) + (self.volume_weight * loss_vol)
 
         loss_dict = {
             "dice_loss": loss_dice,
             "volume_loss": loss_vol,
-            "edv_loss": loss_edv,
-            "esv_loss": loss_esv,
-            "sv_loss": loss_sv,
         }
+
+        if self.ef_weight > 0.0 and pred_ef is not None and target_ef is not None:
+            valid_ef = target_ef >= 0
+            if valid_ef.any():
+                loss_ef = F.l1_loss(pred_ef.view(-1)[valid_ef.view(-1)], target_ef.view(-1)[valid_ef.view(-1)])
+                total_loss += (self.ef_weight * loss_ef)
+                loss_dict["ef_loss"] = loss_ef
 
         return total_loss, loss_dict
 
@@ -95,8 +101,8 @@ class TemporalWeakSegLoss(nn.Module):
         pred_esv: torch.Tensor,
         target_edv: torch.Tensor,
         target_esv: torch.Tensor
-    ):
-        """Computes L1 loss with Stroke Volume constraint."""
+    ) -> torch.Tensor:
+        """Computes L1 loss between valid predicted and target end-systolic/diastolic volumes."""
         p_edv = pred_edv.view(-1)
         t_edv = target_edv.view(-1)
         p_esv = pred_esv.view(-1)
@@ -105,28 +111,28 @@ class TemporalWeakSegLoss(nn.Module):
         valid_edv = t_edv >= 0
         valid_esv = t_esv >= 0
         
-        loss_edv = torch.tensor(0.0, device=pred_edv.device)
-        loss_esv = torch.tensor(0.0, device=pred_esv.device)
-        loss_sv = torch.tensor(0.0, device=pred_edv.device)
-        has_loss = False
+        loss_vol = []
         
         if valid_edv.any():
-            loss_edv = F.l1_loss(p_edv[valid_edv], t_edv[valid_edv])
-            has_loss = True
+            loss_vol.append(F.l1_loss(p_edv[valid_edv], t_edv[valid_edv]))
             
         if valid_esv.any():
-            loss_esv = F.l1_loss(p_esv[valid_esv], t_esv[valid_esv])
-            has_loss = True
-            
-        valid_both = valid_edv & valid_esv
-        if valid_both.any():
-            pred_sv = p_edv[valid_both] - p_esv[valid_both]
-            true_sv = t_edv[valid_both] - t_esv[valid_both]
-            loss_sv = F.l1_loss(pred_sv, true_sv)
-            
-        if not has_loss:
-            total_loss = 0.0 * pred_edv.sum() + 0.0 * pred_esv.sum()
+            loss_vol.append(F.l1_loss(p_esv[valid_esv], t_esv[valid_esv]))
+
+        # Calculate base volume loss (EDV & ESV mean)
+        if len(loss_vol) > 0:
+            base_vol_loss = torch.stack(loss_vol).mean()
         else:
-            total_loss = loss_edv + loss_esv + (self.sv_weight * loss_sv)
+            return 0.0 * pred_edv.sum() + 0.0 * pred_esv.sum()
+
+        # Calculate Stroke Volume Loss
+        valid_sv = valid_edv & valid_esv
+        if valid_sv.any():
+            p_sv = p_edv[valid_sv] - p_esv[valid_sv]
+            t_sv = t_edv[valid_sv] - t_esv[valid_sv]
+            loss_sv = F.l1_loss(p_sv, t_sv)
+            total_vol_loss = base_vol_loss + (self.sv_weight * loss_sv)
+        else:
+            total_vol_loss = base_vol_loss
             
-        return total_loss, loss_edv, loss_esv, loss_sv
+        return total_vol_loss

@@ -285,6 +285,7 @@ def get_criterions(cfg):
             "TemporalWeakSegLoss",
             dice_weight=weights.get('dice', 1.0),
             volume_weight=weights.get('volume', 1.0),
+            ef_weight=weights.get('ef', 1.0),
             sv_weight=weights.get('sv', 1.0),
         )
 
