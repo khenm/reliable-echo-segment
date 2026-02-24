@@ -188,6 +188,8 @@ class Trainer:
             
             # Step optimizer every accum_steps
             if (batch_idx + 1) % self.accum_steps == 0:
+                self.scaler.unscale_(self.opt)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.scaler.step(self.opt)
                 self.scaler.update()
                 self.opt.zero_grad(set_to_none=True)
@@ -320,7 +322,7 @@ class Trainer:
 
         if self.dynamic_weighter is not None:
             combined_loss, eff_weights = self.dynamic_weighter(unweighted_comps)
-            loss += combined_loss
+            loss = loss + combined_loss.squeeze()
             comps.update({k: v.item() if isinstance(v, torch.Tensor) else v for k, v in unweighted_comps.items()})
             comps.update({f"{k}_w": w for k, w in eff_weights.items()})
 
