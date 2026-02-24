@@ -179,11 +179,9 @@ class CardiacMamba(nn.Module):
         vols = vol_curve.squeeze(-1)
         if lengths is not None:
             mask_t = (torch.arange(T, device=x.device)[None, :] < lengths[:, None])
-            pred_edv = self.differentiable_reduce(vols, mask=mask_t, is_max=True, tau=10.0)
-            pred_esv = self.differentiable_reduce(vols, mask=mask_t, is_max=False, tau=10.0)
+            pred_edv, pred_esv = self.differentiable_reduce(vols, mask=mask_t, tau=10.0)
         else:
-            pred_edv = self.differentiable_reduce(vols, mask=None, is_max=True, tau=10.0)
-            pred_esv = self.differentiable_reduce(vols, mask=None, is_max=False, tau=10.0)
+            pred_edv, pred_esv = self.differentiable_reduce(vols, mask=None, tau=10.0)
             
         return {
             "mask_logits": mask_logits.transpose(1, 2), 
@@ -231,18 +229,24 @@ class CardiacMamba(nn.Module):
             "hidden_features": temporal_out_flat
         }, next_state
 
-    def differentiable_reduce(self, vols, mask=None, is_max=True, tau=1.0):
+    def differentiable_reduce(self, vols, mask=None, tau=1.0):
         """
-        Computes a differentiable soft-maximum or soft-minimum across the sequence.
+        Computes a differentiable soft-maximum and soft-minimum across the sequence.
         tau (temperature): Controls the sharpness of the approximation. 
                         Lower tau = closer to hard max/min.
         """
-        # Invert the signal for minimum
-        logits = vols / tau if is_max else -vols / tau
+        logits_max = vols / tau
+        logits_min = -vols / tau
         
         if mask is not None:
-            logits = logits.masked_fill(mask == 0, -1e9)
+            mask_fill = (mask == 0)
+            logits_max = logits_max.masked_fill(mask_fill, -1e9)
+            logits_min = logits_min.masked_fill(mask_fill, -1e9)
             
-        attn_weights = F.softmax(logits, dim=1)
-        soft_val = torch.sum(attn_weights * vols, dim=1)
-        return soft_val
+        attn_weights_max = F.softmax(logits_max, dim=1)
+        soft_val_max = torch.sum(attn_weights_max * vols, dim=1)
+        
+        attn_weights_min = F.softmax(logits_min, dim=1)
+        soft_val_min = torch.sum(attn_weights_min * vols, dim=1)
+        
+        return soft_val_max, soft_val_min
