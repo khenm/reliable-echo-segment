@@ -189,7 +189,7 @@ class CardiacMamba(nn.Module):
             "pred_phase_vel": phase_vel,
             "pred_edv": pred_edv,
             "pred_esv": pred_esv,
-            "pred_ef": (pred_edv - pred_esv) / torch.clamp(pred_edv, min=1.0),
+            "pred_ef": (pred_edv - pred_esv) / torch.clamp(pred_edv, min=1e-3),
             "hidden_features": temporal_out
         }
 

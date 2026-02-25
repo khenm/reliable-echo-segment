@@ -64,7 +64,7 @@ class TemporalWeakSegLoss(nn.Module):
         if self.ef_weight > 0.0 and pred_ef is not None and target_ef is not None:
             valid_ef = target_ef >= 0
             if valid_ef.any():
-                loss_ef = F.l1_loss(pred_ef.view(-1)[valid_ef.view(-1)], target_ef.view(-1)[valid_ef.view(-1)])
+                loss_ef = F.smooth_l1_loss(pred_ef.view(-1)[valid_ef.view(-1)], target_ef.view(-1)[valid_ef.view(-1)])
                 total_loss += (self.ef_weight * loss_ef)
                 loss_dict["ef_loss"] = loss_ef
 
@@ -121,12 +121,12 @@ class TemporalWeakSegLoss(nn.Module):
         l_sv_item = 0.0 * pred_edv.sum()
         
         if valid_edv.any():
-            l_edv = F.l1_loss(p_edv[valid_edv], t_edv[valid_edv])
+            l_edv = F.smooth_l1_loss(p_edv[valid_edv], t_edv[valid_edv])
             loss_vol.append(l_edv)
             l_edv_item = l_edv
             
         if valid_esv.any():
-            l_esv = F.l1_loss(p_esv[valid_esv], t_esv[valid_esv])
+            l_esv = F.smooth_l1_loss(p_esv[valid_esv], t_esv[valid_esv])
             loss_vol.append(l_esv)
             l_esv_item = l_esv
 
@@ -145,7 +145,7 @@ class TemporalWeakSegLoss(nn.Module):
         if valid_sv.any():
             p_sv = p_edv[valid_sv] - p_esv[valid_sv]
             t_sv = t_edv[valid_sv] - t_esv[valid_sv]
-            loss_sv = F.l1_loss(p_sv, t_sv)
+            loss_sv = F.smooth_l1_loss(p_sv, t_sv)
             total_vol_loss = base_vol_loss + (self.sv_weight * loss_sv)
             l_sv_item = loss_sv
         else:

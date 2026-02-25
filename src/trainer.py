@@ -207,7 +207,24 @@ class Trainer:
             # Step optimizer every accum_steps
             if (batch_idx + 1) % self.accum_steps == 0:
                 self.scaler.unscale_(self.opt)
+                
+                unscaled_norm = 0.0
+                for p in self.model.parameters():
+                    if p.grad is not None:
+                        unscaled_norm += p.grad.detach().data.norm(2).item() ** 2
+                unscaled_norm = unscaled_norm ** 0.5
+                batch_comps['grad_unscaled'] = unscaled_norm
+                batch_comps['scaler_scale'] = self.scaler.get_scale()
+                
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                
+                post_clip_norm = 0.0
+                for p in self.model.parameters():
+                    if p.grad is not None:
+                        post_clip_norm += p.grad.detach().data.norm(2).item() ** 2
+                post_clip_norm = post_clip_norm ** 0.5
+                batch_comps['grad_post_clip'] = post_clip_norm
+                
                 self.scaler.step(self.opt)
                 self.scaler.update()
                 self.opt.zero_grad(set_to_none=True)
@@ -226,8 +243,9 @@ class Trainer:
             if is_main_process() and wandb.run is not None:
                 wandb.log({"train/loss": loss.item(), **{f"train/{k}": v for k, v in batch_comps.items()}})
 
-        # Handle remaining gradients if total batches not divisible by accum_steps
         if len(self.ld_tr) % self.accum_steps != 0:
+            self.scaler.unscale_(self.opt)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.scaler.step(self.opt)
             self.scaler.update()
             self.opt.zero_grad(set_to_none=True)
@@ -342,6 +360,24 @@ class Trainer:
             loss = loss + combined_loss.squeeze()
             comps.update({k: v.item() if isinstance(v, torch.Tensor) else v for k, v in unweighted_comps.items()})
             comps.update({f"{k}_w": w for k, w in eff_weights.items()})
+
+        # Phase 0.2: Batch Health Checks
+        comps['loss_finite'] = float(torch.isfinite(loss).item()) if isinstance(loss, torch.Tensor) else float(np.isfinite(loss))
+        comps['preds_finite'] = float(torch.isfinite(pred_edv).all().item() and torch.isfinite(pred_esv).all().item())
+        if pred_edv is not None and pred_edv.numel() > 0:
+            comps['pred_edv_min'] = float(pred_edv.min().item() * 300.0)
+            comps['pred_edv_max'] = float(pred_edv.max().item() * 300.0)
+        if pred_esv is not None and pred_esv.numel() > 0:
+            comps['pred_esv_min'] = float(pred_esv.min().item() * 300.0)
+            comps['pred_esv_max'] = float(pred_esv.max().item() * 300.0)
+        if edv_target is not None and edv_target.numel() > 0:
+            comps['tgt_edv_min'] = float(edv_target.min().item() * 300.0)
+            comps['tgt_edv_max'] = float(edv_target.max().item() * 300.0)
+        if esv_target is not None and esv_target.numel() > 0:
+            comps['tgt_esv_min'] = float(esv_target.min().item() * 300.0)
+            comps['tgt_esv_max'] = float(esv_target.max().item() * 300.0)
+        if frame_mask is not None:
+            comps['valid_samples'] = float(frame_mask.sum().item())
 
         return loss, comps
 
@@ -534,9 +570,13 @@ class Trainer:
 
         # 1. EF Metrics
         if 'mae' in self.metrics:
-            self.metrics['mae'](pred_ef, ef_target)
-            if 'rmse' in self.metrics: self.metrics['rmse'](pred_ef, ef_target)
-            if 'r2' in self.metrics: self.metrics['r2'](pred_ef, ef_target)
+            valid_ef = (ef_target >= 0)
+            if valid_ef.any():
+                v_pef = pred_ef[valid_ef]
+                v_tef = ef_target[valid_ef]
+                self.metrics['mae'](v_pef, v_tef)
+                if 'rmse' in self.metrics: self.metrics['rmse'](v_pef, v_tef)
+                if 'r2' in self.metrics: self.metrics['r2'](v_pef, v_tef)
 
         # 2. Volume Metrics (EDV/ESV)
         if 'mae_edv' in self.metrics:
@@ -603,9 +643,13 @@ class Trainer:
 
         if 'mae' in self.metrics:
             targets = batch["target"].to(self.device).view(-1, 1)
-            self.metrics['mae'](ef, targets)
-            if 'rmse' in self.metrics: self.metrics['rmse'](ef, targets)
-            if 'r2' in self.metrics: self.metrics['r2'](ef, targets)
+            valid_ef = (targets >= 0)
+            if valid_ef.any():
+                v_pef = ef[valid_ef]
+                v_tef = targets[valid_ef]
+                self.metrics['mae'](v_pef, v_tef)
+                if 'rmse' in self.metrics: self.metrics['rmse'](v_pef, v_tef)
+                if 'r2' in self.metrics: self.metrics['r2'](v_pef, v_tef)
 
         if 'skeletal' in self.metrics:
             kps_gt = batch.get("keypoints")
@@ -638,9 +682,13 @@ class Trainer:
             
         if 'mae' in self.metrics:
             targets = batch["target"].to(self.device).view(-1, 1)
-            self.metrics['mae'](preds, targets)
-            if 'rmse' in self.metrics: self.metrics['rmse'](preds, targets)
-            if 'r2' in self.metrics: self.metrics['r2'](preds, targets)
+            valid_ef = (targets >= 0)
+            if valid_ef.any():
+                v_pef = preds[valid_ef]
+                v_tef = targets[valid_ef]
+                self.metrics['mae'](v_pef, v_tef)
+                if 'rmse' in self.metrics: self.metrics['rmse'](v_pef, v_tef)
+                if 'r2' in self.metrics: self.metrics['r2'](v_pef, v_tef)
 
     def _val_seg(self, batch):
         imgs = batch["image"].to(self.device)
