@@ -34,11 +34,16 @@ class KalmanDynamicsHead(nn.Module):
         super().__init__()
         
         # Prior prediction \hat{v}_{t|t-1} from the Mamba state (temporal prior)
-        self.prior_head = nn.Sequential(
+        self.prior_head_raw = nn.Sequential(
             nn.Linear(hidden_dim, 64),
             nn.SiLU(inplace=True),
             nn.Linear(64, 1),
-            nn.Sigmoid() # Volume targets (EDV/ESV) are normalized 0-1 (div 300), and z_t is mean prob [0-1]
+        )
+        
+        self.meas_head = nn.Sequential(
+            nn.Linear(feature_dim, 32),
+            nn.SiLU(inplace=True),
+            nn.Linear(32, 1),
         )
         
         # Kalman Gain K_t gating mechanism derived from state and current token
@@ -70,8 +75,8 @@ class KalmanDynamicsHead(nn.Module):
             temporal_out[:, :-1, :]
         ], dim=1)
         
-        # Predict Prior \hat{v}_{t|t-1}
-        v_prior = self.prior_head(padded_state) # (B, T, 1)
+        # Predict Prior \hat{v}_{t|t-1} (log-volume space softplus)
+        v_prior = F.softplus(self.prior_head_raw(padded_state)) # (B, T, 1)
         
         # 2. Kalman Gain K_t calculation
         if temporal_tokens is None:
@@ -81,12 +86,15 @@ class KalmanDynamicsHead(nn.Module):
             
         K_t = self.gain_head(gain_feats) # (B, T, 1)
         
-        # 3. Update (Posterior) v_t
-        # v_t = \hat{v}_{t|t-1} + K_t * (z_t - W * \hat{v}_{t|t-1})
-        v_post = v_prior + K_t * (z_t - self.W * v_prior)
+        # Measure volume directly using our dedicated mlp
+        m_t = F.softplus(self.meas_head(z_t))
         
-        # Clamp to valid normalized volume range [0, 1]
-        return torch.clamp(v_post, min=1e-6, max=1.0)
+        # 3. Update (Posterior) v_t
+        # v_t = \hat{v}_{t|t-1} + K_t * (m_t - W * \hat{v}_{t|t-1})
+        v_post = v_prior + K_t * (m_t - self.W * v_prior)
+        
+        # Clamp to valid normalized volume range (soft clamping allowed large max)
+        return torch.clamp(v_post, min=1e-6, max=10.0)
     
     def step(self, temporal_out_t, z_t, state=None):
         """Streaming step for Kalman inference."""
@@ -94,17 +102,20 @@ class KalmanDynamicsHead(nn.Module):
         
         # State holds the Mamba output from the PREVIOUS step
         if state is None:
-            prev_state = self.init_state.repeat(B, 1)
+            prev_state = self.init_state.repeat(B, 1, 1)
         else:
             prev_state = state
             
-        v_prior = self.prior_head(prev_state) # (B, 1)
+        v_prior = F.softplus(self.prior_head_raw(prev_state)) # (B, 1, 1)
         
-        gain_feats = torch.cat([prev_state, z_t], dim=-1)
-        K_t = self.gain_head(gain_feats) # (B, 1)
+        # z_t could be missing the sequences dimension here
+        z_t_unsqueeze = z_t.unsqueeze(1) if z_t.ndim == 2 else z_t
+        gain_feats = torch.cat([prev_state, z_t_unsqueeze], dim=-1)
+        K_t = self.gain_head(gain_feats) # (B, 1, 1)
         
-        v_post = v_prior + K_t * (z_t - self.W * v_prior)
-        v_post = torch.clamp(v_post, min=1e-6, max=1.0)
+        m_t = F.softplus(self.meas_head(z_t_unsqueeze))
+        v_post = v_prior + K_t * (m_t - self.W * v_prior)
+        v_post = torch.clamp(v_post, min=1e-6, max=10.0)
         
         # The current temporal_out_t becomes the prior state for the NEXT step
         next_state = temporal_out_t 
@@ -190,7 +201,8 @@ class CardiacMamba(nn.Module):
         mask_probs = torch.sigmoid(mask_logits)
 
         B_T = mask_probs.shape[0]
-        z_t = mask_probs.view(B_T, -1).mean(dim=1, keepdim=True)
+        # Sum is more correlated with cavity area than mean which gets easily diluted by background.
+        z_t = mask_probs.view(B_T, -1).sum(dim=1, keepdim=True) / 1000.0 # scale slightly so it's not huge
         
         mask_downsampled = F.adaptive_avg_pool2d(mask_probs, bottleneck.shape[2:])
         
@@ -229,9 +241,9 @@ class CardiacMamba(nn.Module):
     
         if lengths is not None:
             mask_t = (torch.arange(T, device=x.device)[None, :] < lengths[:, None])
-            pred_edv, pred_esv = self.differentiable_reduce(vols, mask=mask_t, tau=10.0)
+            pred_edv, pred_esv = self.differentiable_reduce(vols, mask=mask_t, tau=1.0)
         else:
-            pred_edv, pred_esv = self.differentiable_reduce(vols, mask=None, tau=10.0)
+            pred_edv, pred_esv = self.differentiable_reduce(vols, mask=None, tau=1.0)
 
         return {
             "mask_logits": mask_logits.transpose(1, 2), 

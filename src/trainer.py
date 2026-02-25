@@ -328,6 +328,7 @@ class Trainer:
                     pred_esv=pred_esv,
                     pred_ef=pred_ef,
                     target_ef=ef_target,
+                    pred_vol_curve=outputs.get("pred_vol_curve"),
                 )
             elif hasattr(loss_fn, 'cycle_loss'):
                 # Legacy fallback, unlikely to be used with DeepMind config
@@ -364,6 +365,11 @@ class Trainer:
         # Phase 0.2: Batch Health Checks
         comps['loss_finite'] = float(torch.isfinite(loss).item()) if isinstance(loss, torch.Tensor) else float(np.isfinite(loss))
         comps['preds_finite'] = float(torch.isfinite(pred_edv).all().item() and torch.isfinite(pred_esv).all().item())
+        
+        pred_vol_curve = outputs.get("pred_vol_curve")
+        if pred_vol_curve is not None and pred_vol_curve.numel() > 0:
+            comps['vol_curve_min'] = float(pred_vol_curve.min().item() * 300.0)
+            comps['vol_curve_max'] = float(pred_vol_curve.max().item() * 300.0)
         if pred_edv is not None and pred_edv.numel() > 0:
             comps['pred_edv_min'] = float(pred_edv.min().item() * 300.0)
             comps['pred_edv_max'] = float(pred_edv.max().item() * 300.0)
@@ -559,9 +565,25 @@ class Trainer:
 
         outputs = self.model(imgs, lengths=lengths)
         mask_logits = outputs['mask_logits']
-        pred_ef = outputs['pred_ef'].view(-1, 1)
-        pred_edv = outputs['pred_edv'].view(-1, 1)
-        pred_esv = outputs['pred_esv'].view(-1, 1)
+        pred_ef = outputs['pred_ef'].clone().view(-1, 1)
+        pred_edv = outputs['pred_edv'].clone().view(-1, 1)
+        pred_esv = outputs['pred_esv'].clone().view(-1, 1)
+
+        # Override with exact frame indices if available
+        pred_vol_curve = outputs.get("pred_vol_curve")
+        frame_mask = batch.get("frame_mask")
+        if pred_vol_curve is not None and frame_mask is not None:
+            frame_mask = frame_mask.to(self.device).view(pred_vol_curve.shape[0], -1)
+            B = pred_vol_curve.shape[0]
+            for i in range(B):
+                 ed_idx = torch.where(frame_mask[i] == 2.0)[0]
+                 es_idx = torch.where(frame_mask[i] == 1.0)[0]
+                 if len(ed_idx) > 0 and len(es_idx) > 0:
+                     ed_v = pred_vol_curve[i, ed_idx[0], 0]
+                     es_v = pred_vol_curve[i, es_idx[0], 0]
+                     pred_edv[i] = ed_v
+                     pred_esv[i] = es_v
+                     pred_ef[i] = (ed_v - es_v) / torch.clamp(ed_v, min=1e-3)
 
         # Targets
         ef_target = batch.get("target_ef").to(self.device).view(-1, 1) if "target_ef" in batch else batch.get("target").to(self.device).view(-1, 1)
