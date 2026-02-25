@@ -48,7 +48,18 @@ class TemporalWeakSegLoss(nn.Module):
         during the architectural transition without breaking the forward pass.
         """
         loss_dice = self._compute_dice_loss(pred_logits, target_masks, frame_mask)
-        loss_vol, vol_loss_dict = self._compute_volume_loss(pred_edv, pred_esv, target_edv, target_esv)
+        
+        pred_vol_curve = kwargs.get("pred_vol_curve", None)
+        if pred_vol_curve is not None:
+            # New sparse indexing approach
+            loss_vol, vol_loss_dict = self._compute_volume_loss_sparse(
+                pred_vol_curve, frame_mask, target_edv, target_esv
+            )
+        else:
+            # Fallback to older pre-reduced outputs
+            loss_vol, vol_loss_dict = self._compute_volume_loss(
+                pred_edv, pred_esv, target_edv, target_esv
+            )
 
         total_loss = (self.dice_weight * loss_dice) + (self.volume_weight * loss_vol)
 
@@ -99,13 +110,63 @@ class TemporalWeakSegLoss(nn.Module):
             target_flat[valid_indices]
         )
 
+    def _compute_volume_loss_sparse(
+        self,
+        pred_vol_curve: torch.Tensor,
+        frame_mask: torch.Tensor,
+        target_edv: torch.Tensor,
+        target_esv: torch.Tensor
+    ) -> tuple[torch.Tensor, dict]:
+        """
+        Computes L1 loss between predicted volumes at specific ED/ES indices 
+        (indicated by frame_mask) and target EDV/ESV.
+        """
+        B = pred_vol_curve.shape[0]
+        
+        p_edv_list = []
+        p_esv_list = []
+        t_edv_list = []
+        t_esv_list = []
+        
+        # We iterate over the batch because each sequence might have arbitrary ED/ES indices
+        for b in range(B):
+            # Find indices for ED (2.0) and ES (1.0)
+            ed_idx = torch.where(frame_mask[b] == 2.0)[0]
+            es_idx = torch.where(frame_mask[b] == 1.0)[0]
+            
+            # Use the specified element if it exists
+            if len(ed_idx) > 0:
+                p_edv_list.append(pred_vol_curve[b, ed_idx[0]].view(-1))
+                t_edv_list.append(target_edv[b].view(-1))
+                
+            if len(es_idx) > 0:
+                p_esv_list.append(pred_vol_curve[b, es_idx[0]].view(-1))
+                t_esv_list.append(target_esv[b].view(-1))
+                
+        # Stack for vectorized calculation, fallback natively if empty
+        if p_edv_list:
+            pred_edv = torch.stack(p_edv_list)
+            t_edv = torch.stack(t_edv_list)
+        else:
+            pred_edv = torch.zeros(0, device=pred_vol_curve.device)
+            t_edv = torch.zeros(0, device=pred_vol_curve.device)
+            
+        if p_esv_list:
+            pred_esv = torch.stack(p_esv_list)
+            t_esv = torch.stack(t_esv_list)
+        else:
+            pred_esv = torch.zeros(0, device=pred_vol_curve.device)
+            t_esv = torch.zeros(0, device=pred_vol_curve.device)
+
+        return self._compute_volume_loss(pred_edv, pred_esv, t_edv, t_esv)
+
     def _compute_volume_loss(
         self,
         pred_edv: torch.Tensor,
         pred_esv: torch.Tensor,
         target_edv: torch.Tensor,
         target_esv: torch.Tensor
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, dict]:
         """Computes L1 loss between valid predicted and target end-systolic/diastolic volumes."""
         p_edv = pred_edv.view(-1)
         t_edv = target_edv.view(-1)
