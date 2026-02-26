@@ -326,13 +326,10 @@ class Trainer:
                     target_esv=esv_target,
                     pred_edv=pred_edv,
                     pred_esv=pred_esv,
-                    pred_ef=pred_ef,
-                    target_ef=ef_target,
                     pred_vol_curve=outputs.get("pred_vol_curve"),
                     pred_phase_logits=outputs.get("pred_phase_logits"),
                 )
             elif hasattr(loss_fn, 'cycle_loss'):
-                # Legacy fallback, unlikely to be used with DeepMind config
                 l_seg, c_dict = loss_fn(
                     mask_logits, target_masks, pred_ef, frame_mask, imgs, pred_phase_logits=outputs.get("pred_phase_logits")
                 )

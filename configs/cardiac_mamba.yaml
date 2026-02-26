@@ -10,12 +10,12 @@ loss:
   weights:
     dice: 1.0
     volume: 1.0
-    sv: 2.0
     phase: 1.0
-    ef: 2.0
   focal:
     gamma: 2.0
     clip_threshold: 0.5
+    scale_weight: 1.0
+    ratio_weight: 2.0
   distillation:
     enabled: false
     weight: 1.0

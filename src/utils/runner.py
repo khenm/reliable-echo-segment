@@ -281,12 +281,16 @@ def get_criterions(cfg):
         )
 
     elif model_name == "temporal_segment_tracker" or model_name == "cardiac_mamba":
+        focal_cfg = cfg.get('loss', {}).get('focal', {})
         criterions['segmentation'] = build_loss(
             "TemporalWeakSegLoss",
             dice_weight=weights.get('dice', 1.0),
             volume_weight=weights.get('volume', 1.0),
-            ef_weight=weights.get('ef', 1.0),
-            sv_weight=weights.get('sv', 1.0),
+            phase_weight=weights.get('phase', 1.0),
+            gamma=focal_cfg.get('gamma', 2.0),
+            focal_clip_threshold=focal_cfg.get('clip_threshold', 0.5),
+            focal_scale_weight=focal_cfg.get('scale_weight', 1.0),
+            focal_ratio_weight=focal_cfg.get('ratio_weight', 10.0),
         )
 
         distill_cfg = cfg.get('loss', {}).get('distillation', {})

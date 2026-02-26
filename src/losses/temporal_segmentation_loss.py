@@ -8,36 +8,89 @@ from src.utils.logging import get_logger
 
 logger = get_logger()
 
-class FocalRegressionLoss(nn.Module):
+class PolarFocalVolumeLoss(nn.Module):
     """
-    Difficulty-aware regression loss. Modulates the base loss based on absolute error.
-    For errors above clip_threshold, the base loss transitions to linear (Huber behavior)
-    if base_loss_type == 'huber'.
+    A difficulty-aware orthogonal loss function. 
+    Projects EDV/ESV into polar space (Magnitude/Angle) and applies independent 
+    focal difficulty weighting to both the scale and the physiological ratio.
     """
     def __init__(
         self, 
-        gamma: float = 2.0, 
+        gamma: float = 2.0,
+        scale_weight: float = 1.0, 
+        ratio_weight: float = 10.0, 
         clip_threshold: float = 0.5,
-        base_loss_type: str = 'huber'
+        eps: float = 1e-7
     ):
         super().__init__()
         self.gamma = gamma
+        self.scale_weight = scale_weight
+        self.ratio_weight = ratio_weight
         self.clip_threshold = clip_threshold
-        self.base_loss_type = base_loss_type
+        self.eps = eps
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        error = torch.abs(pred - target)
-        relative_error = error / (target + 1e-5)
-        p = torch.clamp(relative_error, min=0.0, max=1.0)
-        weight = (1.0 + torch.pow(p, self.gamma)).detach()
+    def forward(
+        self, 
+        pred_edv: torch.Tensor, 
+        pred_esv: torch.Tensor, 
+        target_edv: torch.Tensor, 
+        target_esv: torch.Tensor
+    ) -> tuple[torch.Tensor, dict]:
         
-        if self.base_loss_type == 'huber':
-            base_loss = F.huber_loss(pred, target, reduction='none', delta=self.clip_threshold)
-        else:
-            base_loss = F.mse_loss(pred, target, reduction='none')
-            
-        focal_loss = weight * base_loss
-        return focal_loss.mean()
+        # 1. Flatten inputs and filter for valid labeled frames
+        p_edv, p_esv = pred_edv.view(-1), pred_esv.view(-1)
+        t_edv, t_esv = target_edv.view(-1), target_esv.view(-1)
+        
+        valid = (t_edv >= 0) & (t_esv >= 0)
+        
+        if not valid.any():
+            dummy_loss = 0.0 * p_edv.sum()
+            return dummy_loss, {"scale_loss": dummy_loss.detach(), "ratio_loss": dummy_loss.detach()}
+
+        # 2. Project into 2D Polar Space
+        pred_vec = torch.stack([p_edv[valid], p_esv[valid]], dim=-1)
+        target_vec = torch.stack([t_edv[valid], t_esv[valid]], dim=-1)
+
+        # --- SCALE (MAGNITUDE) CALCULATION ---
+        pred_mag = torch.norm(pred_vec, p=2, dim=-1)
+        target_mag = torch.norm(target_vec, p=2, dim=-1)
+        
+        # Calculate base scale loss (Huber)
+        base_loss_scale = F.huber_loss(pred_mag, target_mag, reduction='none', delta=self.clip_threshold)
+        
+        # Calculate dynamic focal weight for scale (Relative Error)
+        error_scale = torch.abs(pred_mag - target_mag)
+        relative_error_scale = error_scale / (target_mag + self.eps)
+        p_scale = torch.clamp(relative_error_scale, min=0.0, max=1.0)
+        weight_scale = (1.0 + torch.pow(p_scale, self.gamma)).detach() # Detach is critical!
+        
+        # Apply weight
+        focal_loss_scale = (weight_scale * base_loss_scale).mean()
+
+
+        # --- RATIO (ANGLE) CALCULATION ---
+        cos_sim = F.cosine_similarity(pred_vec, target_vec, dim=-1, eps=self.eps)
+        
+        # Calculate base ratio loss (1 - Cosine Similarity)
+        # Bounded between 0.0 (perfect) and 2.0 (opposite)
+        base_loss_ratio = 1.0 - cos_sim
+        
+        # Calculate dynamic focal weight for ratio
+        # We clamp at 1.0 to prevent the multiplier from exceeding (1 + 1^gamma) = 2.0
+        p_ratio = torch.clamp(base_loss_ratio, min=0.0, max=1.0)
+        weight_ratio = (1.0 + torch.pow(p_ratio, self.gamma)).detach()
+        
+        # Apply weight
+        focal_loss_ratio = (weight_ratio * base_loss_ratio).mean()
+
+
+        # --- COMBINE ORTHOGONAL LOSSES ---
+        total_loss = (self.scale_weight * focal_loss_scale) + (self.ratio_weight * focal_loss_ratio)
+
+        return total_loss, {
+            "scale_loss": focal_loss_scale.detach(),
+            "ratio_loss": focal_loss_ratio.detach()
+        }
 
 @register_loss("TemporalWeakSegLoss")
 class TemporalWeakSegLoss(nn.Module):
@@ -49,30 +102,24 @@ class TemporalWeakSegLoss(nn.Module):
         self,
         dice_weight: float = 1.0,
         volume_weight: float = 1.0,
-        ef_weight: float = 1.0,
-        sv_weight: float = 1.0,
         phase_weight: float = 0.5,
         gamma: float = 2.0,
         focal_clip_threshold: float = 0.5,
+        focal_scale_weight: float = 1.0,
+        focal_ratio_weight: float = 10.0,
     ):
         super().__init__()
         self.dice_weight = dice_weight
         self.volume_weight = volume_weight
-        self.ef_weight = ef_weight
-        self.sv_weight = sv_weight
         self.phase_weight = phase_weight
         
         self.dice_func = DiceCELoss(sigmoid=True, reduction='mean')
         
-        # Note: Targets are normalized by datasets! Volume target is scaled by 300.0, EF by 100.0
-        self.vol_loss_func = FocalRegressionLoss(
+        self.vol_loss_func = PolarFocalVolumeLoss(
             gamma=gamma, 
+            scale_weight=focal_scale_weight,
+            ratio_weight=focal_ratio_weight,
             clip_threshold=focal_clip_threshold
-        )
-        
-        self.ef_loss_func = FocalRegressionLoss(
-            gamma=gamma, 
-            clip_threshold=0.2 # Transition to Huber when EF error > 20% (since EF is / 100)
         )
 
     def forward(
@@ -84,8 +131,6 @@ class TemporalWeakSegLoss(nn.Module):
         target_esv: torch.Tensor,
         pred_edv: torch.Tensor,
         pred_esv: torch.Tensor,
-        pred_ef: torch.Tensor = None,
-        target_ef: torch.Tensor = None,
         **kwargs
     ):
         """
@@ -100,7 +145,7 @@ class TemporalWeakSegLoss(nn.Module):
         loss_phase = torch.tensor(0.0, device=pred_logits.device)
         
         # Always use the state-gated volumes directly
-        loss_vol, vol_loss_dict = self._compute_state_gated_loss(
+        loss_vol, vol_loss_dict = self.vol_loss_func(
             pred_edv, pred_esv, target_edv, target_esv
         )
             
@@ -118,14 +163,6 @@ class TemporalWeakSegLoss(nn.Module):
         # Add volume sub-components to loss dict for logging
         if vol_loss_dict:
             loss_dict.update(vol_loss_dict)
-
-        if self.ef_weight > 0.0 and pred_ef is not None and target_ef is not None:
-            valid_ef = target_ef >= 0
-            if valid_ef.any():
-                # Use focal loss for EF instead of standard smooth_l1
-                loss_ef = self.ef_loss_func(pred_ef.view(-1)[valid_ef.view(-1)], target_ef.view(-1)[valid_ef.view(-1)])
-                total_loss += (self.ef_weight * loss_ef)
-                loss_dict["ef_loss"] = loss_ef
 
         return total_loss, loss_dict
 
@@ -194,60 +231,3 @@ class TemporalWeakSegLoss(nn.Module):
         if valid_batches > 0:
             return total_phase_loss / valid_batches
         return torch.tensor(0.0, device=pred_phase_logits.device, requires_grad=True)
-
-    def _compute_state_gated_loss(
-        self,
-        pred_edv: torch.Tensor,
-        pred_esv: torch.Tensor,
-        target_edv: torch.Tensor,
-        target_esv: torch.Tensor
-    ) -> tuple[torch.Tensor, dict]:
-        """Computes point-wise loss between valid state-gated predicted and target volumes."""
-        p_edv = pred_edv.view(-1)
-        t_edv = target_edv.view(-1)
-        p_esv = pred_esv.view(-1)
-        t_esv = target_esv.view(-1)
-        
-        valid_edv = t_edv >= 0
-        valid_esv = t_esv >= 0
-        
-        loss_vol = []
-        l_edv_item = 0.0 * pred_edv.sum()
-        l_esv_item = 0.0 * pred_esv.sum()
-        l_sv_item = 0.0 * pred_edv.sum()
-        
-        if valid_edv.any():
-            l_edv = self.vol_loss_func(p_edv[valid_edv], t_edv[valid_edv])
-            loss_vol.append(l_edv)
-            l_edv_item = l_edv
-            
-        if valid_esv.any():
-            l_esv = self.vol_loss_func(p_esv[valid_esv], t_esv[valid_esv])
-            loss_vol.append(l_esv)
-            l_esv_item = l_esv
-
-        if len(loss_vol) > 0:
-            base_vol_loss = torch.stack(loss_vol).mean()
-        else:
-            return 0.0 * pred_edv.sum() + 0.0 * pred_esv.sum(), {
-                "edv_loss": l_edv_item,
-                "esv_loss": l_esv_item,
-                "sv_loss": l_sv_item
-            }
-
-        # Calculate Stroke Volume Loss
-        valid_sv = valid_edv & valid_esv
-        if valid_sv.any():
-            p_sv = p_edv[valid_sv] - p_esv[valid_sv]
-            t_sv = t_edv[valid_sv] - t_esv[valid_sv]
-            loss_sv = self.vol_loss_func(p_sv, t_sv)
-            total_vol_loss = base_vol_loss + (self.sv_weight * loss_sv)
-            l_sv_item = loss_sv
-        else:
-            total_vol_loss = base_vol_loss
-            
-        return total_vol_loss, {
-            "edv_loss": l_edv_item,
-            "esv_loss": l_esv_item,
-            "sv_loss": l_sv_item
-        }
