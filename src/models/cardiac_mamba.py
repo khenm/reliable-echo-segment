@@ -24,6 +24,21 @@ class MambaBlock(nn.Module):
     def step(self, x, state=None):
         return self.inner.step(x, state)
 
+class PhaseHead(nn.Module):
+    """
+    Predicts the cardiac phase (0: Systole, 1: Diastole) from the temporal hidden state.
+    """
+    def __init__(self, hidden_dim: int, num_phases: int = 2):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.SiLU(inplace=True),
+            nn.Linear(64, num_phases)
+        )
+        
+    def forward(self, h_t):
+        return self.net(h_t)
+
 class KalmanDynamicsHead(nn.Module):
     """
     Kalman-Inspired Fusion Head for Volume Prediction.
@@ -33,29 +48,18 @@ class KalmanDynamicsHead(nn.Module):
     def __init__(self, hidden_dim: int, feature_dim: int = 1):
         super().__init__()
         
-        # Prior prediction \hat{v}_{t|t-1} from the Mamba state (temporal prior)
+        # Prior prediction (mean, var) from the Mamba state (temporal prior)
         self.prior_head_raw = nn.Sequential(
             nn.Linear(hidden_dim, 64),
             nn.SiLU(inplace=True),
-            nn.Linear(64, 1),
+            nn.Linear(64, 2),
         )
         
         self.meas_head = nn.Sequential(
             nn.Linear(feature_dim, 32),
             nn.SiLU(inplace=True),
-            nn.Linear(32, 1),
+            nn.Linear(32, 2),
         )
-        
-        # Kalman Gain K_t gating mechanism derived from state and current token
-        self.gain_head = nn.Sequential(
-            nn.Linear(hidden_dim + feature_dim, 64),
-            nn.SiLU(inplace=True),
-            nn.Linear(64, 1),
-            nn.Sigmoid() # Gain represents confidence from 0 to 1
-        )
-        
-        # Scalar projection from continuous volume to sensor measurement space
-        self.W = nn.Parameter(torch.tensor([1.0]))
         
         # Learned initial prior state for t=0
         self.init_state = nn.Parameter(torch.randn(1, 1, hidden_dim))
@@ -75,26 +79,25 @@ class KalmanDynamicsHead(nn.Module):
             temporal_out[:, :-1, :]
         ], dim=1)
         
-        # Predict Prior \hat{v}_{t|t-1} (log-volume space softplus)
-        v_prior = F.softplus(self.prior_head_raw(padded_state)) # (B, T, 1)
-        
-        # 2. Kalman Gain K_t calculation
-        if temporal_tokens is None:
-            gain_feats = torch.cat([padded_state, z_t], dim=-1)
-        else:
-            gain_feats = torch.cat([padded_state, z_t], dim=-1) # We use z_t instead of temporal_tokens to save dimension mismatches or simplify
-            
-        K_t = self.gain_head(gain_feats) # (B, T, 1)
+        # Predict Prior \hat{v}_{t|t-1} and \sigma^2_{t|t-1}
+        prior_out = self.prior_head_raw(padded_state)
+        v_prior = F.softplus(prior_out[..., 0:1]) # (B, T, 1)
+        var_prior = F.softplus(prior_out[..., 1:2]) + 1e-6 # strictly positive
         
         # Measure volume directly using our dedicated mlp
-        m_t = F.softplus(self.meas_head(z_t))
+        meas_out = self.meas_head(z_t)
+        m_t = F.softplus(meas_out[..., 0:1]) # (B, T, 1)
+        var_meas = F.softplus(meas_out[..., 1:2]) + 1e-6 # strictly positive
         
-        # 3. Update (Posterior) v_t
-        # v_t = \hat{v}_{t|t-1} + K_t * (m_t - W * \hat{v}_{t|t-1})
-        v_post = v_prior + K_t * (m_t - self.W * v_prior)
+        # 2. Optimal Kalman Gain K_t calculation
+        K_t = var_prior / (var_prior + var_meas)
+        
+        # 3. Update (Posterior) v_t and variance
+        v_post = v_prior + K_t * (m_t - v_prior)
+        var_post = (1 - K_t) * var_prior
         
         # Clamp to valid normalized volume range (soft clamping allowed large max)
-        return torch.clamp(v_post, min=1e-6, max=10.0)
+        return torch.clamp(v_post, min=1e-6, max=10.0), var_post
     
     def step(self, temporal_out_t, z_t, state=None):
         """Streaming step for Kalman inference."""
@@ -106,21 +109,27 @@ class KalmanDynamicsHead(nn.Module):
         else:
             prev_state = state
             
-        v_prior = F.softplus(self.prior_head_raw(prev_state)) # (B, 1, 1)
+        prior_out = self.prior_head_raw(prev_state)
+        v_prior = F.softplus(prior_out[..., 0:1]) # (B, 1, 1)
+        var_prior = F.softplus(prior_out[..., 1:2]) + 1e-6
         
         # z_t could be missing the sequences dimension here
         z_t_unsqueeze = z_t.unsqueeze(1) if z_t.ndim == 2 else z_t
-        gain_feats = torch.cat([prev_state, z_t_unsqueeze], dim=-1)
-        K_t = self.gain_head(gain_feats) # (B, 1, 1)
         
-        m_t = F.softplus(self.meas_head(z_t_unsqueeze))
-        v_post = v_prior + K_t * (m_t - self.W * v_prior)
+        meas_out = self.meas_head(z_t_unsqueeze)
+        m_t = F.softplus(meas_out[..., 0:1])
+        var_meas = F.softplus(meas_out[..., 1:2]) + 1e-6
+
+        K_t = var_prior / (var_prior + var_meas)
+        
+        v_post = v_prior + K_t * (m_t - v_prior)
         v_post = torch.clamp(v_post, min=1e-6, max=10.0)
+        var_post = (1 - K_t) * var_prior
         
         # The current temporal_out_t becomes the prior state for the NEXT step
         next_state = temporal_out_t 
         
-        return v_post, next_state
+        return v_post, var_post, next_state
 
 @register_model("cardiac_mamba")
 class CardiacMamba(nn.Module):
@@ -188,9 +197,10 @@ class CardiacMamba(nn.Module):
         )
 
         # 4. Multi-Task Heads
+        self.phase_head = PhaseHead(hidden_dim, num_phases=2)
         self.kalman_head = KalmanDynamicsHead(hidden_dim, feature_dim=1)
 
-        logger.info(f"CardiacMamba initialized with PureMamba backbone and KalmanDynamicsHead")
+        logger.info(f"CardiacMamba initialized with PureMamba backbone, PhaseHead, and KalmanDynamicsHead")
 
     def forward_spatial(self, x):
         enc_feats = self.encoder(x) 
@@ -235,19 +245,33 @@ class CardiacMamba(nn.Module):
         
         temporal_out = self.temporal_mamba(tokens) 
         
-        vol_curve = self.kalman_head(temporal_out, z_t)
+        phase_logits = self.phase_head(temporal_out)
         
-        vols = vol_curve.squeeze(-1)
-    
+        vol_curve, var_curve = self.kalman_head(temporal_out, z_t)
+        
+        # 1. Get Phase Probabilities (B, T, 2)
+        # 0: Systole (ES), 1: Diastole (ED)
+        phase_probs = torch.softmax(phase_logits, dim=-1)
+        p_es = phase_probs[..., 0]
+        p_ed = phase_probs[..., 1]
+        
+        # Mask out frames beyond sequence length
         if lengths is not None:
             mask_t = (torch.arange(T, device=x.device)[None, :] < lengths[:, None])
-            pred_edv, pred_esv = self.differentiable_reduce(vols, mask=mask_t, tau=1.0)
-        else:
-            pred_edv, pred_esv = self.differentiable_reduce(vols, mask=None, tau=1.0)
+            p_es = p_es * mask_t
+            p_ed = p_ed * mask_t
+
+        # 2. Extract Gated Volumes (B,)
+        # Instead of min/max, we use the phase-weighted average
+        vols = vol_curve.squeeze(-1)
+        pred_edv = torch.sum(p_ed * vols, dim=1) / torch.sum(p_ed, dim=1).clamp(min=1e-3)
+        pred_esv = torch.sum(p_es * vols, dim=1) / torch.sum(p_es, dim=1).clamp(min=1e-3)
 
         return {
             "mask_logits": mask_logits.transpose(1, 2), 
             "pred_vol_curve": vol_curve,
+            "pred_var_curve": var_curve,
+            "pred_phase_logits": phase_logits,
             "pred_edv": pred_edv,
             "pred_esv": pred_esv,
             "pred_ef": (pred_edv - pred_esv) / torch.clamp(pred_edv, min=1e-3),
@@ -271,7 +295,8 @@ class CardiacMamba(nn.Module):
         
         # 3. Heads
         temporal_out_flat = temporal_out.squeeze(1)
-        vol_out, next_kalman_state = self.kalman_head.step(temporal_out_flat, z_t, state=kalman_state)
+        phase_logits = self.phase_head(temporal_out_flat)
+        vol_out, var_out, next_kalman_state = self.kalman_head.step(temporal_out_flat, z_t, state=kalman_state)
         
         next_state = {
             'mamba_state': next_mamba_state,
@@ -281,29 +306,7 @@ class CardiacMamba(nn.Module):
         return {
             "mask_logits": mask_logits, 
             "pred_vol": vol_out.squeeze(-1), 
+            "pred_var": var_out.squeeze(-1),
+            "pred_phase_logits": phase_logits,
             "hidden_features": temporal_out_flat
         }, next_state
-
-    def differentiable_reduce(self, vols, mask=None, tau=1.0):
-        """
-        Computes a differentiable soft-maximum and soft-minimum across the sequence.
-        tau (temperature): Controls the sharpness of the approximation. 
-        """
-        vols_centered = vols - vols.mean(dim=1, keepdim=True)
-        
-        logits_max = vols_centered / tau
-        logits_min = -vols_centered / tau
-        
-        if mask is not None:
-            mask_fill = (mask == 0)
-            safe_min = torch.finfo(logits_max.dtype).min
-            logits_max = logits_max.masked_fill(mask_fill, safe_min)
-            logits_min = logits_min.masked_fill(mask_fill, safe_min)
-            
-        attn_weights_max = F.softmax(logits_max, dim=1)
-        soft_val_max = torch.sum(attn_weights_max * vols, dim=1)
-        
-        attn_weights_min = F.softmax(logits_min, dim=1)
-        soft_val_min = torch.sum(attn_weights_min * vols, dim=1)
-        
-        return soft_val_max, soft_val_min
