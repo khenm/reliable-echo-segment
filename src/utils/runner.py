@@ -10,7 +10,7 @@ from src.utils.dist import is_main_process
 from src.models.temporal import TemporalConsistencyLoss
 from monai.losses import DiceCELoss
 from monai.metrics import DiceMetric
-from src.utils.metric import SkeletalError, R2Score, MAE, RMSE
+from src.utils.metric import SkeletalError, R2Score, MAE, RMSE, Accuracy
 
 logger = get_logger()
 
@@ -282,6 +282,7 @@ def get_criterions(cfg):
 
     elif model_name == "temporal_segment_tracker" or model_name == "cardiac_mamba":
         focal_cfg = cfg.get('loss', {}).get('focal', {})
+        curriculum_cfg = cfg.get('loss', {}).get('curriculum', {})
         criterions['segmentation'] = build_loss(
             "TemporalWeakSegLoss",
             dice_weight=weights.get('dice', 1.0),
@@ -291,6 +292,9 @@ def get_criterions(cfg):
             focal_clip_threshold=focal_cfg.get('clip_threshold', 0.5),
             focal_scale_weight=focal_cfg.get('scale_weight', 1.0),
             focal_ratio_weight=focal_cfg.get('ratio_weight', 10.0),
+            curriculum_enabled=curriculum_cfg.get('enabled', False),
+            curriculum_scale_epochs=curriculum_cfg.get('scale_phase_epochs', 20),
+            curriculum_fade_epochs=curriculum_cfg.get('fade_phase_epochs', 30),
         )
 
         distill_cfg = cfg.get('loss', {}).get('distillation', {})
@@ -339,6 +343,7 @@ def get_metrics(cfg):
         metrics['r2_esv'] = R2Score()
         
         metrics['dice'] = DiceMetric(include_background=include_bg, reduction="mean")
+        metrics['phase_acc'] = Accuracy()
     else:
         metrics['dice'] = DiceMetric(include_background=include_bg, reduction="mean")
     return metrics

@@ -163,6 +163,12 @@ class Trainer:
         logger.info(f"Starting training from epoch {start_ep}")
         
         for ep in range(start_ep, epochs + 1):
+            
+            # Update curriculum scheduler
+            seg_loss = self.criterions.get('segmentation')
+            if seg_loss is not None and hasattr(seg_loss, 'update_epoch'):
+                seg_loss.update_epoch(ep)
+
             # Set epoch for DistributedSampler to ensure shuffling
             if hasattr(self.ld_tr, 'sampler') and hasattr(self.ld_tr.sampler, 'set_epoch'):
                 self.ld_tr.sampler.set_epoch(ep)
@@ -604,6 +610,30 @@ class Trainer:
                 self.metrics['rmse_esv'](p_esv_ml, t_esv_ml)
                 self.metrics['r2_esv'](p_esv_ml, t_esv_ml)
 
+        # 3. Phase Metrics
+        if 'phase_acc' in self.metrics:
+            pred_phase_logits = outputs.get("pred_phase_logits")
+            frame_mask = batch.get("frame_mask")
+            if pred_phase_logits is not None and frame_mask is not None:
+                B, T, _ = pred_phase_logits.shape
+                pred_phases = pred_phase_logits.argmax(dim=-1)
+                for b in range(B):
+                    ed_idx = torch.where(frame_mask[b] == 2.0)[0]
+                    es_idx = torch.where(frame_mask[b] == 1.0)[0]
+                    if len(ed_idx) > 0 and len(es_idx) > 0:
+                        ed = ed_idx[0].item()
+                        es = es_idx[0].item()
+                        target_phases = torch.zeros(T, dtype=torch.long, device=self.device)
+                        if ed < es:
+                            target_phases[:ed+1] = 1
+                            target_phases[ed+1:es+1] = 0
+                            target_phases[es+1:] = 1
+                        else:
+                            target_phases[:es+1] = 0
+                            target_phases[es+1:ed+1] = 1
+                            target_phases[ed+1:] = 0
+                        self.metrics['phase_acc'](pred_phases[b], target_phases)
+
         if 'dice' in self.metrics:
             target_masks = batch.get("label")
             frame_mask = batch.get("frame_mask")
@@ -723,9 +753,13 @@ class Trainer:
             buffer = self.metrics['dice'].get_buffer()
             if buffer is not None and len(buffer) > 0:
                 dice = float(self.metrics['dice'].aggregate().cpu())
+                
+        phase_acc = 0.0
+        if 'phase_acc' in self.metrics:
+            phase_acc = float(self.metrics['phase_acc'].aggregate())
 
         if self.is_segmentation:
-            return (dice, mae, rmse, r2, mae_edv, rmse_edv, r2_edv, mae_esv, rmse_esv, r2_esv)
+            return (dice, mae, rmse, r2, mae_edv, rmse_edv, r2_edv, mae_esv, rmse_esv, r2_esv, phase_acc)
         elif self.is_skeletal and 'skeletal' in self.metrics:
             skel = float(self.metrics['skeletal'].aggregate())
             return (-mae, mae, dice, skel, rmse, r2)
@@ -785,10 +819,12 @@ class Trainer:
         
         if isinstance(val_res, tuple):
             if self.is_segmentation:
-                # (dice, mae, rmse, r2, mae_edv, rmse_edv, r2_edv, mae_esv, rmse_esv, r2_esv)
+                # (dice, mae, rmse, r2, mae_edv, rmse_edv, r2_edv, mae_esv, rmse_esv, r2_esv, phase_acc)
                 msg_val += f"Dice={val_res[0]:.4f} MAE={val_res[1]:.4f} RMSE={val_res[2]:.4f} R2={val_res[3]:.4f} "
                 msg_val += f"MAE_EDV={val_res[4]:.4f} RMSE_EDV={val_res[5]:.4f} R2_EDV={val_res[6]:.4f} "
-                msg_val += f"MAE_ESV={val_res[7]:.4f} RMSE_ESV={val_res[8]:.4f} R2_ESV={val_res[9]:.4f}"
+                msg_val += f"MAE_ESV={val_res[7]:.4f} RMSE_ESV={val_res[8]:.4f} R2_ESV={val_res[9]:.4f} "
+                if len(val_res) > 10:
+                    msg_val += f"PhaseAcc={val_res[10]:.4f}"
             elif self.is_skeletal:
                 msg_val += f"MAE={val_res[1]:.4f} Dice={val_res[2]:.4f} Skel={val_res[3]:.4f} RMSE={val_res[4]:.4f} R2={val_res[5]:.4f}"
             elif self.is_regression or self.is_dual_stream:

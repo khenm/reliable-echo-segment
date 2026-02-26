@@ -16,6 +16,10 @@ loss:
     clip_threshold: 0.5
     scale_weight: 1.0
     ratio_weight: 2.0
+  curriculum:
+    enabled: true
+    scale_phase_epochs: 20
+    fade_phase_epochs: 30
   distillation:
     enabled: false
     weight: 1.0

@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from sklearn.metrics import roc_curve, roc_auc_score, r2_score, mean_absolute_error, mean_squared_error
+from sklearn.metrics import roc_curve, roc_auc_score, r2_score, mean_absolute_error, mean_squared_error, accuracy_score
 
 def compute_dice_coefficient(gt, pr, label_idx=1):
     """
@@ -273,3 +273,34 @@ class RMSE:
         if not self.preds:
             return 0.0
         return np.sqrt(mean_squared_error(self.targets, self.preds))
+
+class Accuracy:
+    """
+    Computes Accuracy Score for phase classification.
+    Uses sklearn.metrics.accuracy_score internally.
+    """
+    def __init__(self):
+        self.reset()
+        
+    def reset(self):
+        self.preds = []
+        self.targets = []
+        
+    def __call__(self, preds, targets):
+        """
+        Args:
+            preds (torch.Tensor or np.ndarray): Predicted class indices.
+            targets (torch.Tensor or np.ndarray): Ground truth class indices.
+        """
+        if isinstance(preds, torch.Tensor):
+            preds = preds.detach().cpu().numpy()
+        if isinstance(targets, torch.Tensor):
+            targets = targets.detach().cpu().numpy()
+            
+        self.preds.extend(preds.reshape(-1).tolist())
+        self.targets.extend(targets.reshape(-1).tolist())
+        
+    def aggregate(self):
+        if not self.preds:
+            return 0.0
+        return accuracy_score(self.targets, np.round(self.preds))

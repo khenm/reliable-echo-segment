@@ -107,11 +107,19 @@ class TemporalWeakSegLoss(nn.Module):
         focal_clip_threshold: float = 0.5,
         focal_scale_weight: float = 1.0,
         focal_ratio_weight: float = 10.0,
+        curriculum_enabled: bool = False,
+        curriculum_scale_epochs: int = 20,
+        curriculum_fade_epochs: int = 30,
     ):
         super().__init__()
         self.dice_weight = dice_weight
         self.volume_weight = volume_weight
         self.phase_weight = phase_weight
+        
+        self.curriculum_enabled = curriculum_enabled
+        self.scale_phase_epochs = curriculum_scale_epochs
+        self.fade_phase_epochs = curriculum_fade_epochs
+        self.max_focal_ratio_weight = focal_ratio_weight
         
         self.dice_func = DiceCELoss(sigmoid=True, reduction='mean')
         
@@ -121,6 +129,20 @@ class TemporalWeakSegLoss(nn.Module):
             ratio_weight=focal_ratio_weight,
             clip_threshold=focal_clip_threshold
         )
+
+    def update_epoch(self, epoch: int):
+        if not self.curriculum_enabled:
+            return
+            
+        if epoch <= self.scale_phase_epochs:
+            self.vol_loss_func.ratio_weight = 0.0
+        elif epoch <= self.scale_phase_epochs + self.fade_phase_epochs:
+            progress = (epoch - self.scale_phase_epochs) / self.fade_phase_epochs
+            self.vol_loss_func.ratio_weight = self.max_focal_ratio_weight * progress
+        else:
+            self.vol_loss_func.ratio_weight = self.max_focal_ratio_weight
+            
+        logger.info(f"[Epoch {epoch}] Curriculum schedule: set PolarFocal ratio_weight to {self.vol_loss_func.ratio_weight:.2f}")
 
     def forward(
         self,
