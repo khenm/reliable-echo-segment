@@ -124,7 +124,7 @@ class EchoNetVideoDataset(Dataset):
                     
                 if ed_frame == -1 or es_frame == -1:
                     continue
-                        
+                    
                 # Check if BOTH frames are strictly within (start, end-1)
                 has_ed = (start < ed_frame < end - 1)
                 has_es = (start < es_frame < end - 1)

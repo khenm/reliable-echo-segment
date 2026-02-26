@@ -21,12 +21,14 @@ class TemporalWeakSegLoss(nn.Module):
         volume_weight: float = 1.0,
         ef_weight: float = 1.0,
         sv_weight: float = 1.0,
+        phase_weight: float = 0.5,
     ):
         super().__init__()
         self.dice_weight = dice_weight
         self.volume_weight = volume_weight
         self.ef_weight = ef_weight
         self.sv_weight = sv_weight
+        self.phase_weight = phase_weight
         
         self.dice_func = DiceCELoss(sigmoid=True, reduction='mean')
 
@@ -48,13 +50,26 @@ class TemporalWeakSegLoss(nn.Module):
         during the architectural transition without breaking the forward pass.
         """
         loss_dice = self._compute_dice_loss(pred_logits, target_masks, frame_mask)
-        loss_vol, vol_loss_dict = self._compute_volume_loss(pred_edv, pred_esv, target_edv, target_esv)
+        
+        pred_vol_curve = kwargs.get("pred_vol_curve", None)
+        pred_phase_logits = kwargs.get("pred_phase_logits", None)
+        
+        loss_phase = torch.tensor(0.0, device=pred_logits.device)
+        
+        # Always use the state-gated volumes directly
+        loss_vol, vol_loss_dict = self._compute_state_gated_loss(
+            pred_edv, pred_esv, target_edv, target_esv
+        )
+            
+        if pred_phase_logits is not None:
+            loss_phase = self._compute_phase_loss(pred_phase_logits, frame_mask)
 
-        total_loss = (self.dice_weight * loss_dice) + (self.volume_weight * loss_vol)
+        total_loss = (self.dice_weight * loss_dice) + (self.volume_weight * loss_vol) + (self.phase_weight * loss_phase)
 
         loss_dict = {
             "dice_loss": loss_dice,
             "volume_loss": loss_vol,
+            "phase_loss": loss_phase,
         }
         
         # Add volume sub-components to loss dict for logging
@@ -99,14 +114,56 @@ class TemporalWeakSegLoss(nn.Module):
             target_flat[valid_indices]
         )
 
-    def _compute_volume_loss(
+    def _compute_phase_loss(self, pred_phase_logits: torch.Tensor, frame_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Computes Cross-Entropy loss for predicted cyclic phase (0=Systole, 1=Diastole)
+        by inferring ground truth implicitly from ED/ES frames.
+        """
+        # pred_phase_logits: (B, T, 2)
+        B, T, _ = pred_phase_logits.shape
+        loss_fn = nn.CrossEntropyLoss()
+        total_phase_loss = 0.0
+        valid_batches = 0
+        
+        for b in range(B):
+            ed_idx = torch.where(frame_mask[b] == 2.0)[0]
+            es_idx = torch.where(frame_mask[b] == 1.0)[0]
+            
+            if len(ed_idx) > 0 and len(es_idx) > 0:
+                ed = ed_idx[0].item()
+                es = es_idx[0].item()
+                
+                target_phases = torch.zeros(T, dtype=torch.long, device=pred_phase_logits.device)
+                
+                if ed < es:
+                    # .. Diastole .. ED .. Systole .. ES .. Diastole
+                    # Until ED is Diastole (1)
+                    target_phases[:ed+1] = 1
+                    # From ED to ES is Systole (0)
+                    target_phases[ed+1:es+1] = 0
+                    # After ES is Diastole (1)
+                    target_phases[es+1:] = 1
+                else:
+                    # .. Systole .. ES .. Diastole .. ED .. Systole
+                    target_phases[:es+1] = 0
+                    target_phases[es+1:ed+1] = 1
+                    target_phases[ed+1:] = 0
+                    
+                total_phase_loss += loss_fn(pred_phase_logits[b], target_phases)
+                valid_batches += 1
+                
+        if valid_batches > 0:
+            return total_phase_loss / valid_batches
+        return torch.tensor(0.0, device=pred_phase_logits.device, requires_grad=True)
+
+    def _compute_state_gated_loss(
         self,
         pred_edv: torch.Tensor,
         pred_esv: torch.Tensor,
         target_edv: torch.Tensor,
         target_esv: torch.Tensor
-    ) -> torch.Tensor:
-        """Computes L1 loss between valid predicted and target end-systolic/diastolic volumes."""
+    ) -> tuple[torch.Tensor, dict]:
+        """Computes point-wise loss between valid state-gated predicted and target volumes."""
         p_edv = pred_edv.view(-1)
         t_edv = target_edv.view(-1)
         p_esv = pred_esv.view(-1)
@@ -121,12 +178,13 @@ class TemporalWeakSegLoss(nn.Module):
         l_sv_item = 0.0 * pred_edv.sum()
         
         if valid_edv.any():
-            l_edv = F.smooth_l1_loss(p_edv[valid_edv], t_edv[valid_edv])
+            # Point-wise MSE on the gated expectation
+            l_edv = F.mse_loss(p_edv[valid_edv], t_edv[valid_edv])
             loss_vol.append(l_edv)
             l_edv_item = l_edv
             
         if valid_esv.any():
-            l_esv = F.smooth_l1_loss(p_esv[valid_esv], t_esv[valid_esv])
+            l_esv = F.mse_loss(p_esv[valid_esv], t_esv[valid_esv])
             loss_vol.append(l_esv)
             l_esv_item = l_esv
 
@@ -145,7 +203,7 @@ class TemporalWeakSegLoss(nn.Module):
         if valid_sv.any():
             p_sv = p_edv[valid_sv] - p_esv[valid_sv]
             t_sv = t_edv[valid_sv] - t_esv[valid_sv]
-            loss_sv = F.smooth_l1_loss(p_sv, t_sv)
+            loss_sv = F.mse_loss(p_sv, t_sv)
             total_vol_loss = base_vol_loss + (self.sv_weight * loss_sv)
             l_sv_item = loss_sv
         else:
