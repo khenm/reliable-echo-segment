@@ -211,8 +211,7 @@ class CardiacMamba(nn.Module):
         mask_probs = torch.sigmoid(mask_logits)
 
         B_T = mask_probs.shape[0]
-        # Sum is more correlated with cavity area than mean which gets easily diluted by background.
-        z_t = mask_probs.view(B_T, -1).sum(dim=1, keepdim=True) / 1000.0 # scale slightly so it's not huge
+        z_t = mask_probs.view(B_T, -1).sum(dim=1, keepdim=True) / 1000.0
         
         mask_downsampled = F.adaptive_avg_pool2d(mask_probs, bottleneck.shape[2:])
         
@@ -249,20 +248,15 @@ class CardiacMamba(nn.Module):
         
         vol_curve, var_curve = self.kalman_head(temporal_out, z_t)
         
-        # 1. Get Phase Probabilities (B, T, 2)
-        # 0: Systole (ES), 1: Diastole (ED)
         phase_probs = torch.softmax(phase_logits, dim=-1)
         p_es = phase_probs[..., 0]
         p_ed = phase_probs[..., 1]
         
-        # Mask out frames beyond sequence length
         if lengths is not None:
             mask_t = (torch.arange(T, device=x.device)[None, :] < lengths[:, None])
             p_es = p_es * mask_t
             p_ed = p_ed * mask_t
 
-        # 2. Extract Gated Volumes (B,)
-        # Instead of min/max, we use the phase-weighted average
         vols = vol_curve.squeeze(-1)
         pred_edv = torch.sum(p_ed * vols, dim=1) / torch.sum(p_ed, dim=1).clamp(min=1e-3)
         pred_esv = torch.sum(p_es * vols, dim=1) / torch.sum(p_es, dim=1).clamp(min=1e-3)

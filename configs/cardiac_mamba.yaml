@@ -13,6 +13,10 @@ loss:
     sv: 1.0
     phase: 1.0
     ef: 1.0
+  focal:
+    gamma: 2.0
+    max_error: 300.0
+    clip_threshold: 150.0
   distillation:
     enabled: false
     weight: 1.0

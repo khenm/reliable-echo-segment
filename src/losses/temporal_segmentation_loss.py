@@ -8,6 +8,38 @@ from src.utils.logging import get_logger
 
 logger = get_logger()
 
+class FocalRegressionLoss(nn.Module):
+    """
+    Difficulty-aware regression loss. Modulates the base loss based on absolute error.
+    For errors above clip_threshold, the base loss transitions to linear (Huber behavior)
+    if base_loss_type == 'huber'.
+    """
+    def __init__(
+        self, 
+        gamma: float = 2.0, 
+        max_error: float = 300.0, 
+        clip_threshold: float = 150.0,
+        base_loss_type: str = 'huber'
+    ):
+        super().__init__()
+        self.gamma = gamma
+        self.max_error = max_error
+        self.clip_threshold = clip_threshold
+        self.base_loss_type = base_loss_type
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        error = torch.abs(pred - target)
+        
+        p = torch.clamp(error / self.max_error, min=0.0, max=1.0)
+        weight = torch.pow(p, self.gamma).detach()
+        
+        if self.base_loss_type == 'huber':
+            base_loss = F.huber_loss(pred, target, reduction='none', delta=self.clip_threshold)
+        else:
+            base_loss = F.mse_loss(pred, target, reduction='none')
+            
+        focal_loss = weight * base_loss
+        return focal_loss.mean()
 
 @register_loss("TemporalWeakSegLoss")
 class TemporalWeakSegLoss(nn.Module):
@@ -22,6 +54,9 @@ class TemporalWeakSegLoss(nn.Module):
         ef_weight: float = 1.0,
         sv_weight: float = 1.0,
         phase_weight: float = 0.5,
+        gamma: float = 2.0,
+        focal_max_error: float = 300.0,
+        focal_clip_threshold: float = 150.0,
     ):
         super().__init__()
         self.dice_weight = dice_weight
@@ -31,6 +66,19 @@ class TemporalWeakSegLoss(nn.Module):
         self.phase_weight = phase_weight
         
         self.dice_func = DiceCELoss(sigmoid=True, reduction='mean')
+        
+        # Note: EF uses a much smaller scale naturally (0-100%). We'll scale its thresholds.
+        self.vol_loss_func = FocalRegressionLoss(
+            gamma=gamma, 
+            max_error=focal_max_error, 
+            clip_threshold=focal_clip_threshold
+        )
+        
+        self.ef_loss_func = FocalRegressionLoss(
+            gamma=gamma, 
+            max_error=40.0,
+            clip_threshold=20.0
+        )
 
     def forward(
         self,
@@ -79,7 +127,8 @@ class TemporalWeakSegLoss(nn.Module):
         if self.ef_weight > 0.0 and pred_ef is not None and target_ef is not None:
             valid_ef = target_ef >= 0
             if valid_ef.any():
-                loss_ef = F.smooth_l1_loss(pred_ef.view(-1)[valid_ef.view(-1)], target_ef.view(-1)[valid_ef.view(-1)])
+                # Use focal loss for EF instead of standard smooth_l1
+                loss_ef = self.ef_loss_func(pred_ef.view(-1)[valid_ef.view(-1)], target_ef.view(-1)[valid_ef.view(-1)])
                 total_loss += (self.ef_weight * loss_ef)
                 loss_dict["ef_loss"] = loss_ef
 
@@ -136,15 +185,10 @@ class TemporalWeakSegLoss(nn.Module):
                 target_phases = torch.zeros(T, dtype=torch.long, device=pred_phase_logits.device)
                 
                 if ed < es:
-                    # .. Diastole .. ED .. Systole .. ES .. Diastole
-                    # Until ED is Diastole (1)
                     target_phases[:ed+1] = 1
-                    # From ED to ES is Systole (0)
                     target_phases[ed+1:es+1] = 0
-                    # After ES is Diastole (1)
                     target_phases[es+1:] = 1
                 else:
-                    # .. Systole .. ES .. Diastole .. ED .. Systole
                     target_phases[:es+1] = 0
                     target_phases[es+1:ed+1] = 1
                     target_phases[ed+1:] = 0
@@ -178,17 +222,15 @@ class TemporalWeakSegLoss(nn.Module):
         l_sv_item = 0.0 * pred_edv.sum()
         
         if valid_edv.any():
-            # Point-wise MSE on the gated expectation
-            l_edv = F.mse_loss(p_edv[valid_edv], t_edv[valid_edv])
+            l_edv = self.vol_loss_func(p_edv[valid_edv], t_edv[valid_edv])
             loss_vol.append(l_edv)
             l_edv_item = l_edv
             
         if valid_esv.any():
-            l_esv = F.mse_loss(p_esv[valid_esv], t_esv[valid_esv])
+            l_esv = self.vol_loss_func(p_esv[valid_esv], t_esv[valid_esv])
             loss_vol.append(l_esv)
             l_esv_item = l_esv
 
-        # Calculate base volume loss (EDV & ESV mean)
         if len(loss_vol) > 0:
             base_vol_loss = torch.stack(loss_vol).mean()
         else:
@@ -203,7 +245,7 @@ class TemporalWeakSegLoss(nn.Module):
         if valid_sv.any():
             p_sv = p_edv[valid_sv] - p_esv[valid_sv]
             t_sv = t_edv[valid_sv] - t_esv[valid_sv]
-            loss_sv = F.mse_loss(p_sv, t_sv)
+            loss_sv = self.vol_loss_func(p_sv, t_sv)
             total_vol_loss = base_vol_loss + (self.sv_weight * loss_sv)
             l_sv_item = loss_sv
         else:
