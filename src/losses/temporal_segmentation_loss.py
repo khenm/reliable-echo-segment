@@ -17,21 +17,19 @@ class FocalRegressionLoss(nn.Module):
     def __init__(
         self, 
         gamma: float = 2.0, 
-        max_error: float = 300.0, 
-        clip_threshold: float = 150.0,
+        clip_threshold: float = 0.5,
         base_loss_type: str = 'huber'
     ):
         super().__init__()
         self.gamma = gamma
-        self.max_error = max_error
         self.clip_threshold = clip_threshold
         self.base_loss_type = base_loss_type
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         error = torch.abs(pred - target)
-        
-        p = torch.clamp(error / self.max_error, min=0.0, max=1.0)
-        weight = torch.pow(p, self.gamma).detach()
+        relative_error = error / (target + 1e-5)
+        p = torch.clamp(relative_error, min=0.0, max=1.0)
+        weight = (1.0 + torch.pow(p, self.gamma)).detach()
         
         if self.base_loss_type == 'huber':
             base_loss = F.huber_loss(pred, target, reduction='none', delta=self.clip_threshold)
@@ -55,8 +53,7 @@ class TemporalWeakSegLoss(nn.Module):
         sv_weight: float = 1.0,
         phase_weight: float = 0.5,
         gamma: float = 2.0,
-        focal_max_error: float = 300.0,
-        focal_clip_threshold: float = 150.0,
+        focal_clip_threshold: float = 0.5,
     ):
         super().__init__()
         self.dice_weight = dice_weight
@@ -67,17 +64,15 @@ class TemporalWeakSegLoss(nn.Module):
         
         self.dice_func = DiceCELoss(sigmoid=True, reduction='mean')
         
-        # Note: EF uses a much smaller scale naturally (0-100%). We'll scale its thresholds.
+        # Note: Targets are normalized by datasets! Volume target is scaled by 300.0, EF by 100.0
         self.vol_loss_func = FocalRegressionLoss(
             gamma=gamma, 
-            max_error=focal_max_error, 
             clip_threshold=focal_clip_threshold
         )
         
         self.ef_loss_func = FocalRegressionLoss(
             gamma=gamma, 
-            max_error=40.0,
-            clip_threshold=20.0
+            clip_threshold=0.2 # Transition to Huber when EF error > 20% (since EF is / 100)
         )
 
     def forward(
