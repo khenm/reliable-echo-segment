@@ -18,8 +18,8 @@ loss:
     ratio_weight: 2.0
   curriculum:
     enabled: true
-    scale_phase_epochs: 20
-    fade_phase_epochs: 30
+    phase_epochs: 10
+    fade_epochs: 30
   distillation:
     enabled: false
     weight: 1.0

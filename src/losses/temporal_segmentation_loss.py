@@ -47,44 +47,31 @@ class PolarFocalVolumeLoss(nn.Module):
             dummy_loss = 0.0 * p_edv.sum()
             return dummy_loss, {"scale_loss": dummy_loss.detach(), "ratio_loss": dummy_loss.detach()}
 
-        # 2. Project into 2D Polar Space
         pred_vec = torch.stack([p_edv[valid], p_esv[valid]], dim=-1)
         target_vec = torch.stack([t_edv[valid], t_esv[valid]], dim=-1)
 
-        # --- SCALE (MAGNITUDE) CALCULATION ---
         pred_mag = torch.norm(pred_vec, p=2, dim=-1)
         target_mag = torch.norm(target_vec, p=2, dim=-1)
         
-        # Calculate base scale loss (Huber)
         base_loss_scale = F.huber_loss(pred_mag, target_mag, reduction='none', delta=self.clip_threshold)
         
-        # Calculate dynamic focal weight for scale (Relative Error)
         error_scale = torch.abs(pred_mag - target_mag)
         relative_error_scale = error_scale / (target_mag + self.eps)
         p_scale = torch.clamp(relative_error_scale, min=0.0, max=1.0)
-        weight_scale = (1.0 + torch.pow(p_scale, self.gamma)).detach() # Detach is critical!
+        weight_scale = (1.0 + torch.pow(p_scale, self.gamma)).detach()
         
-        # Apply weight
         focal_loss_scale = (weight_scale * base_loss_scale).mean()
 
 
-        # --- RATIO (ANGLE) CALCULATION ---
-        cos_sim = F.cosine_similarity(pred_vec, target_vec, dim=-1, eps=self.eps)
-        
-        # Calculate base ratio loss (1 - Cosine Similarity)
-        # Bounded between 0.0 (perfect) and 2.0 (opposite)
+        cos_sim = F.cosine_similarity(pred_vec, target_vec, dim=-1, eps=self.eps) 
         base_loss_ratio = 1.0 - cos_sim
         
-        # Calculate dynamic focal weight for ratio
-        # We clamp at 1.0 to prevent the multiplier from exceeding (1 + 1^gamma) = 2.0
         p_ratio = torch.clamp(base_loss_ratio, min=0.0, max=1.0)
         weight_ratio = (1.0 + torch.pow(p_ratio, self.gamma)).detach()
         
-        # Apply weight
         focal_loss_ratio = (weight_ratio * base_loss_ratio).mean()
 
 
-        # --- COMBINE ORTHOGONAL LOSSES ---
         total_loss = (self.scale_weight * focal_loss_scale) + (self.ratio_weight * focal_loss_ratio)
 
         return total_loss, {
@@ -108,7 +95,7 @@ class TemporalWeakSegLoss(nn.Module):
         focal_scale_weight: float = 1.0,
         focal_ratio_weight: float = 10.0,
         curriculum_enabled: bool = False,
-        curriculum_scale_epochs: int = 20,
+        curriculum_phase_epochs: int = 10,
         curriculum_fade_epochs: int = 30,
     ):
         super().__init__()
@@ -117,8 +104,9 @@ class TemporalWeakSegLoss(nn.Module):
         self.phase_weight = phase_weight
         
         self.curriculum_enabled = curriculum_enabled
-        self.scale_phase_epochs = curriculum_scale_epochs
+        self.phase_only_epochs = curriculum_phase_epochs
         self.fade_phase_epochs = curriculum_fade_epochs
+        self.max_focal_scale_weight = focal_scale_weight
         self.max_focal_ratio_weight = focal_ratio_weight
         
         self.dice_func = DiceCELoss(sigmoid=True, reduction='mean')
@@ -134,15 +122,18 @@ class TemporalWeakSegLoss(nn.Module):
         if not self.curriculum_enabled:
             return
             
-        if epoch <= self.scale_phase_epochs:
+        if epoch <= self.phase_only_epochs:
+            self.vol_loss_func.scale_weight = 0.0
             self.vol_loss_func.ratio_weight = 0.0
-        elif epoch <= self.scale_phase_epochs + self.fade_phase_epochs:
-            progress = (epoch - self.scale_phase_epochs) / self.fade_phase_epochs
+        elif epoch <= self.phase_only_epochs + self.fade_phase_epochs:
+            progress = (epoch - self.phase_only_epochs) / self.fade_phase_epochs
+            self.vol_loss_func.scale_weight = self.max_focal_scale_weight * progress
             self.vol_loss_func.ratio_weight = self.max_focal_ratio_weight * progress
         else:
+            self.vol_loss_func.scale_weight = self.max_focal_scale_weight
             self.vol_loss_func.ratio_weight = self.max_focal_ratio_weight
             
-        logger.info(f"[Epoch {epoch}] Curriculum schedule: set PolarFocal ratio_weight to {self.vol_loss_func.ratio_weight:.2f}")
+        logger.info(f"[Epoch {epoch}] Curriculum schedule: set PolarFocal scale_weight to {self.vol_loss_func.scale_weight:.2f}, ratio_weight to {self.vol_loss_func.ratio_weight:.2f}")
 
     def forward(
         self,

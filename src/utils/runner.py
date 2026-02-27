@@ -293,8 +293,8 @@ def get_criterions(cfg):
             focal_scale_weight=focal_cfg.get('scale_weight', 1.0),
             focal_ratio_weight=focal_cfg.get('ratio_weight', 10.0),
             curriculum_enabled=curriculum_cfg.get('enabled', False),
-            curriculum_scale_epochs=curriculum_cfg.get('scale_phase_epochs', 20),
-            curriculum_fade_epochs=curriculum_cfg.get('fade_phase_epochs', 30),
+            curriculum_phase_epochs=curriculum_cfg.get('phase_epochs', 10),
+            curriculum_fade_epochs=curriculum_cfg.get('fade_epochs', 30),
         )
 
         distill_cfg = cfg.get('loss', {}).get('distillation', {})
